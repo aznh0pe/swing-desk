@@ -181,6 +181,19 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
     out, near = [], []
     cap_left = int(settings.get("max_open_positions", P["risk"]["max_open"])) - f["open_count"]
     cash_left = f["cash"]
+    # sector concentration: correlated dips in one sector behave like one big position
+    def sector_of(tk):
+        if tk in universe.index:
+            u = universe.loc[tk]
+            sec = u["sector"] if isinstance(u["sector"], str) else None
+            return sec or (u["name"] if u["type"] != "stock" else None)
+        return None
+    sec_count = {}
+    for v in state["trades"].values():
+        if v["doc"].get("status") == "open":
+            sc = sector_of(v["doc"].get("ticker"))
+            if sc:
+                sec_count[sc] = sec_count.get(sc, 0) + 1
     for cd in ranked:
         hold = int(cd["sp"]["max_hold"])
         conflict, e_next = earnings_conflict(cd["ticker"], earnings, session_day, hold)
@@ -223,6 +236,12 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
             "partial_bar": bool(partial_bar),
         }
         if cd["grade"] == "A+":
+            sc = sector_of(cd["ticker"])
+            if sc and sec_count.get(sc, 0) >= 2:
+                doc["size_note"] = ((doc.get("size_note") or "") + f" Sector check: {sec_count[sc]} positions/setups "
+                                    f"already in {sc}; taking more adds correlated risk.").strip()
+            if sc:
+                sec_count[sc] = sec_count.get(sc, 0) + 1
             if cap_left <= 0:
                 doc["capacity_note"] = ("Max open positions reached. Only take this if it beats your "
                                         "weakest open trade (score/win%), or if a position exits first.")
