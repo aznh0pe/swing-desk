@@ -1,0 +1,874 @@
+<title>Swing Desk</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,500..800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: a trading blotter. Sticky desk bar + tab strip, dense tables, order-ticket cards with a price ladder. */
+:root {
+  --bg: #f2f4f7; --surface: #ffffff; --surface-2: #eaeef3; --ink: #0f1720; --ink-2: #445063; --ink-3: #657084;
+  --line: #d9dee6; --line-2: #c7ced9; --accent: #1d3c6e; --accent-ink: #ffffff; --accent-soft: #e3eaf6;
+  --brass: #9a6412; --brass-soft: #f6ecd9;
+  --series: #2a78d6; --series-soft: rgba(42,120,214,.12); --loss: #e34948; --loss-soft: rgba(227,73,72,.12);
+  --good: #0a7d0a; --good-bg: #e3f3e3; --warn: #8a5a00; --warn-bg: #fbf0d6; --crit: #b42e2e; --crit-bg: #f9e3e3;
+  --info: #23518f; --info-bg: #e4ecf8;
+  --f-display: "Archivo", "Arial Narrow", "Helvetica Neue", Arial, sans-serif;
+  --f-body: "IBM Plex Sans", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --r: 8px; --r-sm: 5px;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0d1117; --surface: #151b24; --surface-2: #1c2430; --ink: #e8edf4; --ink-2: #b4becc; --ink-3: #8f9aab;
+  --line: #29323f; --line-2: #36414f; --accent: #9dbcf5; --accent-ink: #0d1117; --accent-soft: #1f2c42;
+  --brass: #e2a84c; --brass-soft: #33281a;
+  --series: #3987e5; --series-soft: rgba(57,135,229,.18); --loss: #e66767; --loss-soft: rgba(230,103,103,.18);
+  --good: #4cc24c; --good-bg: #16301a; --warn: #f0b545; --warn-bg: #33290f; --crit: #ef7777; --crit-bg: #3a1a1c;
+  --info: #9dbcf5; --info-bg: #1a2638; color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --bg: #0d1117; --surface: #151b24; --surface-2: #1c2430; --ink: #e8edf4; --ink-2: #b4becc; --ink-3: #8f9aab;
+  --line: #29323f; --line-2: #36414f; --accent: #9dbcf5; --accent-ink: #0d1117; --accent-soft: #1f2c42;
+  --brass: #e2a84c; --brass-soft: #33281a;
+  --series: #3987e5; --series-soft: rgba(57,135,229,.18); --loss: #e66767; --loss-soft: rgba(230,103,103,.18);
+  --good: #4cc24c; --good-bg: #16301a; --warn: #f0b545; --warn-bg: #33290f; --crit: #ef7777; --crit-bg: #3a1a1c;
+  --info: #9dbcf5; --info-bg: #1a2638; color-scheme: dark; }
+
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font-family: var(--f-body); font-size: 14px; line-height: 1.45; }
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--surface); }
+.num, .mono, td.n, .tnum { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
+h1, h2, h3 { font-family: var(--f-display); font-stretch: 82%; text-wrap: balance; margin: 0; letter-spacing: .005em; }
+h2 { font-size: 19px; font-weight: 700; }
+h3 { font-size: 15px; font-weight: 700; }
+a { color: var(--accent); }
+button, input, select, textarea { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.wrap { max-width: 1200px; margin: 0 auto; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.deskbar { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 9; background: var(--surface); border-bottom: 1px solid var(--line); }
+.deskbar .wrap { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; padding-block: 10px 0; }
+.brand { display: flex; align-items: baseline; gap: 10px; margin-right: auto; }
+.brand h1 { font-size: 22px; font-weight: 800; font-stretch: 75%; letter-spacing: .01em; text-transform: uppercase; }
+.brand .sub { color: var(--ink-3); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.chip { display: inline-flex; flex-direction: column; padding: 4px 10px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface); min-width: 0; }
+.chip .k { font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-3); }
+.chip .v { font-family: var(--f-mono); font-variant-numeric: tabular-nums; font-size: 14px; font-weight: 600; }
+.btn { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line-2); background: var(--surface); padding: 7px 12px; border-radius: var(--r-sm); cursor: pointer; font-weight: 500; white-space: nowrap; }
+.btn:hover { background: var(--surface-2); }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.small { padding: 4px 9px; font-size: 13px; }
+.btn.ghost { border-color: transparent; background: transparent; color: var(--ink-2); }
+.btn:disabled { opacity: .55; cursor: not-allowed; }
+.tabs { display: flex; gap: 2px; overflow-x: auto; width: 100%; margin-top: 4px; scrollbar-width: none; }
+.tabs button { border: 0; background: none; padding: 10px 12px 11px; cursor: pointer; color: var(--ink-2); font-weight: 500; border-bottom: 2px solid transparent; white-space: nowrap; }
+.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+.tabs .count { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 5px; border-radius: 9px; background: var(--brass-soft); color: var(--brass); font-size: 11.5px; font-family: var(--f-mono); text-align: center; }
+
+main.wrap { padding-block: 18px 60px; display: flex; flex-direction: column; gap: 18px; }
+.section { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.section-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; }
+.section-head .meta { color: var(--ink-3); font-size: 12.5px; }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); padding: 14px; min-width: 0; }
+.grid { display: grid; gap: 12px; }
+.g-kpi { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.g-2 { grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); }
+.g-tickets { grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); align-items: start; }
+@media (max-width: 860px) { .g-2 { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 420px) { .g-tickets { grid-template-columns: minmax(0, 1fr); } }
+.kpi { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); padding: 11px 13px; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.kpi .k { font-size: 11px; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-3); }
+.kpi .v { font-family: var(--f-mono); font-variant-numeric: tabular-nums; font-size: 20px; font-weight: 600; }
+.kpi .s { color: var(--ink-3); font-size: 12px; }
+.muted { color: var(--ink-3); }
+.small { font-size: 12.5px; }
+.pill { display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+.pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.pill.good { color: var(--good); background: var(--good-bg); }
+.pill.warn { color: var(--warn); background: var(--warn-bg); }
+.pill.crit { color: var(--crit); background: var(--crit-bg); }
+.pill.info { color: var(--info); background: var(--info-bg); }
+.pill.neutral { color: var(--ink-2); background: var(--surface-2); }
+.seg { display: inline-flex; border: 1px solid var(--line-2); border-radius: var(--r-sm); overflow: hidden; }
+.seg button { border: 0; background: var(--surface); padding: 5px 11px; cursor: pointer; color: var(--ink-2); }
+.seg button[aria-pressed="true"] { background: var(--accent-soft); color: var(--ink); font-weight: 600; }
+
+/* tables */
+.tbl-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th { text-align: left; font-weight: 600; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; background: var(--surface); }
+td { padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+td.n, th.n { text-align: right; white-space: nowrap; }
+td .t { font-family: var(--f-display); font-stretch: 85%; font-weight: 700; font-size: 14px; letter-spacing: .02em; }
+.pos { color: var(--ink); } .neg { color: var(--ink); }
+.sign-up::before { content: "▲ "; color: var(--series); font-size: 9px; }
+.sign-dn::before { content: "▼ "; color: var(--loss); font-size: 9px; }
+
+/* order tickets */
+.ticket { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); display: flex; flex-direction: column; min-width: 0; }
+.ticket.overcap { border-style: dashed; }
+.t-head { display: flex; gap: 12px; padding: 12px 14px 10px; align-items: flex-start; border-bottom: 1px dashed var(--line-2); }
+.stamp { flex: none; display: grid; place-items: center; width: 48px; height: 48px; border: 2px solid var(--brass); color: var(--brass); background: var(--brass-soft); border-radius: 6px; font-family: var(--f-display); font-weight: 800; font-stretch: 70%; font-size: 22px; line-height: 1; transform: rotate(-4deg); }
+.stamp.a { border-color: var(--line-2); color: var(--ink-2); background: var(--surface-2); }
+.t-title { min-width: 0; flex: 1; }
+.t-title .tk { font-family: var(--f-display); font-weight: 800; font-stretch: 78%; font-size: 24px; letter-spacing: .02em; line-height: 1.05; }
+.t-title .nm { color: var(--ink-2); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.t-title .st { margin-top: 3px; font-size: 12.5px; color: var(--ink-2); }
+.t-odds { text-align: right; flex: none; }
+.t-odds .big { font-family: var(--f-mono); font-variant-numeric: tabular-nums; font-size: 20px; font-weight: 600; }
+.t-odds .lbl { font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-3); }
+.t-body { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 12px; padding: 12px 14px; }
+.ladder { width: 34px; height: 116px; }
+.levels { display: grid; grid-template-columns: auto 1fr auto; gap: 4px 10px; align-items: baseline; }
+.levels .lk { font-size: 11px; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-3); }
+.levels .lv { font-family: var(--f-mono); font-variant-numeric: tabular-nums; font-weight: 600; font-size: 15px; }
+.levels .ld { font-family: var(--f-mono); font-size: 12px; color: var(--ink-3); text-align: right; }
+.t-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid var(--line); }
+.t-facts > div { padding: 8px 14px; border-right: 1px solid var(--line); min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.t-facts > div:last-child { border-right: 0; }
+.t-facts .k { font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-3); }
+.t-facts .v { font-family: var(--f-mono); font-variant-numeric: tabular-nums; font-weight: 600; }
+.t-notes { padding: 10px 14px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--ink-2); }
+.t-notes b { color: var(--ink); font-weight: 600; }
+.t-notes ul { margin: 0; padding-left: 18px; }
+.t-actions { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 14px 12px; border-top: 1px solid var(--line); align-items: center; }
+.note-strip { padding: 7px 14px; font-size: 12.5px; border-top: 1px solid var(--line); background: var(--warn-bg); color: var(--warn); }
+
+/* action alerts */
+.act { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px; align-items: start; background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--line-2); border-radius: var(--r); padding: 11px 13px; }
+.act.alert { border-left-color: var(--crit); } .act.good { border-left-color: var(--good); } .act.info { border-left-color: var(--info); }
+.act .tk { font-family: var(--f-display); font-weight: 800; font-stretch: 78%; font-size: 19px; }
+.act .what { font-weight: 600; }
+.act .why { color: var(--ink-2); font-size: 13px; }
+.act .btns { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+@media (max-width: 600px) { .act { grid-template-columns: minmax(0, 1fr); } .act .btns { justify-content: flex-start; } }
+
+.empty { border: 1px dashed var(--line-2); border-radius: var(--r); padding: 18px; color: var(--ink-2); background: var(--surface); }
+.empty b { color: var(--ink); }
+.banner { border-radius: var(--r); padding: 10px 13px; font-size: 13px; }
+.banner.warn { background: var(--warn-bg); color: var(--warn); }
+.banner.info { background: var(--info-bg); color: var(--info); }
+.banner.crit { background: var(--crit-bg); color: var(--crit); }
+
+/* charts */
+.chart { position: relative; width: 100%; }
+.chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+.chart text { fill: var(--ink-3); font-family: var(--f-mono); font-size: 10.5px; }
+.chart .grid line { stroke: var(--line); stroke-width: 1; }
+.chart .axis line { stroke: var(--line-2); }
+.tip { position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--line-2); border-radius: var(--r-sm); padding: 6px 9px; font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,.12); white-space: nowrap; z-index: 3; }
+.tip .k { color: var(--ink-3); }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--ink-2); }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+
+/* forms + modal */
+.form { display: grid; gap: 10px; }
+.form .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+label.f { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--ink-2); font-weight: 500; }
+input[type=number], input[type=text], input[type=date], select, textarea { background: var(--surface); border: 1px solid var(--line-2); border-radius: var(--r-sm); padding: 7px 9px; width: 100%; min-width: 0; font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
+textarea { font-family: var(--f-body); min-height: 60px; }
+.modal-back { position: fixed; inset: 0; background: rgba(10, 14, 20, .5); display: grid; place-items: center; z-index: 20; padding: max(16px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) max(16px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); }
+.modal { background: var(--surface); border: 1px solid var(--line-2); border-radius: 10px; width: min(520px, 100%); max-height: 90vh; overflow: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.modal .foot { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(18px + env(safe-area-inset-bottom, 0px)); background: var(--ink); color: var(--surface); padding: 9px 14px; border-radius: 8px; font-size: 13px; z-index: 30; max-width: calc(100% - 32px); }
+details summary { cursor: pointer; color: var(--accent); font-weight: 500; }
+pre.digest { white-space: pre-wrap; font-family: var(--f-mono); font-size: 12px; background: var(--surface-2); padding: 10px; border-radius: var(--r-sm); margin: 8px 0 0; overflow-x: auto; }
+.strat { display: flex; flex-direction: column; gap: 8px; }
+.strat .row { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(92px, 1fr)); gap: 8px; }
+.stats div { background: var(--surface-2); border-radius: var(--r-sm); padding: 6px 8px; }
+.stats .k { font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); }
+.stats .v { font-family: var(--f-mono); font-variant-numeric: tabular-nums; font-weight: 600; }
+.timeline { display: flex; flex-direction: column; }
+.timeline .ev { display: grid; grid-template-columns: 128px minmax(0, 1fr) auto; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.timeline .ev:last-child { border-bottom: 0; }
+@media (max-width: 600px) { .timeline .ev { grid-template-columns: minmax(0, 1fr) auto; } .timeline .ev .when { grid-column: 1 / -1; } }
+.disclaimer { color: var(--ink-3); font-size: 12px; max-width: 75ch; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+
+<header class="deskbar">
+  <div class="wrap">
+    <div class="brand"><h1>Swing Desk</h1><span class="sub">A+ setups only</span></div>
+    <div class="chips" id="chips"></div>
+    <button class="btn primary" id="scanBtn" type="button" title="Run a market scan now">Scan now</button>
+    <nav class="tabs" role="tablist" id="tabs"></nav>
+  </div>
+</header>
+<main class="wrap" id="main"></main>
+<div id="modalRoot"></div>
+
+<script>
+(() => {
+"use strict";
+// ---------------------------------------------------------------- state
+const S = { settings: null, alerts: [], trades: [], ledger: [], scans: [], journal: [], params: null, backtest: null,
+  loaded: {}, db: null, mcp: null, user: null, canWrite: true, tab: "overview", perf: "month", logFilter: "all", dbError: null };
+const TABS = [["overview", "Overview"], ["alerts", "Alerts"], ["log", "Trade log"], ["funds", "Funds & income"], ["scans", "Scans"], ["lab", "Strategy lab"]];
+const SCHEDULE = [
+  { when: "5:50 AM PT", days: "Mon–Fri", what: "Pre-market check", detail: "Re-checks today's orders against overnight news and pre-market gaps; warns before the 6:30 open." },
+  { when: "12:25 PM PT", days: "Mon–Fri", what: "Pre-close exit scan", detail: "Live prices 35 min before the close: exit-at-close signals, time stops, earnings risk, buy-at-close setups." },
+  { when: "2:05 PM PT", days: "Mon–Fri", what: "Post-close setup scan", detail: "Final daily bars: tomorrow's A+ setups with limit entry, stop and target to place tonight." },
+  { when: "3:12 PM PT", days: "Mon–Fri", what: "Daily learning review", detail: "Grades every alert against what the market did, updates win-rate estimates, writes the journal." },
+  { when: "10:14 AM PT", days: "Saturday", what: "Weekly recalibration", detail: "Re-runs the backtests on fresh history and re-fits the win-probability models." },
+];
+const HOLIDAYS = new Set(["2025-01-01","2025-01-09","2025-01-20","2025-02-17","2025-04-18","2025-05-26","2025-06-19","2025-07-04","2025-09-01","2025-11-27","2025-12-25",
+  "2026-01-01","2026-01-19","2026-02-16","2026-04-03","2026-05-25","2026-06-19","2026-07-03","2026-09-07","2026-11-26","2026-12-25",
+  "2027-01-01","2027-01-18","2027-02-15","2027-03-26","2027-05-31","2027-06-18","2027-07-05","2027-09-06","2027-11-25","2027-12-24",
+  "2028-01-17","2028-02-21","2028-04-14","2028-05-29","2028-06-19","2028-07-04","2028-09-04","2028-11-23","2028-12-25"]);
+
+// ---------------------------------------------------------------- utils
+const $ = (s, el = document) => el.querySelector(s);
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : null; };
+const money = (v, d = 2) => { const n = num(v); if (n === null) return "–"; return (n < 0 ? "−$" : "$") + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d }); };
+const smoney = (v) => { const n = num(v); if (n === null) return "–"; return (n > 0 ? "+" : n < 0 ? "−" : "") + "$" + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); };
+const pct = (v, d = 1) => { const n = num(v); return n === null ? "–" : n.toFixed(d) + "%"; };
+const spct = (v, d = 1) => { const n = num(v); return n === null ? "–" : (n > 0 ? "+" : n < 0 ? "−" : "") + Math.abs(n).toFixed(d) + "%"; };
+const px = (v) => { const n = num(v); return n === null ? "–" : "$" + n.toFixed(2); };
+const signCls = (v) => (num(v) > 0 ? "sign-up" : num(v) < 0 ? "sign-dn" : "");
+const fmtPT = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles", year: "numeric", month: "2-digit", day: "2-digit" });
+const todayPT = () => fmtPT.format(new Date());
+const nowIso = () => new Date().toISOString();
+function dShort(d) { if (!d) return "–"; const t = new Date(String(d).slice(0, 10) + "T12:00:00"); return isNaN(t) ? esc(d) : t.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }); }
+function dtShort(iso) { if (!iso) return "–"; const t = new Date(iso); return isNaN(t) ? esc(iso) : t.toLocaleString("en-US", { timeZone: "America/Los_Angeles", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) + " PT"; }
+function isTradingDay(s) { const t = new Date(s + "T12:00:00"); const wd = t.getDay(); return wd !== 0 && wd !== 6 && !HOLIDAYS.has(s); }
+function addDays(s, n) { const t = new Date(s + "T12:00:00"); t.setDate(t.getDate() + n); return t.toISOString().slice(0, 10); }
+function tradingDaysBetween(a, b) { if (!a || !b || b <= a) return 0; let n = 0, d = a; while (d < b) { d = addDays(d, 1); if (isTradingDay(d)) n++; } return n; }
+function heldDays(t, end) { const e = end || todayPT(); return tradingDaysBetween(t.entry_date, e) + (isTradingDay(t.entry_date) ? 1 : 0); }
+const fmtHM = new Intl.DateTimeFormat("en-GB", { timeZone: "America/Los_Angeles", hour: "2-digit", minute: "2-digit", hour12: false });
+function entryLive(a) {
+  if (a.type !== "entry") return false;
+  if (a.status === "placed") return true;
+  if (a.status !== "new") return false;
+  const t = todayPT();
+  if (!a.valid_for || a.valid_for > t) return true;
+  if (a.valid_for < t) return false;
+  return fmtHM.format(new Date()) < "13:00";
+}
+function uid(prefix) { return prefix + "_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+function monthKey(d) { return String(d || "").slice(0, 7); }
+function quarterOf(d) { const y = +d.slice(0, 4), m = +d.slice(5, 7); return y + "-Q" + (Math.floor((m - 1) / 3) + 1); }
+function toast(msg, ms = 4200) { const t = document.createElement("div"); t.className = "toast"; t.textContent = msg; t.setAttribute("role", "status"); document.body.appendChild(t); setTimeout(() => t.remove(), ms); }
+function settings() { return Object.assign({ initial_balance: 5000, income_default_pct: 30, max_open_positions: 5, risk_pct: 1.25, max_position_pct: 25 }, S.settings || {}); }
+
+// ---------------------------------------------------------------- derived numbers
+function funds() {
+  const st = settings();
+  const hasInitial = S.ledger.some((l) => l.type === "initial");
+  const parts = { initial: hasInitial ? 0 : Number(st.initial_balance) || 0, deposit: 0, withdrawal: 0, pnl: 0, income: 0 };
+  for (const l of S.ledger) { const a = num(l.amount) || 0; if (l.type in parts) parts[l.type] += a; }
+  const capital = parts.initial + parts.deposit + parts.withdrawal + parts.pnl + parts.income;
+  const open = S.trades.filter((t) => t.status === "open");
+  const openCost = open.reduce((s, t) => s + (num(t.entry_price) || 0) * (num(t.shares) || 0), 0);
+  const marks = latestMarks();
+  const unreal = open.reduce((s, t) => s + (num(marks[t.id]?.unrealized) || 0), 0);
+  return { ...parts, capital, openCost, cash: capital - openCost, unreal, equity: capital + unreal, open };
+}
+function latestMarks() {
+  const out = {};
+  for (const sc of S.scans) { for (const p of sc.positions || []) { if (!out[p.trade_id]) out[p.trade_id] = { ...p, scan_at: sc.started_at }; } }
+  return out;
+}
+function closedTrades() { return S.trades.filter((t) => t.status === "closed" && num(t.exit_price) !== null).sort((a, b) => String(a.exit_date).localeCompare(String(b.exit_date))); }
+function statsOf(list) {
+  const n = list.length; if (!n) return { n: 0 };
+  const pnl = list.reduce((s, t) => s + (num(t.pnl) || 0), 0);
+  const wins = list.filter((t) => num(t.pnl) > 0), losses = list.filter((t) => num(t.pnl) <= 0);
+  const gw = wins.reduce((s, t) => s + num(t.pnl), 0), gl = -losses.reduce((s, t) => s + (num(t.pnl) || 0), 0);
+  const income = list.reduce((s, t) => s + (num(t.income_amount) || 0), 0);
+  const avgPct = list.reduce((s, t) => s + (num(t.pnl_pct) || 0), 0) / n;
+  return { n, pnl, wins: wins.length, winRate: (100 * wins.length) / n, pf: gl > 0 ? gw / gl : null, avgWin: wins.length ? gw / wins.length : 0,
+    avgLoss: losses.length ? -gl / losses.length : 0, income, avgPct, avgHold: list.reduce((s, t) => s + (num(t.days_held) || 0), 0) / n };
+}
+
+// ---------------------------------------------------------------- render shell
+function renderTabs() {
+  const newEntries = S.alerts.filter((a) => entryLive(a) && a.status === "new").length;
+  const actions = S.alerts.filter((a) => (a.type === "exit" || a.type === "adjust") && a.status === "new").length;
+  $("#tabs").innerHTML = TABS.map(([k, l]) => {
+    const c = k === "alerts" && (newEntries + actions) ? `<span class="count">${newEntries + actions}</span>` : "";
+    return `<button role="tab" type="button" id="tab-${k}" aria-selected="${S.tab === k}" data-tab="${k}">${l}${c}</button>`;
+  }).join("");
+}
+function renderChips() {
+  const f = funds(); const st = settings(); const last = S.scans[0];
+  const scanPill = last ? `<span class="pill ${last.status === "ok" ? "good" : last.status === "failed" ? "crit" : "warn"}">${esc(modeLabel(last.mode))} · ${dtShort(last.started_at)}</span>` : `<span class="pill neutral">No scans yet</span>`;
+  $("#chips").innerHTML = `
+    <div class="chip"><span class="k">Capital</span><span class="v">${money(f.capital)}</span></div>
+    <div class="chip"><span class="k">Cash free</span><span class="v">${money(f.cash)}</span></div>
+    <div class="chip"><span class="k">Open</span><span class="v">${f.open.length}/${esc(st.max_open_positions)}</span></div>
+    <div class="chip"><span class="k">Last scan</span><span class="v" style="font-family:var(--f-body);font-size:13px">${scanPill}</span></div>`;
+  const b = $("#scanBtn"); const tid = st.manual_trigger_id;
+  b.disabled = !tid || !S.mcp;
+  b.title = !tid ? "Scans are being scheduled; the button turns on once they are." : !S.mcp ? "Open this page in claude.ai to run a scan from here." : "Run a market scan now";
+}
+function modeLabel(m) { return { premarket: "Pre-market", preclose: "Pre-close", postclose: "Post-close", learning: "Learning", weekly: "Recalibration", manual: "Manual" }[m] || m || "Scan"; }
+function render() {
+  renderTabs(); renderChips();
+  const m = $("#main");
+  const banner = S.dbError ? `<div class="banner crit">${esc(S.dbError)}</div>` : "";
+  const v = { overview: viewOverview, alerts: viewAlerts, log: viewLog, funds: viewFunds, scans: viewScans, lab: viewLab }[S.tab]();
+  m.innerHTML = banner + v + `<p class="disclaimer">Signals come from rules-based models tested on historical data. They are not personalized financial advice, and win percentages are estimates that can be wrong. You place and manage every order yourself.</p>`;
+  postRender();
+}
+let postRenderHooks = [];
+function postRender() { const hooks = postRenderHooks; postRenderHooks = []; hooks.forEach((h) => { try { h(); } catch (e) { console.error(e); } }); }
+
+// ---------------------------------------------------------------- overview
+function viewOverview() {
+  const f = funds(); const all = closedTrades(); const today = todayPT();
+  const mtd = statsOf(all.filter((t) => monthKey(t.exit_date) === today.slice(0, 7)));
+  const qtd = statsOf(all.filter((t) => quarterOf(String(t.exit_date)) === quarterOf(today)));
+  const hist = statsOf(all);
+  const st = settings();
+  const ret = (f.capital - (num(st.initial_balance) || 5000) - f.deposit - f.withdrawal);
+  const sel = { month: mtd, qtd: qtd, all: hist }[S.perf];
+  const selLabel = { month: "This month", qtd: "Quarter to date", all: "All time" }[S.perf];
+  const last = S.scans[0];
+  let html = `<section class="section"><div class="section-head"><h2>Portfolio</h2><span class="meta">Started with ${money(st.initial_balance)} · sizing uses trading capital after income withdrawals</span></div>
+  <div class="grid g-kpi">
+    ${kpi("Trading capital", money(f.capital), `Equity incl. open P&L ${money(f.equity)}`)}
+    ${kpi("Cash free for new trades", money(f.cash), `${money(f.openCost)} in ${f.open.length} open position${f.open.length === 1 ? "" : "s"}`)}
+    ${kpi("Net trading result", smoney(ret), `Realized ${smoney(f.pnl)} · income taken ${money(-f.income)}`)}
+    ${kpi("Win rate (all time)", hist.n ? pct(hist.winRate) : "–", hist.n ? `${hist.wins} of ${hist.n} closed trades` : "No closed trades yet")}
+    ${kpi("Profit factor", hist.pf ? hist.pf.toFixed(2) : (hist.n ? "∞" : "–"), "Gross wins ÷ gross losses")}
+    ${kpi("Open P&L", smoney(f.unreal), last ? `Marked at ${dtShort(last.started_at)}` : "Marks arrive with the first scan")}
+  </div></section>`;
+  html += `<section class="section"><div class="section-head"><h2>Performance</h2>
+    <div class="seg" role="group" aria-label="Period">${[["month", "Monthly"], ["qtd", "QTD"], ["all", "Historical"]].map(([k, l]) => `<button type="button" data-perf="${k}" aria-pressed="${S.perf === k}">${l}</button>`).join("")}</div>
+    <span class="meta">${selLabel}</span></div>
+    <div class="grid g-kpi">
+      ${kpi("Realized P&L", smoney(sel.pnl || 0), sel.n ? `${sel.n} closed trade${sel.n === 1 ? "" : "s"}` : "No closed trades in this period")}
+      ${kpi("Win rate", sel.n ? pct(sel.winRate) : "–", sel.n ? `${sel.wins} wins · ${sel.n - sel.wins} losses` : "")}
+      ${kpi("Avg win / avg loss", sel.n ? `${money(sel.avgWin, 0)} / ${money(sel.avgLoss, 0)}` : "–", sel.n ? `Avg trade ${spct(sel.avgPct)}` : "")}
+      ${kpi("Income taken", money(sel.income || 0), "From profitable trades")}
+      ${kpi("Avg hold", sel.n ? `${sel.avgHold.toFixed(1)} days` : "–", "Trading days")}
+    </div>
+    <div class="grid g-2">
+      <div class="panel"><div class="section-head"><h3>Trading capital over time</h3><span class="meta">Every fund change, P&L and income withdrawal</span></div><div class="chart" id="eqChart"></div></div>
+      <div class="panel"><div class="section-head"><h3>Monthly realized P&L</h3></div><div class="chart" id="moChart"></div>
+        <div class="legend" style="margin-top:6px"><span><i style="background:var(--series)"></i>Gain month</span><span><i style="background:var(--loss)"></i>Loss month</span></div></div>
+    </div>
+    ${monthlyTable(all)}
+  </section>`;
+  html += `<section class="section"><div class="section-head"><h2>By strategy</h2><span class="meta">Your real fills</span></div>${strategyTable(all)}</section>`;
+  html += `<section class="section"><div class="section-head"><h2>Latest scan</h2>${last ? `<span class="meta">${esc(modeLabel(last.mode))} · ${dtShort(last.started_at)}</span>` : ""}</div>${last ? scanSummary(last) : `<div class="empty"><b>No scans have run yet.</b> The first scan writes the market regime, A+ setups and position marks here.</div>`}</section>`;
+  postRenderHooks.push(drawEquity, drawMonthly);
+  return html;
+}
+function kpi(k, v, s) { return `<div class="kpi"><span class="k">${k}</span><span class="v">${v}</span>${s ? `<span class="s">${s}</span>` : ""}</div>`; }
+function monthlyTable(all) {
+  const by = {};
+  for (const t of all) { const k = monthKey(t.exit_date); (by[k] = by[k] || []).push(t); }
+  const keys = Object.keys(by).sort().reverse();
+  if (!keys.length) return `<div class="empty"><b>Monthly results appear after your first closed trade.</b> Mark an alert as done when your order fills, then close it when you sell.</div>`;
+  return `<div class="tbl-wrap"><table><thead><tr><th>Month</th><th class="n">Trades</th><th class="n">Win rate</th><th class="n">Realized P&L</th><th class="n">Income taken</th><th class="n">Kept in account</th><th class="n">Profit factor</th></tr></thead><tbody>
+  ${keys.map((k) => { const s = statsOf(by[k]); return `<tr><td>${new Date(k + "-15T12:00:00").toLocaleDateString("en-US", { month: "long", year: "numeric" })}</td><td class="n">${s.n}</td><td class="n">${pct(s.winRate)}</td><td class="n ${signCls(s.pnl)}">${smoney(s.pnl)}</td><td class="n">${money(s.income)}</td><td class="n">${smoney(s.pnl - s.income)}</td><td class="n">${s.pf ? s.pf.toFixed(2) : s.n ? "∞" : "–"}</td></tr>`; }).join("")}
+  </tbody></table></div>`;
+}
+function strategyTable(all) {
+  const by = {};
+  for (const t of all) { const k = t.strategy_label || t.strategy || "Manual"; (by[k] = by[k] || []).push(t); }
+  const keys = Object.keys(by);
+  if (!keys.length) return `<div class="empty">Per-strategy results fill in as trades close. Backtest results for every strategy are in the Strategy lab tab.</div>`;
+  return `<div class="tbl-wrap"><table><thead><tr><th>Strategy</th><th class="n">Trades</th><th class="n">Win rate</th><th class="n">Avg trade</th><th class="n">Realized P&L</th><th class="n">Profit factor</th></tr></thead><tbody>
+  ${keys.map((k) => { const s = statsOf(by[k]); return `<tr><td>${esc(k)}</td><td class="n">${s.n}</td><td class="n">${pct(s.winRate)}</td><td class="n">${spct(s.avgPct)}</td><td class="n ${signCls(s.pnl)}">${smoney(s.pnl)}</td><td class="n">${s.pf ? s.pf.toFixed(2) : "∞"}</td></tr>`; }).join("")}
+  </tbody></table></div>`;
+}
+function scanSummary(sc) {
+  const m = sc.market || {}; const c = sc.counts || {}; const d = sc.data || {};
+  const pill = d.status === "ok" ? `<span class="pill good">Data current</span>` : d.status ? `<span class="pill warn">Data ${esc(d.status)}</span>` : "";
+  return `<div class="panel"><div class="grid g-kpi" style="margin-bottom:10px">
+    ${kpi("Market regime", esc(m.label || "–"), m.spy ? `SPY ${esc(m.spy)} · ${spct(m.spy_vs_200d_pct)} vs 200-day` : "")}
+    ${kpi("Breadth", m.breadth_above_50d_pct != null ? pct(m.breadth_above_50d_pct, 0) : "–", "Stocks above their 50-day")}
+    ${kpi("VIX", m.vix != null ? esc(m.vix) : "–", m.vix_vs_20d ? `${esc(m.vix_vs_20d)}× its 20-day average` : "")}
+    ${kpi("A+ setups", esc(c.aplus ?? 0), `${esc(c.week_aplus ?? 0)} this week`)}
+    ${kpi("Exit alerts", esc(c.exit_alerts ?? 0), `${esc(c.open_positions ?? 0)} positions checked`)}
+  </div><div class="small muted">${pill} Last bar ${esc(d.last_bar || "–")}${d.partial_bar ? " (live intraday prices)" : ""} · ${esc(d.tickers || "–")} tickers scanned${(d.notes || []).length ? " · " + esc(d.notes.join(" ")) : ""}</div></div>`;
+}
+
+// ---------------------------------------------------------------- charts
+function equitySeries() {
+  const st = settings();
+  const ev = S.ledger.map((l) => ({ date: String(l.date || l.created_at || "").slice(0, 10), amt: num(l.amount) || 0, type: l.type, note: l.note || l.ticker || "" })).filter((e) => e.date);
+  if (!S.ledger.some((l) => l.type === "initial")) ev.push({ date: (S.settings?.created_at || todayPT()).slice(0, 10), amt: num(st.initial_balance) || 5000, type: "initial" });
+  ev.sort((a, b) => a.date.localeCompare(b.date) || (a.type === "initial" ? -1 : 1));
+  let bal = 0; const pts = [];
+  for (const e of ev) { bal += e.amt; const lastPt = pts[pts.length - 1]; if (lastPt && lastPt.date === e.date) { lastPt.v = bal; lastPt.n++; } else pts.push({ date: e.date, v: bal, n: 1 }); }
+  if (pts.length && pts[pts.length - 1].date < todayPT()) pts.push({ date: todayPT(), v: bal, n: 0 });
+  return pts;
+}
+function niceTicks(lo, hi, n = 4) {
+  if (hi === lo) { hi = lo + 1; lo = lo - 1; }
+  const span = hi - lo, step0 = span / n, mag = Math.pow(10, Math.floor(Math.log10(step0)));
+  const step = [1, 2, 2.5, 5, 10].map((x) => x * mag).find((x) => span / x <= n) || 10 * mag;
+  const out = [], top = Math.ceil(hi / step - 1e-9) * step; for (let v = Math.floor(lo / step + 1e-9) * step; v <= top + 1e-9; v += step) out.push(+v.toFixed(6));
+  return out;
+}
+function drawEquity() {
+  const el = $("#eqChart"); if (!el) return;
+  const pts = equitySeries();
+  if (pts.length < 2) { el.innerHTML = `<div class="empty small">The curve starts once funds or trades change the balance. Starting capital: ${money(settings().initial_balance)}.</div>`; return; }
+  const W = 640, H = 220, L = 58, R = 12, T = 10, B = 26;
+  const t0 = +new Date(pts[0].date), t1 = +new Date(pts[pts.length - 1].date) || t0 + 1;
+  const vs = pts.map((p) => p.v); const ticks = niceTicks(Math.min(...vs), Math.max(...vs));
+  const y0 = ticks[0], y1 = ticks[ticks.length - 1];
+  const X = (d) => L + ((+new Date(d) - t0) / Math.max(1, t1 - t0)) * (W - L - R);
+  const Y = (v) => T + (1 - (v - y0) / Math.max(1e-9, y1 - y0)) * (H - T - B);
+  let path = ""; pts.forEach((p, i) => { const x = X(p.date), y = Y(p.v); if (i === 0) path += `M${x},${y}`; else path += `H${x}V${y}`; });
+  const area = path + `V${Y(y0)}H${X(pts[0].date)}Z`;
+  const xl = [pts[0], pts[Math.floor(pts.length / 2)], pts[pts.length - 1]];
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Trading capital over time">
+    <g class="grid">${ticks.map((t) => `<line x1="${L}" x2="${W - R}" y1="${Y(t)}" y2="${Y(t)}"/>`).join("")}</g>
+    ${ticks.map((t) => `<text x="${L - 8}" y="${Y(t) + 3.5}" text-anchor="end">$${Math.round(t).toLocaleString()}</text>`).join("")}
+    ${xl.map((p, i) => `<text x="${X(p.date)}" y="${H - 6}" text-anchor="${i === 0 ? "start" : i === 2 ? "end" : "middle"}">${p.date.slice(5)}</text>`).join("")}
+    <path d="${area}" fill="var(--series-soft)" stroke="none"/>
+    <path d="${path}" fill="none" stroke="var(--series)" stroke-width="2" stroke-linejoin="round"/>
+    <circle cx="${X(pts[pts.length - 1].date)}" cy="${Y(pts[pts.length - 1].v)}" r="4" fill="var(--series)" stroke="var(--surface)" stroke-width="2"/>
+    <line id="eqX" x1="0" x2="0" y1="${T}" y2="${H - B}" stroke="var(--ink-3)" stroke-dasharray="3 3" visibility="hidden"/>
+    <rect x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}" fill="transparent" id="eqHit"/>
+  </svg><div class="tip" id="eqTip" hidden></div>`;
+  const svg = el.querySelector("svg"), tip = $("#eqTip"), cross = $("#eqX");
+  const move = (ev) => {
+    const r = svg.getBoundingClientRect(); const sx = ((ev.clientX - r.left) / r.width) * W;
+    let best = pts[0]; for (const p of pts) if (Math.abs(X(p.date) - sx) < Math.abs(X(best.date) - sx)) best = p;
+    cross.setAttribute("x1", X(best.date)); cross.setAttribute("x2", X(best.date)); cross.setAttribute("visibility", "visible");
+    tip.hidden = false; tip.innerHTML = `<span class="k">${dShort(best.date)}</span><br><b class="num">${money(best.v)}</b>`;
+    const left = (X(best.date) / W) * r.width; tip.style.left = Math.min(Math.max(0, left - 50), r.width - 120) + "px"; tip.style.top = "0px";
+  };
+  $("#eqHit").addEventListener("pointermove", move);
+  $("#eqHit").addEventListener("pointerleave", () => { tip.hidden = true; cross.setAttribute("visibility", "hidden"); });
+}
+function drawMonthly() {
+  const el = $("#moChart"); if (!el) return;
+  const by = {}; for (const t of closedTrades()) { const k = monthKey(t.exit_date); by[k] = (by[k] || 0) + (num(t.pnl) || 0); }
+  const keys = Object.keys(by).sort().slice(-12);
+  if (!keys.length) { el.innerHTML = `<div class="empty small">Bars appear when the first trade closes.</div>`; return; }
+  const W = 420, H = 220, L = 52, R = 8, T = 10, B = 26;
+  const vals = keys.map((k) => by[k]); const ticks = niceTicks(Math.min(0, ...vals), Math.max(0, ...vals));
+  const y0 = ticks[0], y1 = ticks[ticks.length - 1];
+  const Y = (v) => T + (1 - (v - y0) / Math.max(1e-9, y1 - y0)) * (H - T - B);
+  const bw = Math.min(28, (W - L - R) / keys.length - 6);
+  const X = (i) => L + ((i + 0.5) * (W - L - R)) / keys.length;
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Monthly realized profit and loss">
+    <g class="grid">${ticks.map((t) => `<line x1="${L}" x2="${W - R}" y1="${Y(t)}" y2="${Y(t)}"/>`).join("")}</g>
+    ${ticks.map((t) => `<text x="${L - 8}" y="${Y(t) + 3.5}" text-anchor="end">${t < 0 ? "−" : ""}$${Math.abs(Math.round(t)).toLocaleString()}</text>`).join("")}
+    <line x1="${L}" x2="${W - R}" y1="${Y(0)}" y2="${Y(0)}" stroke="var(--ink-3)"/>
+    ${keys.map((k, i) => { const v = by[k], y = Y(Math.max(v, 0)), h = Math.max(1, Math.abs(Y(v) - Y(0)));
+      return `<g class="bar" data-k="${k}" data-v="${v}"><rect x="${X(i) - bw / 2}" y="${y}" width="${bw}" height="${h}" rx="3" fill="${v >= 0 ? "var(--series)" : "var(--loss)"}"/>
+      <rect x="${X(i) - bw / 2 - 4}" y="${T}" width="${bw + 8}" height="${H - T - B}" fill="transparent"/>
+      <text x="${X(i)}" y="${H - 6}" text-anchor="middle">${new Date(k + "-15T12:00:00").toLocaleDateString("en-US", { month: "short" })}</text></g>`; }).join("")}
+  </svg><div class="tip" id="moTip" hidden></div>`;
+  const tip = $("#moTip"), svg = el.querySelector("svg");
+  el.querySelectorAll("g.bar").forEach((g) => {
+    g.addEventListener("pointerenter", () => { const r = svg.getBoundingClientRect(); const k = g.dataset.k; tip.hidden = false;
+      tip.innerHTML = `<span class="k">${new Date(k + "-15T12:00:00").toLocaleDateString("en-US", { month: "long", year: "numeric" })}</span><br><b class="num">${smoney(g.dataset.v)}</b>`;
+      const i = keys.indexOf(k); tip.style.left = Math.min(Math.max(0, (X(i) / W) * r.width - 50), r.width - 130) + "px"; tip.style.top = "0px"; });
+    g.addEventListener("pointerleave", () => { tip.hidden = true; });
+  });
+}
+
+// ---------------------------------------------------------------- alerts tab
+function viewAlerts() {
+  const st = settings(); const f = funds(); const today = todayPT();
+  const actions = S.alerts.filter((a) => (a.type === "exit" || a.type === "adjust") && a.status === "new")
+    .filter((a) => S.trades.some((t) => t.id === a.trade_id && t.status === "open"));
+  const entries = S.alerts.filter(entryLive)
+    .sort((a, b) => (b.valid_for || "").localeCompare(a.valid_for || "") || (num(b.score) || 0) - (num(a.score) || 0));
+  const capLeft = Number(st.max_open_positions) - f.open.length;
+  let html = `<section class="section"><div class="section-head"><h2>Action needed on open positions</h2><span class="meta">Exit early, raise a stop, or confirm a fill</span></div>`;
+  html += actions.length ? `<div class="grid">${actions.map(actionCard).join("")}</div>` : `<div class="empty">No exit or stop alerts right now. The pre-close scan (12:25 PM PT) and post-close scan (2:05 PM PT) check every open position.</div>`;
+  html += `</section><section class="section"><div class="section-head"><h2>New A+ opportunities</h2>
+    <span class="meta">${capLeft > 0 ? `${capLeft} of ${esc(st.max_open_positions)} position slots free · ${money(f.cash)} cash` : `All ${esc(st.max_open_positions)} slots are in use; setups still listed so you can swap into a stronger one`}</span></div>`;
+  html += entries.length ? `<div class="grid g-tickets">${entries.map((a) => ticket(a, today)).join("")}</div>` : `<div class="empty"><b>No open A+ setups.</b> New setups land after the 2:05 PM PT post-close scan, ready to place as limit orders before the next open. If a day has none, that is the filter doing its job.</div>`;
+  html += `</section><section class="section"><div class="section-head"><h2>Open positions</h2><span class="meta">Filled orders being managed · hold days count trading sessions</span></div>${openTable()}</section>`;
+  const recent = S.alerts.filter((a) => a.type === "entry" && !entryLive(a)).slice(0, 15);
+  if (recent.length) html += `<section class="section"><details><summary>Recently handled setups (${recent.length})</summary><div class="tbl-wrap" style="margin-top:8px"><table><thead><tr><th>Signal</th><th>Ticker</th><th>Strategy</th><th class="n">Score</th><th class="n">Win %</th><th class="n">Entry</th><th>Status</th></tr></thead><tbody>
+    ${recent.map((a) => `<tr><td>${dShort(a.signal_date)}</td><td><span class="t">${esc(a.ticker)}</span></td><td>${esc(a.strategy_label)}</td><td class="n">${esc(a.score)}</td><td class="n">${pct(a.win_pct)}</td><td class="n">${px(a.entry)}</td><td>${statusPill(a.status === "new" ? "expired" : a.status)}</td></tr>`).join("")}
+    </tbody></table></div></details></section>`;
+  return html;
+}
+function statusPill(s) { return `<span class="pill ${{ filled: "good", placed: "info", skipped: "neutral", expired: "neutral", new: "warn", done: "good" }[s] || "neutral"}">${esc({ filled: "Filled", placed: "Order placed", skipped: "Skipped", expired: "Expired", new: "New", done: "Done" }[s] || s)}</span>`; }
+function ladderSvg(a) {
+  const e = num(a.entry), s = num(a.stop), t = num(a.target); if (e === null || s === null || t === null) return "";
+  const H = 116, top = 8, bot = H - 8; const lo = s, hi = t; const Y = (v) => top + (1 - (v - lo) / Math.max(1e-9, hi - lo)) * (bot - top);
+  return `<svg class="ladder" viewBox="0 0 34 ${H}" role="img" aria-label="Stop ${px(s)}, entry ${px(e)}, target ${px(t)}">
+    <rect x="13" y="${Y(t)}" width="8" height="${Math.max(2, Y(e) - Y(t))}" rx="2" fill="var(--series)"/>
+    <rect x="13" y="${Y(e) + 2}" width="8" height="${Math.max(2, Y(s) - Y(e) - 2)}" rx="2" fill="var(--loss)" opacity=".85"/>
+    <line x1="6" x2="28" y1="${Y(e)}" y2="${Y(e)}" stroke="var(--ink)" stroke-width="2"/>
+  </svg>`;
+}
+function ticket(a, today) {
+  const e = num(a.entry), s = num(a.stop), t = num(a.target);
+  const riskPct = e ? (100 * (s - e)) / e : null, rewPct = e ? (100 * (t - e)) / e : null;
+  const stale = a.valid_for && a.valid_for < today;
+  const grade = a.grade === "A+" ? `<div class="stamp" aria-label="Grade A plus">A+</div>` : `<div class="stamp a">${esc(a.grade || "A")}</div>`;
+  const news = a.news_check && a.news_check !== "pending" ? `<div><b>News check:</b> ${esc(a.news_check)}${a.news_note ? " · " + esc(a.news_note) : ""}</div>` : "";
+  return `<article class="ticket ${a.capacity_note ? "overcap" : ""}" aria-label="${esc(a.ticker)} setup">
+    <div class="t-head">${grade}<div class="t-title"><div class="tk">${esc(a.ticker)}</div><div class="nm" title="${esc(a.name)}">${esc(a.name)}</div>
+      <div class="st">${esc(a.strategy_label)} · ${esc(a.family)}</div></div>
+      <div class="t-odds"><div class="lbl">Win est.</div><div class="big">${pct(a.win_pct, 0)}</div><div class="lbl">Score ${esc(a.score)}</div></div></div>
+    <div class="t-body">${ladderSvg(a)}<div class="levels">
+      <span class="lk">Target</span><span class="lv">${px(t)}</span><span class="ld">${spct(rewPct)}</span>
+      <span class="lk">Buy limit</span><span class="lv">${px(e)}</span><span class="ld">${a.status === "placed" ? statusPill("placed") : `for ${dShort(a.valid_for)}`}</span>
+      <span class="lk">Stop</span><span class="lv">${px(s)}</span><span class="ld">${spct(riskPct)}</span>
+      <span class="lk">R:R</span><span class="lv" style="font-size:13px">${esc(a.rr)}</span><span class="ld">exp. ${spct(a.exp_return_pct, 2)}</span>
+    </div></div>
+    <div class="t-facts"><div><div class="k">Size</div><div class="v">${esc(a.shares)} sh${a.fractional ? "*" : ""}</div></div><div><div class="k">Cost</div><div class="v">${money(a.total_cost)}</div></div><div><div class="k">Hold</div><div class="v">≤ ${esc(a.hold_max_days)} d</div></div></div>
+    <div class="t-notes">
+      <div><b>Order:</b> ${esc(a.order)}</div>
+      <div><b>Exit signal:</b> ${esc(a.exit_signal)}</div>
+      <div><b>Risk:</b> ${money(a.risk_usd)} (${esc(a.pct_of_capital)}% of capital in the position) · <b>Earnings:</b> ${a.earnings_next ? dShort(a.earnings_next) : "none in the hold window"}</div>
+      ${news}
+      ${Array.isArray(a.why) && a.why.length ? `<details><summary>Why it qualifies</summary><ul>${a.why.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></details>` : ""}
+    </div>
+    ${a.size_note ? `<div class="note-strip">${esc(a.size_note)}</div>` : ""}
+    ${a.capacity_note ? `<div class="note-strip">${esc(a.capacity_note)}</div>` : ""}
+    ${stale ? `<div class="note-strip">This order was for ${dShort(a.valid_for)}. If it filled, mark it done; otherwise skip it.</div>` : ""}
+    <div class="t-actions">
+      <button class="btn primary small" type="button" data-act="fill" data-id="${esc(a.id)}">Mark done (filled)</button>
+      ${a.status !== "placed" ? `<button class="btn small" type="button" data-act="placed" data-id="${esc(a.id)}">Order placed</button>` : ""}
+      <button class="btn ghost small" type="button" data-act="copy" data-id="${esc(a.id)}" title="Copy the order details">Copy</button>
+      <button class="btn ghost small" type="button" data-act="skip" data-id="${esc(a.id)}">Skip</button>
+    </div></article>`;
+}
+function actionCard(a) {
+  const lvl = a.type === "adjust" ? "info" : a.code === "TARGET_HIT" || a.code === "GAP_ABOVE_TARGET" ? "good" : "alert";
+  const btns = a.type === "adjust"
+    ? `<button class="btn primary small" type="button" data-act="applystop" data-id="${esc(a.id)}">Stop moved</button><button class="btn ghost small" type="button" data-act="dismiss" data-id="${esc(a.id)}">Dismiss</button>`
+    : `<button class="btn primary small" type="button" data-act="exitdone" data-id="${esc(a.id)}">Mark done (sold)</button><button class="btn ghost small" type="button" data-act="dismiss" data-id="${esc(a.id)}">Dismiss</button>`;
+  const urg = { now: "Now", today: "Before today's close", next: "Next session", open: "At the open" }[a.urgency] || a.urgency || "";
+  return `<div class="act ${lvl}"><div class="tk">${esc(a.ticker)}</div><div><div class="what">${esc(a.action)} <span class="pill ${lvl === "alert" ? "crit" : lvl === "good" ? "good" : "info"}">${esc(urg)}</span></div>
+    <div class="why">${esc(a.text)}</div><div class="small muted">${dtShort(a.created_at)} · last ${px(a.last)} · P&L ${smoney(a.unrealized)} · day ${esc(a.days_held)}${a.days_left != null ? `, ${esc(Math.max(0, a.days_left))} left` : ""}</div></div>
+    <div class="btns">${btns}</div></div>`;
+}
+function openTable() {
+  const open = S.trades.filter((t) => t.status === "open").sort((a, b) => String(a.entry_date).localeCompare(String(b.entry_date)));
+  if (!open.length) return `<div class="empty">No open positions. When a limit order fills, press <b>Mark done (filled)</b> on its ticket and enter your actual price; the position then shows here with its stop, target and hold clock.</div>`;
+  const marks = latestMarks();
+  return `<div class="tbl-wrap"><table><thead><tr><th>Ticker</th><th>Strategy</th><th>Entered</th><th class="n">Entry</th><th class="n">Shares</th><th class="n">Cost</th><th class="n">Stop</th><th class="n">Target</th><th class="n">Last</th><th class="n">Open P&L</th><th class="n">Hold left</th><th>Signals</th><th></th></tr></thead><tbody>
+  ${open.map((t) => { const m = marks[t.id] || {}; const held = heldDays(t); const left = (num(t.max_hold) || 7) - held;
+    const sig = (m.signals || []).filter((s) => s.level !== "warn").map((s) => `<span class="pill ${s.level === "alert" ? "crit" : s.level === "good" ? "good" : "info"}">${esc(s.code.replace(/_/g, " ").toLowerCase())}</span>`).join(" ");
+    return `<tr><td><span class="t">${esc(t.ticker)}</span></td><td class="small">${esc(t.strategy_label || t.strategy || "Manual")}</td><td>${dShort(t.entry_date)}</td><td class="n">${px(t.entry_price)}</td><td class="n">${esc(t.shares)}</td><td class="n">${money(num(t.entry_price) * num(t.shares))}</td><td class="n">${px(t.stop)}</td><td class="n">${px(t.target)}</td><td class="n">${px(m.last)}</td><td class="n ${signCls(m.unrealized)}">${m.unrealized != null ? `${smoney(m.unrealized)}<br><span class="muted small">${spct(m.unrealized_pct)}</span>` : "–"}</td><td class="n">${left > 0 ? `${left} of ${esc(t.max_hold || 7)} d` : `<span class="pill crit">time stop</span>`}</td><td>${sig || '<span class="muted small">none</span>'}</td>
+    <td class="n"><button class="btn small" type="button" data-act="close" data-tid="${esc(t.id)}">Close</button> <button class="btn ghost small" type="button" data-act="edit" data-tid="${esc(t.id)}">Edit</button></td></tr>`; }).join("")}
+  </tbody></table></div>`;
+}
+
+// ---------------------------------------------------------------- trade log
+function viewLog() {
+  const list = S.trades.filter((t) => S.logFilter === "all" || t.status === S.logFilter).sort((a, b) => String(b.entry_date).localeCompare(String(a.entry_date)));
+  let html = `<section class="section"><div class="section-head"><h2>All trades</h2>
+    <div class="seg" role="group" aria-label="Filter trades">${[["all", "All"], ["open", "Open"], ["closed", "Closed"]].map(([k, l]) => `<button type="button" data-logf="${k}" aria-pressed="${S.logFilter === k}">${l}</button>`).join("")}</div>
+    <span class="meta">${S.trades.length} trades logged</span></div>`;
+  html += list.length ? `<div class="tbl-wrap"><table><thead><tr><th>Opened</th><th>Ticker</th><th>Strategy</th><th class="n">Entry</th><th class="n">Shares</th><th>Closed</th><th class="n">Exit</th><th class="n">P&L</th><th class="n">Return</th><th class="n">R</th><th class="n">Days</th><th>Exit reason</th><th class="n">Income</th><th></th></tr></thead><tbody>
+    ${list.map((t) => `<tr><td>${dShort(t.entry_date)}</td><td><span class="t">${esc(t.ticker)}</span></td><td class="small">${esc(t.strategy_label || t.strategy || "Manual")}</td><td class="n">${px(t.entry_price)}</td><td class="n">${esc(t.shares)}</td><td>${t.status === "closed" ? dShort(t.exit_date) : statusPill("placed").replace("Order placed", "Open")}</td><td class="n">${px(t.exit_price)}</td><td class="n ${signCls(t.pnl)}">${t.status === "closed" ? smoney(t.pnl) : "–"}</td><td class="n">${t.status === "closed" ? spct(t.pnl_pct, 2) : "–"}</td><td class="n">${t.r_mult != null ? Number(t.r_mult).toFixed(2) : "–"}</td><td class="n">${t.status === "closed" ? esc(t.days_held) : heldDays(t)}</td><td class="small">${esc(t.exit_reason || "")}</td><td class="n">${t.income_amount ? money(t.income_amount) : "–"}</td><td class="n"><button class="btn ghost small" type="button" data-act="edit" data-tid="${esc(t.id)}">Edit</button></td></tr>`).join("")}
+    </tbody></table></div>` : `<div class="empty">Trades appear here as soon as you mark an alert as filled, with every entry, exit and income decision recorded.</div>`;
+  html += `</section><section class="section"><div class="section-head"><h2>Activity log</h2><span class="meta">Everything that changed your account, newest first</span></div>${activity()}</section>`;
+  return html;
+}
+function activity() {
+  const ev = [];
+  for (const l of S.ledger) {
+    const label = { initial: "Starting balance", deposit: "Funds added", withdrawal: "Funds removed", pnl: "Realized P&L", income: "Income taken from profit" }[l.type] || l.type;
+    ev.push({ at: l.created_at || l.date, what: `${label}${l.ticker ? " · " + l.ticker : ""}${l.note ? " · " + l.note : ""}`, amt: l.amount });
+  }
+  for (const t of S.trades) {
+    ev.push({ at: t.opened_at || t.entry_date, what: `Bought ${t.shares} ${t.ticker} @ ${px(t.entry_price)} (${t.strategy_label || t.strategy || "manual"})`, amt: null });
+    if (t.status === "closed") ev.push({ at: t.closed_at || t.exit_date, what: `Sold ${t.shares} ${t.ticker} @ ${px(t.exit_price)} · ${t.exit_reason || "exit"}`, amt: null });
+  }
+  for (const a of S.alerts) if (a.type === "entry" && a.status === "skipped") ev.push({ at: a.skipped_at || a.created_at, what: `Skipped setup ${a.ticker} (${a.strategy_label})`, amt: null });
+  ev.sort((a, b) => String(b.at).localeCompare(String(a.at)));
+  if (!ev.length) return `<div class="empty">The log starts with your $5,000 starting balance and records every trade, income withdrawal and fund change.</div>`;
+  return `<div class="panel timeline" style="padding:0">${ev.slice(0, 250).map((e) => `<div class="ev"><span class="when muted small">${String(e.at || "").length > 10 ? dtShort(e.at) : dShort(e.at)}</span><span>${esc(e.what)}</span><span class="num ${signCls(e.amt)}">${e.amt != null ? smoney(e.amt) : ""}</span></div>`).join("")}</div>`;
+}
+
+// ---------------------------------------------------------------- funds & income
+function viewFunds() {
+  const f = funds(); const st = settings();
+  const prof = closedTrades().filter((t) => num(t.pnl) > 0).reverse();
+  let html = `<section class="section"><div class="section-head"><h2>Account funds</h2><span class="meta">What the scanner sizes new positions from</span></div>
+  <div class="grid g-2"><div class="tbl-wrap"><table><tbody>
+    <tr><td>Starting balance</td><td class="n">${money(f.initial || st.initial_balance)}</td></tr>
+    <tr><td>Funds added</td><td class="n">${smoney(f.deposit)}</td></tr>
+    <tr><td>Funds removed</td><td class="n">${smoney(f.withdrawal)}</td></tr>
+    <tr><td>Realized profits and losses</td><td class="n ${signCls(f.pnl)}">${smoney(f.pnl)}</td></tr>
+    <tr><td>Income taken from profits</td><td class="n">${smoney(f.income)}</td></tr>
+    <tr><td><b>Trading capital</b></td><td class="n"><b>${money(f.capital)}</b></td></tr>
+    <tr><td class="muted">In open positions (cost)</td><td class="n muted">${money(f.openCost)}</td></tr>
+    <tr><td class="muted">Cash free for new trades</td><td class="n muted">${money(f.cash)}</td></tr>
+  </tbody></table></div>
+  <form class="panel form" id="fundsForm"><h3>Add or remove funds</h3>
+    <div class="row"><label class="f" for="fType">Type<select id="fType"><option value="deposit">Add funds</option><option value="withdrawal">Remove funds</option></select></label>
+    <label class="f" for="fAmt">Amount ($)<input id="fAmt" type="number" min="0" step="0.01" placeholder="500.00" required></label>
+    <label class="f" for="fDate">Date<input id="fDate" type="date" value="${todayPT()}"></label></div>
+    <label class="f" for="fNote">Note (optional)<input id="fNote" type="text" maxlength="120" placeholder="e.g. monthly contribution"></label>
+    <div><button class="btn primary" type="submit">Record</button> <span class="small muted">Position sizing updates on the next scan.</span></div>
+  </form></div></section>`;
+  html += `<section class="section"><div class="section-head"><h2>Income from profitable trades</h2><span class="meta">Default ${esc(st.income_default_pct)}% of each winning trade's profit. Change it per trade; set 0% to keep it all invested.</span></div>`;
+  html += prof.length ? `<div class="tbl-wrap"><table><thead><tr><th>Closed</th><th>Ticker</th><th class="n">Profit</th><th class="n">Income %</th><th class="n">Income taken</th><th class="n">Kept invested</th><th></th></tr></thead><tbody>
+    ${prof.map((t) => { const p = num(t.income_pct) ?? Number(st.income_default_pct); return `<tr><td>${dShort(t.exit_date)}</td><td><span class="t">${esc(t.ticker)}</span></td><td class="n">${smoney(t.pnl)}</td>
+      <td class="n"><input type="number" min="0" max="100" step="1" value="${esc(p)}" id="inc-${esc(t.id)}" style="width:76px;text-align:right" aria-label="Income percent for ${esc(t.ticker)}"></td>
+      <td class="n">${money(t.income_amount || 0)}</td><td class="n">${smoney(num(t.pnl) - (num(t.income_amount) || 0))}</td>
+      <td class="n"><button class="btn small" type="button" data-act="income" data-tid="${esc(t.id)}">Apply</button></td></tr>`; }).join("")}
+    </tbody></table></div>` : `<div class="empty">Each profitable trade lands here when you close it, with ${esc(st.income_default_pct)}% set aside as income by default. The rest stays in trading capital and compounds.</div>`;
+  html += `</section><section class="section"><div class="section-head"><h2>Desk settings</h2><span class="meta">Read by every scan</span></div>
+  <form class="panel form" id="setForm"><div class="row">
+    <label class="f" for="sInit">Starting balance ($)<input id="sInit" type="number" min="0" step="0.01" value="${esc(st.initial_balance)}"></label>
+    <label class="f" for="sInc">Default income % of profit<input id="sInc" type="number" min="0" max="100" step="1" value="${esc(st.income_default_pct)}"></label>
+    <label class="f" for="sMax">Max open positions<input id="sMax" type="number" min="1" max="15" step="1" value="${esc(st.max_open_positions)}"></label>
+    <label class="f" for="sRisk">Risk per trade (% of capital)<input id="sRisk" type="number" min="0.25" max="3" step="0.05" value="${esc(st.risk_pct)}"></label>
+    <label class="f" for="sPos">Max position size (% of capital)<input id="sPos" type="number" min="5" max="60" step="1" value="${esc(st.max_position_pct)}"></label>
+  </div><div><button class="btn primary" type="submit">Save settings</button> <span class="small muted">Risk per trade is the loss if the stop fills; 1–1.5% keeps one bad trade small.</span></div></form></section>`;
+  return html;
+}
+
+// ---------------------------------------------------------------- scans
+function viewScans() {
+  const st = settings();
+  let html = `<section class="section"><div class="section-head"><h2>Daily scan schedule</h2><span class="meta">Pacific time · market holidays skipped automatically · email alerts go to your Claude account address</span></div>
+  <div class="tbl-wrap"><table><thead><tr><th>Time</th><th>Days</th><th>Scan</th><th>What it does</th></tr></thead><tbody>
+  ${SCHEDULE.map((s) => `<tr><td class="num" style="white-space:nowrap">${s.when}</td><td>${s.days}</td><td><b>${s.what}</b></td><td class="small">${s.detail}</td></tr>`).join("")}
+  </tbody></table></div>
+  <div class="small muted">Prices refresh every 30 minutes from 4 AM to 3 PM PT through your GitHub data feed. ${st.manual_trigger_id ? "Use <b>Scan now</b> at the top for an extra scan at any time." : "The Scan now button activates once the scans are scheduled."}</div></section>`;
+  html += `<section class="section"><div class="section-head"><h2>Scan history</h2><span class="meta">${S.scans.length} most recent</span></div>`;
+  html += S.scans.length ? `<div class="tbl-wrap"><table><thead><tr><th>Ran</th><th>Scan</th><th>Status</th><th>Data</th><th class="n">A+ setups</th><th class="n">Exit alerts</th><th>Details</th></tr></thead><tbody>
+    ${S.scans.map((s) => `<tr><td style="white-space:nowrap">${dtShort(s.started_at)}</td><td>${esc(modeLabel(s.mode))}</td><td><span class="pill ${s.status === "ok" ? "good" : s.status === "failed" ? "crit" : "warn"}">${esc((s.status || "").replace(/_/g, " "))}</span></td>
+      <td class="small">${esc(s.data?.status || "–")} · bar ${esc(s.data?.last_bar || "–")}</td><td class="n">${esc(s.counts?.aplus ?? 0)}</td><td class="n">${esc(s.counts?.exit_alerts ?? 0)}</td>
+      <td style="min-width:220px">${s.digest ? `<details><summary>Digest</summary><pre class="digest">${esc(s.digest)}</pre></details>` : ""}${(s.errors || []).length ? `<div class="small muted">${esc(s.errors.length)} warning(s) handled</div>` : ""}${s.fixes ? `<div class="small muted">${esc(s.fixes)}</div>` : ""}</td></tr>`).join("")}
+    </tbody></table></div>` : `<div class="empty">Each scan records its status, data health and results here, including any problem it recovered from.</div>`;
+  return html + `</section>`;
+}
+
+// ---------------------------------------------------------------- strategy lab
+function viewLab() {
+  const bt = S.backtest; const P = S.params?.params || S.params; const G = P?.grading || bt?.grading || {};
+  let html = `<section class="section"><div class="section-head"><h2>Strategy playbook</h2><span class="meta">${bt ? `Backtest ${esc(bt.period?.[0])} to ${esc(bt.period?.[1])} · ${esc(bt.tickers)} stocks & ETFs · out-of-sample from ${esc(bt.split)}` : "Backtest results load after the first calibration"}</span></div>`;
+  if (G.aplus_score) html += `<div class="banner info">A+ means score ≥ ${esc(G.aplus_score)} and estimated win rate ≥ ${pct(100 * G.aplus_pwin, 0)}.${G.oos_aplus_win_rate ? ` On out-of-sample data, setups at that bar won ${pct(100 * G.oos_aplus_win_rate)} of ${esc(G.oos_aplus_trades)} trades (avg ${spct(100 * G.oos_aplus_avg_ret, 2)}), about ${esc(G.oos_aplus_signals_per_week)} per week.` : ""}</div>`;
+  const strat = bt?.strategies || {};
+  const names = Object.keys(strat);
+  html += names.length ? `<div class="grid g-tickets">${names.map((n) => stratCard(n, strat[n], P?.live_adjust?.[n])).join("")}</div>` : `<div class="empty">The strategy cards fill in with backtested win rate, average trade, profit factor and out-of-sample results once the first calibration has run.</div>`;
+  if (bt?.portfolio?.all_years) { const p = bt.portfolio.all_years, o = bt.portfolio.oos || {};
+    html += `<div class="panel"><h3>Simulated $5,000 account, A+ setups only, ${esc(settings().max_open_positions)} slots</h3><div class="stats" style="margin-top:8px">
+      ${stat("Trades", p.trades)}${stat("Win rate", pct(100 * p.win_rate))}${stat("CAGR", spct(100 * p.cagr))}${stat("Max drawdown", pct(100 * p.max_dd))}${stat("Trades/week", p.trades_per_week)}${stat("OOS win rate", o.win_rate != null ? pct(100 * o.win_rate) : "–")}${stat("OOS CAGR", o.cagr != null ? spct(100 * o.cagr) : "–")}
+    </div><p class="small muted" style="margin:8px 0 0">Survivorship bias (today's index members) and perfect limit fills flatter backtests; expect live results to be somewhat lower.</p></div>`; }
+  html += `</section><section class="section"><div class="section-head"><h2>Learning journal</h2><span class="meta">What worked, what didn't, and what changed. Written daily after the close.</span></div>`;
+  html += S.journal.length ? S.journal.slice(0, 30).map(journalEntry).join("") : `<div class="empty">The first journal entry is written after the first daily learning review. Every alert is graded against what the market actually did, including setups you skipped.</div>`;
+  return html + `</section>`;
+}
+function stat(k, v) { return `<div><div class="k">${k}</div><div class="v">${v ?? "–"}</div></div>`; }
+function stratCard(n, s, adj) {
+  const tr = s.train || {}, te = s.test_oos || {};
+  return `<article class="panel strat"><div class="row"><h3>${esc(s.label || n)}</h3>${s.enabled ? `<span class="pill good">Active</span>` : `<span class="pill neutral">Off</span>`}</div>
+    <div class="small muted">${esc(s.family || "")}</div>
+    <div class="stats">${stat("Win rate", tr.win_rate != null ? pct(100 * tr.win_rate) : "–")}${stat("Avg trade", tr.avg_ret != null ? spct(100 * tr.avg_ret, 2) : "–")}${stat("Profit factor", tr.profit_factor ?? "–")}${stat("Avg hold", tr.avg_hold != null ? tr.avg_hold + " d" : "–")}</div>
+    <div class="small"><b>Out of sample:</b> ${te.trades ? `${pct(100 * te.win_rate)} wins over ${esc(te.trades)} trades, avg ${spct(100 * te.avg_ret, 2)}, PF ${esc(te.profit_factor ?? "–")}` : "not enough trades"}</div>
+    ${adj ? `<div class="small muted">Live adjustment ${Number(adj.offset) >= 0 ? "+" : ""}${Number(adj.offset).toFixed(2)} (record ${esc(adj.wins)}/${esc(adj.n)} weighted)</div>` : ""}
+    ${!s.enabled && s.reason ? `<div class="small muted">${esc(s.reason)}</div>` : ""}</article>`;
+}
+function journalEntry(j) {
+  const li = (arr) => (arr || []).map((x) => `<li>${esc(x)}</li>`).join("");
+  return `<article class="panel" style="display:flex;flex-direction:column;gap:6px"><div class="section-head"><h3>${dShort(j.date)}</h3>
+    <span class="meta">Shadow ${j.shadow?.n ? `${pct(100 * j.shadow.win_rate)} of ${esc(j.shadow.n)}` : "–"} · live ${j.live?.n ? `${pct(100 * j.live.win_rate)} of ${esc(j.live.n)}` : "–"}</span></div>
+    ${j.worked?.length ? `<div class="small"><b>Worked:</b><ul style="margin:2px 0 0;padding-left:18px">${li(j.worked)}</ul></div>` : ""}
+    ${j.didnt_work?.length ? `<div class="small"><b>Didn't work:</b><ul style="margin:2px 0 0;padding-left:18px">${li(j.didnt_work)}</ul></div>` : ""}
+    <div class="small"><b>Insights:</b><ul style="margin:2px 0 0;padding-left:18px">${li(j.insights)}</ul></div>
+    <div class="small"><b>Changes:</b><ul style="margin:2px 0 0;padding-left:18px">${li(j.changes)}</ul></div>
+    ${j.notes ? `<div class="small muted">${esc(j.notes)}</div>` : ""}</article>`;
+}
+
+// ---------------------------------------------------------------- modal helpers
+function modal(title, body, submitLabel, onSubmit) {
+  const root = $("#modalRoot");
+  root.innerHTML = `<div class="modal-back" id="mb"><form class="modal" id="mf" aria-label="${esc(title)}"><h2>${esc(title)}</h2>${body}
+    <div class="foot"><button class="btn" type="button" id="mCancel">Cancel</button><button class="btn primary" type="submit">${esc(submitLabel)}</button></div></form></div>`;
+  const close = () => { root.innerHTML = ""; };
+  $("#mCancel").onclick = close;
+  $("#mb").addEventListener("click", (e) => { if (e.target.id === "mb") close(); });
+  $("#mf").addEventListener("submit", async (e) => { e.preventDefault(); const btn = e.submitter || $("#mf button[type=submit]"); btn.disabled = true;
+    try { await onSubmit(); close(); } catch (err) { console.error(err); btn.disabled = false; toast(writeErr(err)); } });
+  setTimeout(() => $("#mf input")?.focus(), 30);
+}
+function writeErr(err) {
+  const c = err?.code;
+  if (c === "quota_exceeded") return "The dashboard's storage is full. Old scans need pruning; ask Claude to clean up history.";
+  if (c === "invalid_argument") return "That change was refused. Check the numbers and try again.";
+  if (c === "unavailable") return "Couldn't reach the database just now. Try again in a moment.";
+  return "Couldn't save that change. " + (err?.message || "");
+}
+function need(v, label) { const n = Number(v); if (!Number.isFinite(n) || n <= 0) throw { code: "invalid_argument", message: `${label} must be a positive number.` }; return n; }
+async function setDoc(path, data) { if (!S.db) throw { code: "unavailable", message: "Database not connected." }; await S.db.doc(path).set(data); }
+async function updDoc(path, data) { if (!S.db) throw { code: "unavailable", message: "Database not connected." }; await S.db.doc(path).update(data); }
+
+// ---------------------------------------------------------------- actions
+function alertById(id) { return S.alerts.find((a) => a.id === id); }
+function tradeById(id) { return S.trades.find((t) => t.id === id); }
+function fillModal(a) {
+  modal(`Filled: ${a.ticker}`, `<p class="small muted" style="margin:0">Enter what your brokerage actually filled. A better price than the alert is recorded as-is.</p>
+    <div class="form"><div class="row"><label class="f" for="mPx">Actual buy price<input id="mPx" type="number" step="0.01" min="0" value="${esc(a.entry)}" required></label>
+    <label class="f" for="mSh">Shares<input id="mSh" type="number" step="0.001" min="0" value="${esc(a.shares)}" required></label>
+    <label class="f" for="mDt">Fill date<input id="mDt" type="date" value="${esc(a.valid_for && a.valid_for <= todayPT() ? a.valid_for : todayPT())}" required></label></div>
+    <div class="row"><label class="f" for="mSt">Stop<input id="mSt" type="number" step="0.01" min="0" value="${esc(a.stop)}"></label>
+    <label class="f" for="mTg">Target<input id="mTg" type="number" step="0.01" min="0" value="${esc(a.target)}"></label>
+    <label class="f" for="mHd">Max hold (days)<input id="mHd" type="number" step="1" min="1" value="${esc(a.hold_max_days)}"></label></div></div>`,
+    "Save fill", async () => {
+      const price = need($("#mPx").value, "Price"), sh = need($("#mSh").value, "Shares");
+      const id = "t_" + $("#mDt").value.replace(/-/g, "") + "_" + String(a.ticker).replace(/[^A-Za-z0-9-]/g, "") + "_" + Math.random().toString(36).slice(2, 6);
+      await setDoc("trades/" + id, { id, ticker: a.ticker, name: a.name, strategy: a.strategy, strategy_label: a.strategy_label, alert_id: a.id, status: "open",
+        entry_price: price, planned_entry: num(a.entry), shares: sh, entry_date: $("#mDt").value, stop: num($("#mSt").value), target: num($("#mTg").value),
+        max_hold: Number($("#mHd").value) || a.hold_max_days || 7, dyn_exit: a.dyn_exit || "none", win_pct: num(a.win_pct), score: num(a.score), opened_at: nowIso() });
+      await updDoc("alerts/" + a.id, { status: "filled", actual_price: price, actual_shares: sh, done_at: nowIso(), trade_id: id });
+      toast(`${a.ticker} logged as filled. Set the stop ${px($("#mSt").value)} and target ${px($("#mTg").value)} in your brokerage.`);
+    });
+}
+function closeModal(t, pre = {}) {
+  const st = settings(); const m = latestMarks()[t.id] || {};
+  const defPx = pre.price ?? m.last ?? t.target;
+  modal(`Close ${t.ticker}`, `<p class="small muted" style="margin:0">Entered ${dShort(t.entry_date)} at ${px(t.entry_price)} × ${esc(t.shares)} shares.</p>
+    <div class="form"><div class="row"><label class="f" for="cPx">Actual sell price<input id="cPx" type="number" step="0.01" min="0" value="${esc(defPx != null ? Number(defPx).toFixed(2) : "")}" required></label>
+    <label class="f" for="cDt">Sell date<input id="cDt" type="date" value="${todayPT()}" required></label>
+    <label class="f" for="cWhy">Reason<select id="cWhy">${["Target filled", "Stop filled", "Exit signal (sold at close)", "Time stop", "Before earnings", "Trend break", "Manual"].map((r) => `<option ${r === pre.reason ? "selected" : ""}>${r}</option>`).join("")}</select></label></div>
+    <label class="f" for="cInc">Income to take if profitable (% of profit)<input id="cInc" type="number" min="0" max="100" step="1" value="${esc(st.income_default_pct)}"></label>
+    <div class="small muted" id="cPrev"></div></div>`, "Close trade", async () => {
+      const ex = need($("#cPx").value, "Sell price"); const d = $("#cDt").value; const incPct = Math.min(100, Math.max(0, Number($("#cInc").value) || 0));
+      await closeTrade(t, ex, d, $("#cWhy").value, incPct, pre.alertId);
+    });
+  const prev = () => { const ex = Number($("#cPx").value); if (!ex) return; const pnl = (ex - num(t.entry_price)) * num(t.shares); $("#cPrev").textContent = `P&L ${smoney(pnl)} (${spct((100 * (ex - t.entry_price)) / t.entry_price, 2)})` + (pnl > 0 ? ` · income ${money((pnl * (Number($("#cInc").value) || 0)) / 100)}` : ""); };
+  $("#cPx").addEventListener("input", prev); $("#cInc").addEventListener("input", prev); prev();
+}
+async function closeTrade(t, ex, date, reason, incPct, alertId) {
+  const entry = num(t.entry_price), sh = num(t.shares);
+  const pnl = +((ex - entry) * sh).toFixed(2); const pnlPct = +((100 * (ex - entry)) / entry).toFixed(3);
+  const risk = num(t.stop) && entry > num(t.stop) ? (entry - num(t.stop)) : null;
+  const held = tradingDaysBetween(t.entry_date, date) + (isTradingDay(t.entry_date) ? 1 : 0);
+  const income = pnl > 0 ? +((pnl * incPct) / 100).toFixed(2) : 0;
+  await updDoc("trades/" + t.id, { status: "closed", exit_price: ex, exit_date: date, exit_reason: reason, pnl, pnl_pct: pnlPct, r_mult: risk ? +((ex - entry) / risk).toFixed(2) : null,
+    days_held: held, income_pct: pnl > 0 ? incPct : 0, income_amount: income, closed_at: nowIso() });
+  await setDoc("ledger/pnl_" + t.id, { id: "pnl_" + t.id, type: "pnl", amount: pnl, date, ticker: t.ticker, trade_id: t.id, created_at: nowIso() });
+  if (income > 0) await setDoc("ledger/inc_" + t.id, { id: "inc_" + t.id, type: "income", amount: -income, date, ticker: t.ticker, trade_id: t.id, pct: incPct, created_at: nowIso() });
+  else if (S.ledger.some((l) => l.id === "inc_" + t.id)) await S.db.doc("ledger/inc_" + t.id).delete();
+  const open = S.alerts.filter((a) => a.trade_id === t.id && a.status === "new" && a.type !== "entry");
+  for (const a of open) await updDoc("alerts/" + a.id, { status: a.id === alertId ? "done" : "dismissed", done_at: nowIso() });
+  toast(`${t.ticker} closed: ${smoney(pnl)}${income ? `, ${money(income)} set aside as income` : ""}.`);
+}
+function editModal(t) {
+  const closed = t.status === "closed";
+  modal(`Edit ${t.ticker}`, `<div class="form"><div class="row">
+    <label class="f" for="ePx">Entry price<input id="ePx" type="number" step="0.01" value="${esc(t.entry_price)}"></label>
+    <label class="f" for="eSh">Shares<input id="eSh" type="number" step="0.001" value="${esc(t.shares)}"></label>
+    <label class="f" for="eDt">Entry date<input id="eDt" type="date" value="${esc(t.entry_date)}"></label></div>
+    <div class="row"><label class="f" for="eSt">Stop<input id="eSt" type="number" step="0.01" value="${esc(t.stop ?? "")}"></label>
+    <label class="f" for="eTg">Target<input id="eTg" type="number" step="0.01" value="${esc(t.target ?? "")}"></label>
+    <label class="f" for="eHd">Max hold (days)<input id="eHd" type="number" step="1" value="${esc(t.max_hold ?? 7)}"></label></div>
+    ${closed ? `<div class="row"><label class="f" for="eEx">Exit price<input id="eEx" type="number" step="0.01" value="${esc(t.exit_price)}"></label><label class="f" for="eEd">Exit date<input id="eEd" type="date" value="${esc(t.exit_date)}"></label></div>` : ""}
+    <label class="f" for="eDel"><span><input id="eDel" type="checkbox"> Delete this trade (removes its P&L and income entries)</span></label></div>`, "Save", async () => {
+      if ($("#eDel").checked) {
+        await S.db.doc("trades/" + t.id).delete();
+        for (const p of ["pnl_", "inc_"]) if (S.ledger.some((l) => l.id === p + t.id)) await S.db.doc("ledger/" + p + t.id).delete();
+        if (t.alert_id && alertById(t.alert_id)) await updDoc("alerts/" + t.alert_id, { status: "new", trade_id: null });
+        toast(`${t.ticker} trade deleted.`); return;
+      }
+      const upd = { entry_price: need($("#ePx").value, "Entry"), shares: need($("#eSh").value, "Shares"), entry_date: $("#eDt").value,
+        stop: num($("#eSt").value), target: num($("#eTg").value), max_hold: Number($("#eHd").value) || 7 };
+      await updDoc("trades/" + t.id, upd);
+      if (closed) { const t2 = { ...t, ...upd }; const st = settings(); await closeTrade(t2, need($("#eEx").value, "Exit"), $("#eEd").value, t.exit_reason || "Manual", num(t.income_pct) ?? Number(st.income_default_pct)); }
+      else toast(`${t.ticker} updated.`);
+    });
+}
+async function applyIncome(t) {
+  const p = Math.min(100, Math.max(0, Number($("#inc-" + CSS.escape(t.id)).value) || 0));
+  const income = num(t.pnl) > 0 ? +((num(t.pnl) * p) / 100).toFixed(2) : 0;
+  await updDoc("trades/" + t.id, { income_pct: p, income_amount: income });
+  if (income > 0) await setDoc("ledger/inc_" + t.id, { id: "inc_" + t.id, type: "income", amount: -income, date: t.exit_date, ticker: t.ticker, trade_id: t.id, pct: p, created_at: nowIso() });
+  else if (S.ledger.some((l) => l.id === "inc_" + t.id)) await S.db.doc("ledger/inc_" + t.id).delete();
+  toast(`${t.ticker}: income set to ${p}% (${money(income)}).`);
+}
+async function copyOrder(a) {
+  const txt = `${a.ticker} BUY LIMIT ${px(a.entry)} x ${a.shares} sh (day order ${a.valid_for})\nSTOP ${px(a.stop)}  TARGET (limit sell) ${px(a.target)}\nHold up to ${a.hold_max_days} trading days. ${a.exit_signal}`;
+  try { await navigator.clipboard.writeText(txt); toast("Order copied."); }
+  catch { modal(`Order for ${a.ticker}`, `<textarea id="cpy" rows="6" readonly>${esc(txt)}</textarea>`, "Done", async () => {}); setTimeout(() => { const el = $("#cpy"); el?.focus(); el?.select(); }, 40); }
+}
+async function scanNow() {
+  const st = settings(); const b = $("#scanBtn");
+  if (!S.mcp || !st.manual_trigger_id) return;
+  try { const last = Number(localStorage.getItem("lastScanFire") || 0); if (Date.now() - last < 120000) { toast("A scan was started less than 2 minutes ago. Results land here when it finishes."); return; } } catch {}
+  b.disabled = true; b.textContent = "Starting…";
+  try {
+    await S.mcp.callTool("Claude Code Remote", "fire_trigger", { trigger_id: st.manual_trigger_id, text: `Manual scan requested from the dashboard at ${new Date().toISOString()}.` });
+    try { localStorage.setItem("lastScanFire", String(Date.now())); } catch {}
+    toast("Scan started. Results appear here in about 5–10 minutes, and any alerts are emailed to you.", 7000);
+  } catch (e) {
+    const c = e?.code;
+    const msg = { needs_reauth: "Reconnect Claude Code Remote in claude.ai Settings → Connectors, then try again.",
+      server_not_connected: "The scan service isn't available in this view. Open the dashboard in claude.ai to run a scan.",
+      not_in_manifest: "This page isn't allowed to start scans for you. Allow it in the artifact's permissions, then try again.",
+      approval_required: "Starting a scan needs your approval. Press Scan now again and allow it when asked.",
+      tool_error: "The scan service refused the request: " + (e?.message || "unknown reason") + ".",
+      server_unavailable: "The scan service didn't answer. Wait a minute and press Scan now again." }[c] || "Couldn't start the scan (" + (c || "error") + "). Try again shortly.";
+    toast(msg, 8000);
+  } finally { b.textContent = "Scan now"; renderChips(); }
+}
+
+// ---------------------------------------------------------------- events
+document.addEventListener("click", async (e) => {
+  const tab = e.target.closest("[data-tab]"); if (tab) { S.tab = tab.dataset.tab; try { localStorage.setItem("tab", S.tab); } catch {} render(); window.scrollTo(0, 0); return; }
+  const pf = e.target.closest("[data-perf]"); if (pf) { S.perf = pf.dataset.perf; render(); return; }
+  const lf = e.target.closest("[data-logf]"); if (lf) { S.logFilter = lf.dataset.logf; render(); return; }
+  const btn = e.target.closest("[data-act]"); if (!btn) return;
+  const act = btn.dataset.act; const a = btn.dataset.id ? alertById(btn.dataset.id) : null; const t = btn.dataset.tid ? tradeById(btn.dataset.tid) : null;
+  try {
+    if (act === "fill" && a) fillModal(a);
+    else if (act === "placed" && a) { await updDoc("alerts/" + a.id, { status: "placed", placed_at: nowIso() }); toast(`${a.ticker} marked as placed.`); }
+    else if (act === "skip" && a) { await updDoc("alerts/" + a.id, { status: "skipped", skipped_at: nowIso() }); toast(`${a.ticker} skipped. The learning loop still grades it.`); }
+    else if (act === "copy" && a) copyOrder(a);
+    else if (act === "dismiss" && a) { await updDoc("alerts/" + a.id, { status: "dismissed", done_at: nowIso() }); }
+    else if (act === "applystop" && a) { const tr = tradeById(a.trade_id); if (tr && a.new_stop) await updDoc("trades/" + tr.id, { stop: num(a.new_stop) }); await updDoc("alerts/" + a.id, { status: "done", done_at: nowIso() }); toast(`${a.ticker} stop updated to ${px(a.new_stop)}.`); }
+    else if (act === "exitdone" && a) { const tr = tradeById(a.trade_id); if (tr) closeModal(tr, { price: a.code === "TARGET_HIT" ? tr.target : a.code === "STOP_HIT" ? tr.stop : a.last, alertId: a.id,
+      reason: { TARGET_HIT: "Target filled", GAP_ABOVE_TARGET: "Target filled", STOP_HIT: "Stop filled", GAP_BELOW_STOP: "Stop filled", EXIT_RULE: "Exit signal (sold at close)", TIME_STOP: "Time stop", EARNINGS: "Before earnings", TREND_BREAK: "Trend break" }[a.code] || "Manual" }); }
+    else if (act === "close" && t) closeModal(t);
+    else if (act === "edit" && t) editModal(t);
+    else if (act === "income" && t) await applyIncome(t);
+  } catch (err) { console.error(err); toast(writeErr(err)); }
+});
+document.addEventListener("submit", async (e) => {
+  if (e.target.id === "fundsForm") { e.preventDefault();
+    try { const amt = need($("#fAmt").value, "Amount"); const typ = $("#fType").value; const id = (typ === "deposit" ? "dep_" : "wd_") + Date.now().toString(36);
+      await setDoc("ledger/" + id, { id, type: typ, amount: typ === "deposit" ? amt : -amt, date: $("#fDate").value || todayPT(), note: $("#fNote").value.slice(0, 120), created_at: nowIso() });
+      toast(`${typ === "deposit" ? "Added" : "Removed"} ${money(amt)}.`); } catch (err) { toast(writeErr(err)); } }
+  if (e.target.id === "setForm") { e.preventDefault();
+    try { const s = { ...settings(), initial_balance: need($("#sInit").value, "Starting balance"), income_default_pct: Math.min(100, Math.max(0, Number($("#sInc").value) || 0)),
+        max_open_positions: Math.max(1, Math.round(Number($("#sMax").value) || 5)), risk_pct: need($("#sRisk").value, "Risk per trade"), max_position_pct: need($("#sPos").value, "Max position"), updated_at: nowIso() };
+      await setDoc("config/settings", s);
+      const init = S.ledger.find((l) => l.type === "initial");
+      if (init && num(init.amount) !== s.initial_balance) await updDoc("ledger/" + init.id, { amount: s.initial_balance });
+      toast("Settings saved. The next scan uses them."); } catch (err) { toast(writeErr(err)); } }
+});
+$("#scanBtn").addEventListener("click", scanNow);
+
+// ---------------------------------------------------------------- boot
+try { const t = localStorage.getItem("tab"); if (t && TABS.some(([k]) => k === t)) S.tab = t; } catch {}
+render();
+const loadTimer = setTimeout(() => { if (!S.loaded.alerts) { S.dbError = "The dashboard database hasn't answered yet. Data may be out of date; it refreshes automatically."; render(); } }, 10000);
+// live updates re-render the page, but never while you are typing in one of its forms
+let rq = 0, pending = false;
+const typing = () => { const el = document.activeElement; return el && $("#main").contains(el) && /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName); };
+const rerender = () => { if (typing()) { pending = true; return; } cancelAnimationFrame(rq); rq = requestAnimationFrame(render); };
+document.addEventListener("focusout", () => setTimeout(() => { if (pending && !typing()) { pending = false; render(); } }, 0));
+(async () => {
+  const [db, user, mcp] = await Promise.all([claude.use("db"), claude.use("user"), claude.use("mcp")]);
+  S.db = db; S.user = user; S.mcp = mcp;
+  if (!db) { clearTimeout(loadTimer); S.dbError = "This view can't reach the dashboard database. Open the dashboard in claude.ai while signed in."; render(); return; }
+  const onErr = (name) => (err) => { console.error(name, err); if (err?.code !== "unavailable") { S.dbError = `Couldn't load ${name} (${err?.code}).`; rerender(); } };
+  const list = (snap) => snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  db.doc("config/settings").onSnapshot((d) => { S.settings = d.exists ? d.data() : null; S.loaded.settings = true; rerender(); }, onErr("settings"));
+  db.collection("alerts").orderBy("created_at", "desc").limit(400).onSnapshot((s) => { S.alerts = list(s); S.loaded.alerts = true; if (!s.metadata.fromCache) { clearTimeout(loadTimer); S.dbError = null; } rerender(); }, onErr("alerts"));
+  db.collection("trades").onSnapshot((s) => { S.trades = list(s); S.loaded.trades = true; rerender(); }, onErr("trades"));
+  db.collection("ledger").onSnapshot((s) => { S.ledger = list(s); S.loaded.ledger = true; rerender(); }, onErr("ledger"));
+  db.collection("scans").orderBy("started_at", "desc").limit(40).onSnapshot((s) => { S.scans = list(s); rerender(); }, onErr("scans"));
+  db.collection("journal").orderBy("date", "desc").limit(60).onSnapshot((s) => { S.journal = list(s); rerender(); }, onErr("journal"));
+  db.doc("strategy/params").onSnapshot((d) => { S.params = d.exists ? d.data() : null; rerender(); }, onErr("strategy params"));
+  db.doc("strategy/backtest").onSnapshot((d) => { S.backtest = d.exists ? d.data() : null; rerender(); }, onErr("backtest"));
+})();
+})();
+</script>

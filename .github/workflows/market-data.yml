@@ -1,0 +1,72 @@
+name: market-data
+
+# Refreshes the `data` branch the Swing Desk scans read from.
+# Times are UTC; the script works out pre-market / intraday / post-close itself,
+# so both daylight-saving regimes are covered.
+on:
+  schedule:
+    - cron: "5,35 12-22 * * 1-5"   # every 30 min, ~4 AM to 3 PM Pacific, weekdays
+    - cron: "17 13 * * 6"          # Saturday history rebuild for the weekly recalibration
+    - cron: "41 1 * * 2-6"         # late-evening safety pass (catches a missed post-close run)
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "auto | daily | intraday | premarket | earnings | history | all"
+        default: "auto"
+  push:
+    branches: [main]
+    paths: ["pipeline/**", ".github/workflows/market-data.yml"]
+
+concurrency:
+  group: market-data
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pipeline/requirements.txt
+
+      - name: Install
+        run: pip install -r pipeline/requirements.txt
+
+      - name: Restore current data branch
+        run: |
+          mkdir -p out
+          if git fetch --depth 1 origin data:refs/remotes/origin/data 2>/dev/null; then
+            git archive refs/remotes/origin/data | tar -x -C out
+          fi
+          ls -la out
+
+      - name: Fetch market data
+        env:
+          MODE: ${{ github.event_name == 'push' && 'all' || github.event.inputs.mode || (github.event.schedule == '17 13 * * 6' && 'history') || 'auto' }}
+        run: |
+          for attempt in 1 2 3; do
+            python pipeline/fetch_data.py --mode "$MODE" --out out && break
+            echo "attempt $attempt failed, retrying in 30s"; sleep 30
+          done
+
+      - name: Publish data branch (one squashed commit, no history bloat)
+        run: |
+          cd out
+          rm -rf .git
+          git init -q -b data
+          git config user.name "swing-desk-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -qm "market data $(date -u +%Y-%m-%dT%H:%MZ)"
+          for attempt in 1 2 3; do
+            git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" data:data && break
+            sleep 10
+          done

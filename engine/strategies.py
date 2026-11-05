@@ -1,0 +1,270 @@
+"""Swing setups. Each builder turns indicator frames + params into an order plan.
+
+A plan is evaluated on the signal day's close (day t) and trades on later sessions:
+  entry_kind 'limit_next' : buy-limit order for the next session(s) at `limit`
+  entry_kind 'close'      : buy near the close of day t (pre-close scan alert)
+Stops / targets are fixed prices so they can sit in the brokerage as a bracket.
+`dyn_exit` is the early-exit rule the daily scans watch (sell at the close).
+"""
+from __future__ import annotations
+
+import copy
+
+import numpy as np
+import pandas as pd
+
+STRATEGY_META = {
+    "MR_STRETCH": {
+        "label": "RSI(2) Stretch Dip",
+        "family": "Mean reversion",
+        "about": "Uptrend (above rising 200-day) stock or ETF that just had a sharp 2-3 day "
+                 "sell-off (RSI(2) deeply oversold, below its 5-day average). Buy a further "
+                 "stretch below the close with a limit order; sell into the snap-back.",
+    },
+    "LEADER_PULLBACK": {
+        "label": "Leader 7-Day Pullback",
+        "family": "Momentum pullback",
+        "about": "Top relative-strength stock (above 50 and 200-day) closing at a 7-day low. "
+                 "Leaders that dip tend to be bought quickly; exit on the bounce.",
+    },
+    "ETF_IBS": {
+        "label": "ETF Close-at-Low Snapback",
+        "family": "Mean reversion / auction (poor low)",
+        "about": "Index or sector ETF in an uptrend closing in the bottom of its daily range "
+                 "(IBS low) on a down day. Sellers exhausted into the close; next day tends to "
+                 "trade back above that day's high.",
+    },
+    "TREND_PULLBACK": {
+        "label": "Trend Pullback to 20-EMA",
+        "family": "Price action / trend continuation",
+        "about": "Strong uptrend stock pulling back on lighter volume to its rising 20-day EMA "
+                 "after a fresh high. Buy the test of support; target the recent swing high.",
+    },
+    "BREAKOUT_RETEST": {
+        "label": "Tight-Base Breakout Retest",
+        "family": "Breakout",
+        "about": "Stock breaks out of a tight base to a 20-day high on heavy volume near its "
+                 "52-week high. Buy the retest of the breakout level instead of chasing.",
+    },
+    "GAP_HOLD": {
+        "label": "Power-Gap Hold",
+        "family": "Event drift (post-earnings style)",
+        "about": "A recent gap-up on 2.5x+ volume (news/earnings) is holding above the gap-day "
+                 "low while it digests. Buy the dip into the gap; ride the drift.",
+    },
+    "FAIR_VALUE": {
+        "label": "Below Fair Value (VWAP-20)",
+        "family": "Fair value / auction market",
+        "about": "Uptrend name trading far below its 20-day volume-weighted fair value "
+                 "(VWAP minus z standard deviations). Auctions rotate back toward value; "
+                 "target the 20-day VWAP.",
+    },
+}
+
+DEFAULT_PARAMS = {
+    "version": 1,
+    "updated": None,
+    "risk": {"risk_pct": 1.25, "risk_pct_top": 1.5, "max_position_pct": 25.0,
+             "max_open": 5, "min_position_usd": 150.0, "slippage_pct": 0.05},
+    "filters": {"min_price": 10.0, "min_dv_stock": 30e6, "min_dv_etf": 20e6,
+                "earnings_buffer_days": 1, "allow_leveraged": True},
+    "grading": {"aplus_score": 80, "aplus_pwin": 0.70, "min_week": 3},
+    "strategies": {
+        "MR_STRETCH": {"enabled": True, "universe": "all", "rsi2_max": 10, "k_atr": 0.5,
+                       "target": {"kind": "mean4", "min_atr": 0.3}, "stop_atr": 3.0,
+                       "max_hold": 7, "dyn_exit": "sma5", "valid_days": 1},
+        "LEADER_PULLBACK": {"enabled": True, "universe": "stock", "rs_min": 0.75,
+                            "rsi2_max": 20, "k_atr": 0.3,
+                            "target": {"kind": "max7c", "min_atr": 0.3}, "stop_atr": 3.0,
+                            "max_hold": 8, "dyn_exit": "sma5", "valid_days": 1},
+        "ETF_IBS": {"enabled": True, "universe": "etf", "ibs_max": 0.15, "rsi2_max": 35,
+                    "entry_kind": "limit_next", "k_atr": 0.2,
+                    "target": {"kind": "high_t", "min_atr": 0.25}, "stop_atr": 2.5,
+                    "max_hold": 5, "dyn_exit": "prev_high", "valid_days": 1},
+        "TREND_PULLBACK": {"enabled": True, "universe": "stock", "rs_min": 0.7, "k_atr": 0.1,
+                           "target": {"kind": "hh20", "min_atr": 0.75}, "stop_atr": 2.0,
+                           "max_hold": 10, "dyn_exit": "none", "valid_days": 1},
+        "BREAKOUT_RETEST": {"enabled": True, "universe": "stock", "base_max": 0.12,
+                            "vol_mult": 1.5, "target": {"kind": "atr", "mult": 2.0},
+                            "stop_atr": 1.5, "max_hold": 10, "dyn_exit": "none",
+                            "valid_days": 2},
+        "GAP_HOLD": {"enabled": True, "universe": "stock", "gap_min": 0.03, "vol_mult": 2.5,
+                     "rsi2_max": 30, "k_atr": 0.25, "target": {"kind": "atr", "mult": 1.5},
+                     "stop_kind": "gap_low", "max_hold": 10, "dyn_exit": "none",
+                     "valid_days": 1},
+        "FAIR_VALUE": {"enabled": True, "universe": "all", "z": 2.0, "rsi2_max": 30,
+                       "k_atr": 0.25, "target": {"kind": "vwap20", "min_atr": 0.3},
+                       "stop_atr": 3.0, "max_hold": 7, "dyn_exit": "sma5", "valid_days": 1},
+    },
+    "models": {},
+    "live_adjust": {},
+}
+
+
+def params_with_defaults(p: dict | None) -> dict:
+    out = copy.deepcopy(DEFAULT_PARAMS)
+    if not p:
+        return out
+
+    def merge(a, b):
+        for k, v in b.items():
+            if isinstance(v, dict) and isinstance(a.get(k), dict):
+                merge(a[k], v)
+            else:
+                a[k] = v
+
+    merge(out, copy.deepcopy(p))
+    return out
+
+
+def base_masks(ind: dict, P: dict) -> dict:
+    f = P["filters"]
+    c = ind["close"]
+    is_stock, is_etf, is_lev = ind["is_stock"], ind["is_etf"], ind["is_lev"]
+    types = ind["types"]
+    tradable = pd.DataFrame(np.broadcast_to((types != "index").values, c.shape),
+                            index=c.index, columns=c.columns)
+    min_dv = np.where(is_stock.values, f["min_dv_stock"], f["min_dv_etf"])
+    liquid = (c >= f["min_price"]) & (ind["dv20"] >= min_dv) & ind["sma200"].notna() \
+        & ind["atr10"].notna() & tradable
+    if not f.get("allow_leveraged", True):
+        liquid &= ~is_lev
+    return {"liquid": liquid, "is_stock": is_stock, "is_etf": is_etf & tradable,
+            "is_lev": is_lev}
+
+
+def _universe_mask(b, which):
+    if which == "stock":
+        return b["is_stock"]
+    if which == "etf":
+        return b["is_etf"]
+    return b["is_stock"] | b["is_etf"]
+
+
+def _target(ind, sp):
+    t = sp["target"]
+    kind = t["kind"]
+    if kind == "atr":
+        return {"kind": "atr", "mult": float(t.get("mult", 1.0))}
+    frame = {"mean4": ind["mean4"], "max7c": ind["max7c"], "high_t": ind["high"],
+             "hh20": ind["hh20"], "vwap20": ind["vwap20"], "sma5": ind["sma5"]}[kind]
+    return {"kind": "level", "frame": frame, "min_atr": float(t.get("min_atr", 0.25)),
+            "cap_atr": float(t.get("cap_atr", 4.0))}
+
+
+def build(name: str, ind: dict, P: dict, b: dict | None = None) -> dict | None:
+    sp = P["strategies"].get(name)
+    if not sp or not sp.get("enabled", True):
+        return None
+    b = b or base_masks(ind, P)
+    c, o, h, l = ind["close"], ind["open"], ind["high"], ind["low"]
+    atr = ind["atr10"]
+    uni = _universe_mask(b, sp.get("universe", "all")) & b["liquid"]
+    plan = {"name": name, "entry_kind": sp.get("entry_kind", "limit_next"),
+            "valid_days": int(sp.get("valid_days", 1)), "max_hold": int(sp["max_hold"]),
+            "dyn_exit": sp.get("dyn_exit", "none"),
+            "stop": {"kind": "atr", "mult": float(sp.get("stop_atr", 3.0))},
+            "target": _target(ind, sp)}
+    k = float(sp.get("k_atr", 0.0))
+    limit = c - k * atr
+
+    if name == "MR_STRETCH":
+        m = uni & (c > ind["sma200"]) & (ind["slope200"] > 0) & (ind["rsi2"] < sp["rsi2_max"])
+        if sp.get("require_below_sma5", True):
+            m &= c < ind["sma5"]
+    elif name == "LEADER_PULLBACK":
+        m = uni & (c > ind["sma50"]) & (ind["sma50"] > ind["sma200"]) \
+            & (ind["rs_pct"] >= sp["rs_min"]) & (c <= ind["min7c"]) & (ind["rsi2"] < sp["rsi2_max"])
+    elif name == "ETF_IBS":
+        m = uni & (c > ind["sma200"]) & (ind["ibs"] < sp["ibs_max"]) & (c < c.shift(1)) \
+            & (ind["rsi2"] < sp.get("rsi2_max", 100))
+        if plan["entry_kind"] == "close":
+            limit = c.copy()
+    elif name == "TREND_PULLBACK":
+        recent_high = ind["hh10"] >= ind["hh20"]  # 20-day high set within last 10 days
+        touch = (l <= ind["ema20"] + 0.2 * atr) & (c >= ind["ema20"] - 0.3 * atr)
+        m = uni & (ind["sma50"] > ind["sma200"]) & (c > ind["sma50"]) & (ind["slope50"] > 0) \
+            & recent_high & touch & (ind["rsi14"] >= 38) & (ind["rsi14"] <= 58) & (ind["v5"] < ind["v20"]) \
+            & (ind["rs_pct"] >= sp["rs_min"])
+        limit = np.minimum(c, ind["ema20"] + 0.1 * atr) - k * atr
+    elif name == "BREAKOUT_RETEST":
+        prior_hh = ind["hh20"].shift(1)
+        prior_ll = ind["ll20"].shift(1)
+        tight = (prior_hh - prior_ll) / c < sp["base_max"]
+        m = uni & (c > ind["sma50"]) & (ind["sma50"] > ind["sma200"]) & (c > prior_hh) \
+            & (ind["vol_ratio"] > sp["vol_mult"]) & tight & (c >= 0.95 * ind["hh252"])
+        limit = prior_hh + 0.1 * atr
+        plan["stop"] = {"kind": "atr", "mult": float(sp.get("stop_atr", 1.5))}
+    elif name == "GAP_HOLD":
+        ev = (ind["gap_up"] >= sp["gap_min"]) & (ind["vol_ratio"] >= sp["vol_mult"]) \
+            & (c >= (h + l) / 2) & b["liquid"]
+        ev_low = l.where(ev)
+        ev_close = c.where(ev)
+        idx = np.arange(len(c))[:, None]
+        last_ev = pd.DataFrame(np.where(ev.values, idx, np.nan), index=c.index,
+                               columns=c.columns).ffill(limit=6)
+        days_since = pd.DataFrame(idx - last_ev.values, index=c.index, columns=c.columns)
+        g_low = ev_low.ffill(limit=6)
+        g_close = ev_close.ffill(limit=6)
+        m = uni & (days_since >= 2) & (days_since <= 6) & (c > g_low) & (c < g_close) \
+            & (ind["rsi2"] < sp["rsi2_max"]) & (c > ind["sma200"])
+        plan["stop"] = {"kind": "level", "frame": g_low - 0.5 * atr}
+    elif name == "FAIR_VALUE":
+        m = uni & (c > ind["sma200"]) & (c < ind["vwap20"] - sp["z"] * ind["vstd20"]) \
+            & (ind["rsi2"] < sp["rsi2_max"])
+    else:
+        return None
+
+    # optional market-regime gates (chosen by the backtest grid)
+    reg = sp.get("regime")
+    if reg:
+        mk = ind["market"]
+        gate = pd.Series(True, index=c.index)
+        if "spy200" in reg:
+            gate &= mk["spy_above200"] >= 0.5
+        if "breadth" in reg:
+            gate &= mk["breadth50"].fillna(0.5) >= 0.35
+        if "vixcalm" in reg:
+            gate &= mk["vix_ratio"].fillna(1.0) <= 1.35
+        m = m & pd.DataFrame(np.broadcast_to(gate.values[:, None], c.shape), index=c.index, columns=c.columns)
+    plan["mask"] = m.fillna(False).astype(bool)
+    plan["limit"] = limit
+    return plan
+
+
+def all_plans(ind: dict, P: dict) -> dict:
+    b = base_masks(ind, P)
+    out = {}
+    for name in P["strategies"]:
+        pl = build(name, ind, P, b)
+        if pl is not None:
+            out[name] = pl
+    return out
+
+
+FEATURES = ["rsi2", "depth_atr", "dist200", "slope200", "atr_pct", "rs_pct", "ibs",
+            "streak", "adx14", "vol_ratio", "dist50", "ret5", "spy_above200", "spy_dist200",
+            "spy_ret5", "breadth50", "vix", "vix_ratio", "sector_up", "is_etf"]
+
+
+def features_at(ind: dict, t_idx: np.ndarray, j_idx: np.ndarray) -> pd.DataFrame:
+    def g(name):
+        return ind[name].values[t_idx, j_idx]
+
+    mk = ind["market"]
+    out = pd.DataFrame({
+        "rsi2": g("rsi2"),
+        "depth_atr": (ind["sma5"].values[t_idx, j_idx] - g("close")) / g("atr10"),
+        "dist200": g("dist200"), "slope200": g("slope200"), "atr_pct": g("atr_pct"),
+        "rs_pct": g("rs_pct"), "ibs": g("ibs"), "streak": g("streak"), "adx14": g("adx14"),
+        "vol_ratio": g("vol_ratio"), "dist50": g("dist50"), "ret5": g("ret5"),
+        "spy_above200": mk["spy_above200"].values[t_idx],
+        "spy_dist200": mk["spy_dist200"].values[t_idx],
+        "spy_ret5": mk["spy_ret5"].values[t_idx],
+        "breadth50": mk["breadth50"].values[t_idx],
+        "vix": mk["vix"].values[t_idx], "vix_ratio": mk["vix_ratio"].values[t_idx],
+        "sector_up": g("sector_up"),
+        "is_etf": ind["is_etf"].values[t_idx, j_idx].astype(float),
+    })
+    out["rs_pct"] = out["rs_pct"].fillna(0.5)
+    return out

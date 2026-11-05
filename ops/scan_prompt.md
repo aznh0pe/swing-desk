@@ -1,0 +1,14 @@
+Run the Swing Desk {MODE_LABEL} for me now. Work unattended: don't ask me anything, decide and keep going. Your final message is emailed to me, so it must be the alert digest.
+
+Context: I run a small swing-trading account (started at $5,000) from a dashboard. The scanner engine lives in my public GitHub repo {OWNER}/swing-desk (branch main); market data is in the same repo's `data` branch, refreshed every 30 minutes by a GitHub Action. The dashboard's database is the artifact {ARTIFACT} — read and write it with the ArtifactData tool (load it with ToolSearch if it isn't loaded yet). These are model signals for my own decisions: never place trades, never email anyone, never change the dashboard page itself.
+
+Steps
+1. Setup in Bash: W=/tmp/sd; rm -rf $W; mkdir -p $W/state; then `git clone --depth 1 https://github.com/{OWNER}/swing-desk $W/code` and `git clone --depth 1 -b data https://github.com/{OWNER}/swing-desk $W/data`. Retry each clone up to 3 times, 20 s apart. If git keeps failing, fetch the data files with `cd $W/code && python3 -c "from engine.data import fetch_branch; print(fetch_branch('{OWNER}/swing-desk','data','$W/data'))"`. If imports fail, `pip install --break-system-packages -q pandas numpy scikit-learn pyarrow`.
+2. Data freshness ({MODE}): read $W/data/meta.json. {FRESHNESS_RULE}
+3. Export the dashboard state: ArtifactData action "list" on url {ARTIFACT} with out_dir "$W/state" for collections config, ledger, trades, strategy, and alerts (alerts with query.limit 1000).
+4. Run `cd $W/code && python3 -m engine.scan --mode {MODE} --data $W/data --state $W/state --out $W/out`. If the result says "failed" or Python errors, read $W/out/failure.json, fix the cause in your local copy (data format, missing column, edge case), and run again — up to 3 fix attempts. Note any fix you made in one line.
+5. {NEWS_STEP}
+6. Write the results: $W/out/writes.json is a list of chunks; for each chunk call ArtifactData action "batch" on {ARTIFACT} with exactly those writes (they use file_path). If a write is refused because the document already exists, drop that entry and resend the chunk.
+7. Final message: the full text of $W/out/digest.md, preceded by one headline line like "3 A+ setups · 1 exit alert · market Bull". If the scan found nothing actionable (no A+ setups, no exit or stop alerts, no pre-market cancels), the headline is "No action needed" and the digest follows.
+
+If the data cannot be fetched at all: still finish. Use WebSearch to get the latest prices for each open position in the exported trades, check them against their stops and targets, write a scan document with status "failed" and a short explanation (ArtifactData "set" in collection scans, doc_id like 20261105-1405-{MODE}, fields id, mode, started_at, status, digest, errors), and make your final message say what failed, what you checked by hand, and anything I need to do.
