@@ -35,7 +35,7 @@ EXTRA_STOCKS = {
 ETFS = {
     # broad
     "SPY": "S&P 500", "QQQ": "Nasdaq-100", "IWM": "Russell 2000", "DIA": "Dow 30", "RSP": "S&P 500 Equal Weight",
-    "MDY": "S&P MidCap 400", "IJR": "S&P SmallCap 600", "SPLG": "S&P 500 (low price)", "QQQM": "Nasdaq-100 (low price)",
+    "MDY": "S&P MidCap 400", "IJR": "S&P SmallCap 600", "SPYM": "S&P 500 (low price, formerly SPLG)", "QQQM": "Nasdaq-100 (low price)",
     # sectors
     "XLK": "Technology", "XLF": "Financials", "XLE": "Energy", "XLV": "Health Care", "XLI": "Industrials",
     "XLY": "Consumer Discretionary", "XLP": "Consumer Staples", "XLU": "Utilities", "XLB": "Materials",
