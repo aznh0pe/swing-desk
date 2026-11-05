@@ -29,6 +29,7 @@ from . import calendar as cal
 from . import data as D
 from . import indicators as I
 from . import model as M
+from . import rules as R
 from . import strategies as S
 from .portfolio import load_state
 
@@ -219,6 +220,10 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
     out = pathlib.Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     split = pd.Timestamp(split)
+    oldP = {}
+    if merge_state:
+        old = load_state(merge_state).get("params_doc") or {}
+        oldP = old.get("params") or old
     w = D.load_history(data_dir)
     universe = D.load_universe(data_dir)
     log(f"history: {w['close'].shape[0]} days x {w['close'].shape[1]} tickers "
@@ -230,14 +235,15 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
               "period": [str(w["close"].index.min().date()), str(w["close"].index.max().date())],
               "tickers": int(w["close"].shape[1]), "strategies": {}}
     pooled = []
-    for name in (strategies or list(GRIDS)):
-        log(f"searching {name} ...")
-        res = search_strategy(name, ind, P, split, log)
-        if res is None:
-            P["strategies"][name]["enabled"] = False
-            report["strategies"][name] = {"enabled": False, "reason": "no trades"}
-            continue
-        P["strategies"][name].update(res["variant"])
+
+    def evaluate(name, res, spec=None):
+        if spec is not None:  # a research strategy: its rules travel with the params
+            P.setdefault("custom", {})[name] = {"spec": spec, "params": res["variant"], "label": spec.get("label"),
+                                                "family": spec.get("family"), "about": spec.get("about"),
+                                                "source": spec.get("source")}
+            P["strategies"][name] = R.strategy_entry(spec, res["variant"], True)
+        else:
+            P["strategies"][name].update(res["variant"])
         tr = res["trades"]
         filled = tr[tr["filled"] & tr["ret"].notna()]
         tr_train, tr_test = tr[tr["signal_date"] < split], tr[tr["signal_date"] >= split]
@@ -252,41 +258,123 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
               (tr["target"] - tr["limit"]) / (tr["limit"] - tr["stop"]))
         tr = tr.assign(score=M.score(tr["p"].values, feats, train_only, rr.fillna(1).values))
         pooled.append(tr)
-        enabled = (st_train.get("win_rate", 0) >= 0.58 and (st_train.get("profit_factor") or 0) >= 1.3
-                   and st_train.get("avg_ret", 0) > 0.002
-                   and (st_test.get("profit_factor") or 0) >= 1.05
-                   and st_test.get("win_rate", 0) >= st_train.get("win_rate", 0) - 0.10)
+        enabled, checks, reason = S.enable_checks(st_train, st_test)
         # honest per-strategy figures for display and the learning loop: out-of-sample
         if st_test.get("trades", 0) >= 100:
             mdl["base_rate"] = st_test["win_rate"]
             mdl["avg_win"], mdl["avg_loss"] = st_test["avg_win"], st_test["avg_loss"]
         P["strategies"][name]["enabled"] = bool(enabled)
         P.setdefault("models", {})[name] = mdl
-        report["strategies"][name] = {
-            "enabled": bool(enabled), "variant": res["variant"], "train": st_train,
-            "test_oos": st_test, "all": st_all, "yearly": B.yearly(tr).reset_index().to_dict("records"),
-            "model_validation": mdl.get("validation"), "label": S.STRATEGY_META[name]["label"],
-            "family": S.STRATEGY_META[name]["family"]}
+        mt = S.meta(name, P)
+        rec = {"enabled": bool(enabled), "variant": res["variant"], "train": st_train,
+               "test_oos": st_test, "all": st_all, "yearly": B.yearly(tr).reset_index().to_dict("records"),
+               "model_validation": mdl.get("validation"), "label": mt["label"], "family": mt["family"],
+               "checks": checks, "status_reason": reason}
+        if spec is not None:
+            rec.update(custom=True, about=spec.get("about"), source=spec.get("source"),
+                       rules=R.describe({**spec, "params": res["variant"], "grid": {}}))
+        report["strategies"][name] = rec
         log(f"  {name}: train win {st_train.get('win_rate')} avg {st_train.get('avg_ret')} PF "
             f"{st_train.get('profit_factor')} | OOS win {st_test.get('win_rate')} avg {st_test.get('avg_ret')} "
             f"PF {st_test.get('profit_factor')} n={st_test.get('trades')} | enabled={enabled}")
+
+    for name in (strategies or list(GRIDS)):
+        log(f"searching {name} ...")
+        res = search_strategy(name, ind, P, split, log)
+        if res is None:
+            P["strategies"][name]["enabled"] = False
+            report["strategies"][name] = {"enabled": False, "reason": "no trades", "status_reason": "Off: no trades in the backtest.",
+                                          "label": S.STRATEGY_META[name]["label"], "family": S.STRATEGY_META[name]["family"]}
+            continue
+        evaluate(name, res)
+    # research strategies: this week's candidates plus every research strategy promoted before
+    if merge_state and not strategies:
+        from .research import candidate_specs, search_spec
+        try:
+            cands = candidate_specs(merge_state, oldP)
+        except Exception as ex:
+            cands = {}
+            log(f"research candidates unavailable: {ex!r}")
+        for cid, spec in cands.items():
+            errs = R.validate(spec)
+            if errs:
+                log(f"  skipping research strategy {cid}: {errs}")
+                continue
+            log(f"searching research strategy {cid} ...")
+            try:
+                res = search_spec(spec, ind, P, split, log)
+            except Exception as ex:
+                log(f"  {cid} failed: {ex!r}")
+                continue
+            if res is not None:
+                evaluate(cid, res, spec)
     allp = pd.concat(pooled, ignore_index=True) if pooled else pd.DataFrame()
     if not allp.empty:
         enabled_names = [n for n, v in report["strategies"].items() if v.get("enabled")]
-        en = allp[allp["strategy"].isin(enabled_names)].copy()
-        # pooled robust-factor model: fit on pre-split trades, win odds recalibrated out of sample
-        try:
-            pm = M.fit_pooled(en, enabled_names, split)
+
+        def fit_and_grade(names):
+            en_ = allp[allp["strategy"].isin(names)].copy()
+            pm_ = None
+            # pooled robust-factor model: fit on pre-split trades, win odds recalibrated out of sample
+            try:
+                pm_ = M.fit_pooled(en_, names, split)
+                p_, e_, ep_ = M.predict_pooled(pm_, en_[S.FEATURES], en_["strategy"].values)
+                en_["p"], en_["e"], en_["e_pct"] = p_, e_, ep_
+                en_["score"] = M.score_pooled(p_, ep_)
+            except Exception as ex:  # keep the per-strategy scores if the pooled fit fails
+                log(f"pooled model failed: {ex!r}")
+                pm_ = None
+            return en_, pm_, calibrate_grades(en_, split)
+
+        en, pm, G = fit_and_grade(enabled_names)
+        # research strategies must earn their place inside the A+ set, not just pass on their own
+        research_on = [n for n in enabled_names if (P["strategies"].get(n) or {}).get("custom")]
+        if research_on:
+            base_names = [n for n in enabled_names if n not in research_on]
+            en0, pm0, G0 = fit_and_grade(base_names) if base_names else (None, None, {})
+            oos_ = en[(en["signal_date"] >= split) & en["ret"].notna() & en["filled"]]
+            ap_ = oos_[(oos_["score"] >= G["aplus_score"]) & (oos_["p"] >= G["aplus_pwin"])]
+            a_win = float(G.get("oos_aplus_win_rate") or 0)
+            per, weak = {}, []
+            for n in research_on:
+                sub = ap_[ap_["strategy"] == n]
+                w_ = float((sub["ret"] > 0).mean()) if len(sub) else None
+                per[n] = {"aplus_trades_oos": int(len(sub)), "aplus_win_oos": round(w_, 4) if w_ is not None else None,
+                          "aplus_avg_oos": round(float(sub["ret"].mean()), 5) if len(sub) else None}
+                if len(sub) >= 30 and w_ < a_win - 0.03:
+                    weak.append(n)
+            # keep or raise the A+ win rate and average trade without thinning out the weekly setups
+            better = (not G0) or (a_win >= float(G0.get("oos_aplus_win_rate") or 0) - 0.005
+                                  and float(G.get("oos_aplus_avg_ret") or 0) >= float(G0.get("oos_aplus_avg_ret") or 0) - 0.0005
+                                  and float(G.get("oos_aplus_signals_per_week") or 0) >= 0.8 * float(G0.get("oos_aplus_signals_per_week") or 0))
+            drop = research_on if not better else weak
+            gate = {"with_research": {k: G.get(k) for k in ("aplus_score", "aplus_pwin", "oos_aplus_win_rate", "oos_aplus_avg_ret",
+                                                             "oos_aplus_trades", "oos_aplus_signals_per_week", "oos_weeks_with_min_setups")},
+                    "without_research": {k: G0.get(k) for k in ("aplus_score", "aplus_pwin", "oos_aplus_win_rate", "oos_aplus_avg_ret",
+                                                                 "oos_aplus_trades", "oos_aplus_signals_per_week", "oos_weeks_with_min_setups")},
+                    "per_strategy": per, "dropped": drop}
+            for n in drop:
+                pn = per.get(n) or {}
+                why = (f"Off: it passed every standalone check, but adding the research strategies didn't improve the A+ set "
+                       f"on unseen data ({100 * a_win:.1f}% wins with them vs {100 * float(G0.get('oos_aplus_win_rate') or 0):.1f}% without)."
+                       if not better else
+                       f"Off: it passed every standalone check, but its A+-grade trades won only {100 * (pn.get('aplus_win_oos') or 0):.1f}% "
+                       f"on unseen data vs {100 * a_win:.1f}% for the whole A+ set, so it would dilute the alerts.")
+                P["strategies"][n]["enabled"] = False
+                report["strategies"][n].update(enabled=False, status_reason=why + " Re-tested every Saturday.")
+                log(f"  research gate: {n} off ({why})")
+            if drop:
+                enabled_names = [n for n in enabled_names if n not in drop]
+                en, pm, G = (en0, pm0, G0) if set(drop) == set(research_on) and en0 is not None else fit_and_grade(enabled_names)
+            for n in research_on:
+                if n not in drop:
+                    report["strategies"][n]["aplus_oos"] = per.get(n)
+            report["research_gate"] = gate
+        if pm is not None:
             P["models"]["_pooled"] = pm
             report["pooled_model"] = pm["validation"]
-            p_, e_, ep_ = M.predict_pooled(pm, en[S.FEATURES], en["strategy"].values)
-            en["p"], en["e"], en["e_pct"] = p_, e_, ep_
-            en["score"] = M.score_pooled(p_, ep_)
             log(f"pooled model: OOS AUC {pm['validation']['oos_auc']}, return corr {pm['validation']['oos_ret_corr']}")
-        except Exception as ex:  # keep the per-strategy scores if the pooled fit fails
-            log(f"pooled model failed: {ex!r}")
         allp = en
-        G = calibrate_grades(en, split)
         P["grading"].update(G)
         report["grading"] = G
         # score buckets (validates that a higher score = better setup)
@@ -310,8 +398,6 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
     P["source"] = "backtest"
     changes = []
     if merge_state:
-        old = load_state(merge_state).get("params_doc") or {}
-        oldP = old.get("params") or old
         if oldP.get("live_adjust"):
             P["live_adjust"] = oldP["live_adjust"]  # keep what live trading has taught us
         for k in ("risk",):
@@ -319,11 +405,17 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
                 P[k].update(oldP[k])
         for n, sp in P["strategies"].items():
             o = (oldP.get("strategies") or {}).get(n) or {}
+            lab = S.meta(n, P)["label"]
+            why = (report["strategies"].get(n) or {}).get("status_reason", "")
+            if sp.get("custom") and not o:
+                changes.append(f"Promoted research strategy {lab}: passed the recalibration and now trades live. {why}"
+                               if sp.get("enabled") else f"Research candidate {lab} did not pass the recalibration. {why}")
+                continue
             if o and o.get("enabled") != sp.get("enabled"):
-                changes.append(f"{S.STRATEGY_META[n]['label']}: {'enabled' if sp.get('enabled') else 'disabled'} after recalibration.")
-            diff = {k: v for k, v in sp.items() if k != "enabled" and o.get(k) != v}
+                changes.append(f"{lab}: {'enabled' if sp.get('enabled') else 'disabled'} after recalibration. {why}")
+            diff = {k: v for k, v in sp.items() if k not in ("enabled", "paused_reason") and o.get(k) != v}
             if o and diff:
-                changes.append(f"{S.STRATEGY_META[n]['label']}: parameters now {json.dumps(diff, default=str)}.")
+                changes.append(f"{lab}: parameters now {json.dumps(diff, default=str)}.")
         og, ng = oldP.get("grading") or {}, P["grading"]
         if og and (og.get("aplus_score") != ng.get("aplus_score") or og.get("aplus_pwin") != ng.get("aplus_pwin")):
             changes.append(f"A+ cut-offs: score {og.get('aplus_score')} -> {ng.get('aplus_score')}, "
@@ -436,16 +528,19 @@ def run_learning(data_dir, state_dir, out_dir, now=None) -> dict:
         if abs(new - old) >= 0.02:
             P.setdefault("live_adjust", {})[name] = {"offset": round(new, 3), "n": n_eff, "wins": w_eff,
                                                      "updated": now.isoformat(timespec="seconds")}
-            changes.append(f"{S.STRATEGY_META[name]['label']}: win-probability offset {old:+.2f} -> {new:+.2f} "
+            changes.append(f"{S.meta(name, P)['label']}: win-probability offset {old:+.2f} -> {new:+.2f} "
                            f"(record {w_eff}/{n_eff} weighted vs {base:.0%} backtest).")
         if n_eff >= 25:
             wr = w_eff / n_eff
             if wr < exp_p - 0.12:
-                insights.append(f"{S.STRATEGY_META[name]['label']} is under-performing: {wr:.0%} live/shadow vs "
+                insights.append(f"{S.meta(name, P)['label']} is under-performing: {wr:.0%} live/shadow vs "
                                 f"{exp_p:.0%} expected over {n_eff} weighted trades. Scores are being discounted.")
             if wr < 0.5 and P["strategies"][name].get("enabled", True):
                 P["strategies"][name]["enabled"] = False
-                changes.append(f"Paused {S.STRATEGY_META[name]['label']}: {wr:.0%} win rate over {n_eff} trades "
+                P["strategies"][name]["paused_reason"] = (f"Paused by live results: {wr:.0%} win rate over {n_eff} weighted "
+                                                          f"trades (live fills count double) is below the 50% floor, "
+                                                          f"{now.date().isoformat()}.")
+                changes.append(f"Paused {S.meta(name, P)['label']}: {wr:.0%} win rate over {n_eff} trades "
                                "is below the 50% floor. It will be re-tested at the weekly recalibration.")
     # feature diagnostics on recent shadow results
     if not sh.empty and len(sh) >= 12:
@@ -471,10 +566,10 @@ def run_learning(data_dir, state_dir, out_dir, now=None) -> dict:
     worked = []
     if not sh.empty:
         top = sh.sort_values("ret", ascending=False).head(3)
-        worked = [f"{r.ticker} ({S.STRATEGY_META.get(r.strategy, {}).get('label', r.strategy)}) {100 * r.ret:+.1f}% via {r.reason}"
+        worked = [f"{r.ticker} ({S.meta(r.strategy, P)['label']}) {100 * r.ret:+.1f}% via {r.reason}"
                   for r in top.itertuples() if r.ret > 0]
         bad = sh.sort_values("ret").head(3)
-        didnt = [f"{r.ticker} ({S.STRATEGY_META.get(r.strategy, {}).get('label', r.strategy)}) {100 * r.ret:+.1f}% via {r.reason}"
+        didnt = [f"{r.ticker} ({S.meta(r.strategy, P)['label']}) {100 * r.ret:+.1f}% via {r.reason}"
                  for r in bad.itertuples() if r.ret <= 0]
     else:
         didnt = []

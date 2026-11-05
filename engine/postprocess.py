@@ -1,36 +1,49 @@
 """Apply the scan session's news checks to a finished scan's output.
 
-    python -m engine.postprocess --out <scan-out-dir> --news "NVDA=clean" "XYZ=caution:Analyst downgrade" "ABC=avoid:Agreed to be acquired"
+    python -m engine.postprocess --out <scan-out-dir> --state <state-dir> --news "NVDA=clean" "XYZ=caution:Analyst downgrade" "ABC=avoid:Agreed to be acquired"
 
+Post-close / pre-close scans (new setups):
 * clean   -> news_check "clean"
 * caution -> news_check "caution", note, score -8 (dropped if it falls below the A+ cut-off)
-* avoid   -> alert removed (doc file, write entry and digest line)
-Regenerates digest.md, the scan document and writes.json so everything stays consistent.
+* avoid   -> setup removed (doc file, write entry and digest line)
+Pre-market scans (today's orders and open positions):
+* avoid on a pending order   -> CANCEL: the order is withdrawn on the dashboard
+* caution on a pending order -> CAUTION line, order kept
+* avoid / caution on an open position -> REVIEW line
+Then re-ranks, refreshes the alert overlay (alerts that already exist on the dashboard), the
+digest, the scan document, the Scan-now progress record and writes.json so everything agrees.
 """
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import pathlib
 
-from .scan import load_params, make_digest
+from .scan import _utc_now, build_overlay, load_params, make_digest, run_done_doc
 from .portfolio import load_state
 from . import calendar as cal
 
 
-def apply(out_dir: str, news: list[str], state_dir: str | None = None) -> dict:
-    out = pathlib.Path(out_dir)
-    sj = json.loads((out / "scan.json").read_text())
-    scan, entries = sj["scan"], sj["entries"]
-    P = load_params(load_state(state_dir), None) if state_dir else None
-    cutoff = (P or {}).get("grading", {}).get("aplus_score", 80) if P else scan.get("aplus_cutoff", 80)
-    verdicts = {}
+def _verdicts(news: list[str]) -> dict:
+    out = {}
     for item in news:
         if "=" not in item:
             continue
         tk, rest = item.split("=", 1)
         kind, _, note = rest.partition(":")
-        verdicts[tk.strip().upper()] = (kind.strip().lower(), note.strip() or None)
+        out[tk.strip().upper()] = (kind.strip().lower(), note.strip() or None)
+    return out
+
+
+def apply(out_dir: str, news: list[str], state_dir: str | None = None) -> dict:
+    out = pathlib.Path(out_dir)
+    sj = json.loads((out / "scan.json").read_text())
+    scan, entries, ctx = sj["scan"], sj["entries"], sj.get("ctx") or {}
+    state = load_state(state_dir) if state_dir else None
+    P = load_params(state, None) if state else None
+    cutoff = (P or {}).get("grading", {}).get("aplus_score", 80) if P else scan.get("aplus_cutoff", 80)
+    verdicts = _verdicts(news)
     kept, dropped = [], []
     for e in entries:
         v = verdicts.get(e["ticker"].upper())
@@ -50,12 +63,29 @@ def apply(out_dir: str, news: list[str], state_dir: str | None = None) -> dict:
         else:
             e["news_check"], e["news_note"] = "clean", note
         kept.append(e)
+    # pre-market: news on today's orders and open positions
+    for c in scan.get("premarket_checks") or []:
+        v = verdicts.get(str(c.get("ticker", "")).upper())
+        if not v or v[0] == "clean":
+            continue
+        kind, note = v
+        if kind == "avoid":
+            c.update(verdict="cancel", text=f"News: {note or 'material news'}. Cancel today's order.")
+        elif c.get("verdict") != "cancel":
+            c.update(verdict="caution", text=f"News: {note or 'notable news'}. Check it before letting the order fill.")
+    pos_news = []
+    for pos in scan.get("positions") or []:
+        v = verdicts.get(str(pos.get("ticker", "")).upper())
+        if v and v[0] in ("avoid", "caution"):
+            pos_news.append({"ticker": pos["ticker"], "verdict": v[0], "reason": v[1] or "material news"})
+    if pos_news:
+        scan["position_news"] = pos_news
     # re-rank the featured list on the news-adjusted scores
     feat = sorted([e for e in kept if not e.get("also_qualified")], key=lambda e: -float(e["score"]))
     max_open = int(((P or {}).get("risk") or {}).get("max_open", 5))
-    if state_dir:
+    if state:
         try:
-            max_open = int(load_state(state_dir)["settings"].get("max_open_positions", max_open))
+            max_open = int(state["settings"].get("max_open_positions", max_open))
         except Exception:
             pass
     cap_left = max(0, max_open - int(scan.get("funds", {}).get("open_count", 0)))
@@ -76,15 +106,16 @@ def apply(out_dir: str, news: list[str], state_dir: str | None = None) -> dict:
             p.unlink(missing_ok=True)
         elif p.exists():
             p.write_text(json.dumps(e, default=str))
-    # rebuild the writes manifest
     chunks = json.loads((out / "writes.json").read_text())
     flat = [w for ch in chunks for w in ch if not (w["collection"] == "alerts" and w["doc_id"] in drop_ids)]
-    # scan doc + digest
+    # scan doc, overlay for alerts that already exist, digest
     scan["counts"]["aplus"] = len(kept)
     scan["news_dropped"] = dropped
+    scan["news_checked"] = sorted(verdicts)
+    if ctx:
+        scan["alert_updates"] = build_overlay(scan, kept, ctx)
     now = cal.now_pt()
     try:
-        import datetime as dt
         now = dt.datetime.fromisoformat(scan["started_at"])
     except Exception:
         pass
@@ -95,11 +126,16 @@ def apply(out_dir: str, news: list[str], state_dir: str | None = None) -> dict:
         digest += "\n\nDropped after news check: " + "; ".join(f"{d['ticker']} ({d['reason']})" for d in dropped)
     scan["digest"] = digest
     (out / "docs" / "scans" / f"{scan['id']}.json").write_text(json.dumps(scan, default=str))
+    if scan.get("run_token"):
+        rp = out / "docs" / "runs" / f"{scan['run_token']}-s6.json"
+        if rp.exists():
+            rp.write_text(json.dumps(run_done_doc(scan, scan["run_token"], _utc_now()), default=str))
     (out / "digest.md").write_text(digest)
-    (out / "scan.json").write_text(json.dumps({"scan": scan, "entries": kept}, indent=1, default=str))
+    (out / "scan.json").write_text(json.dumps({"scan": scan, "entries": kept, "ctx": ctx}, indent=1, default=str))
     chunks = [flat[i:i + 45] for i in range(0, len(flat), 45)]
     (out / "writes.json").write_text(json.dumps(chunks, indent=1))
-    return {"kept": len(kept), "dropped": dropped, "writes": len(flat)}
+    return {"kept": len(kept), "dropped": dropped, "writes": len(flat),
+            "withdrawn": sum(1 for v in (scan.get("alert_updates") or {}).values() if v.get("withdrawn"))}
 
 
 def main():

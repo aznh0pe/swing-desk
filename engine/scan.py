@@ -30,6 +30,12 @@ from .portfolio import funds, load_collection, load_state, size_position
 
 USER_FIELDS = {"status", "actual_price", "actual_shares", "done_at", "user_note", "trade_id",
                "skipped_at"}
+# fields a later scan may refresh on an alert that already exists (sent as an overlay in the scan
+# document, because existing documents are never overwritten); user fields are never touched
+SCAN_OWNED = ("rank", "score", "win_pct", "model_win_pct", "grade", "news_check", "news_note", "capacity_note",
+              "also_qualified", "topup_note", "shares", "fractional", "total_cost", "risk_usd", "pct_of_capital",
+              "size_note", "exp_return_pct")
+TOKEN_RE = __import__("re").compile(r"^rt_[a-z0-9]{6,32}$")
 
 
 def _r(x, nd=2):
@@ -249,7 +255,7 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
         if cd["rr"] < 0.2:
             continue  # too lopsided: one stop-out erases five targets
         u = universe.loc[cd["ticker"]] if cd["ticker"] in universe.index else None
-        meta = S.STRATEGY_META[cd["name"]]
+        meta = S.meta(cd["name"], P)
         size = size_position(cd["entry"], cd["stop"], f["capital"], cash_left, P, cd["score"], settings)
         e_win = cd["p"]
         mdl = cd["model"] or {}
@@ -336,8 +342,77 @@ def why_text(cd) -> list[str]:
     return w
 
 
+def overlay_ctx(state, mode, session_day, today, now) -> dict:
+    """What a later step needs to refresh alerts that already exist on the dashboard."""
+    existing = [aid for aid, v in state["alerts"].items() if v["doc"].get("type") == "entry"]
+    window = {}
+    for aid, v in state["alerts"].items():
+        a = v["doc"]
+        if a.get("type") != "entry" or a.get("status") not in ("new", "placed", None):
+            continue
+        sid = str(a.get("scan_id", ""))
+        if mode == "postclose" and str(a.get("valid_for")) == str(session_day) and not sid.endswith("preclose"):
+            window[aid] = {"ticker": a.get("ticker"), "status": a.get("status")}
+        elif mode == "preclose" and str(a.get("valid_for")) == str(today) and sid.endswith("preclose"):
+            window[aid] = {"ticker": a.get("ticker"), "status": a.get("status")}
+    return {"existing_entry_ids": existing, "window": window, "when": now.strftime("%-I:%M %p").lower()}
+
+
+def build_overlay(scan_doc: dict, entries: list, ctx: dict) -> dict:
+    ups = {}
+    live = {e["id"] for e in entries}
+    existing = set(ctx.get("existing_entry_ids") or [])
+    for e in entries:
+        if e["id"] in existing:
+            u = {**{k: e.get(k) for k in SCAN_OWNED}, "withdrawn": False}
+            if e.get("news_check") in (None, "pending"):  # not news-checked this run: keep the earlier verdict
+                u.pop("news_check", None)
+                u.pop("news_note", None)
+            ups[e["id"]] = u
+    dropped = {d["ticker"]: d["reason"] for d in scan_doc.get("news_dropped") or []}
+    for aid, a in (ctx.get("window") or {}).items():
+        if aid in live:
+            continue
+        tk = a.get("ticker")
+        reason = (f"Dropped by the {ctx.get('when')} scan's news check: {dropped[tk]}" if tk in dropped else
+                  f"No longer qualifies in the {ctx.get('when')} scan (price or indicators moved, or a stronger setup "
+                  "on the same ticker replaced it).")
+        ups[aid] = {"withdrawn": True, "withdrawn_reason": reason, "rank": None, "ticker": tk}
+    for c in scan_doc.get("premarket_checks") or []:
+        if c.get("verdict") == "cancel" and c.get("alert_id"):
+            ups[c["alert_id"]] = {"withdrawn": True, "withdrawn_reason": f"Pre-market check: {c.get('text')}", "rank": None,
+                                  "ticker": c.get("ticker")}
+    return ups
+
+
+def headline(scan_doc: dict) -> str:
+    c = scan_doc.get("counts") or {}
+    bits = []
+    if c.get("aplus"):
+        bits.append(f"{c['aplus']} A+ setup{'s' if c['aplus'] != 1 else ''}")
+    if c.get("exit_alerts"):
+        bits.append(f"{c['exit_alerts']} exit alert{'s' if c['exit_alerts'] != 1 else ''}")
+    cancels = sum(1 for x in scan_doc.get("premarket_checks") or [] if x.get("verdict") == "cancel")
+    if cancels:
+        bits.append(f"{cancels} order{'s' if cancels != 1 else ''} to cancel")
+    wd = sum(1 for v in (scan_doc.get("alert_updates") or {}).values() if v.get("withdrawn"))
+    if wd:
+        bits.append(f"{wd} withdrawn")
+    return " · ".join(bits) if bits else "No action needed"
+
+
+def _utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def run_done_doc(scan_doc: dict, token: str, at: str) -> dict:
+    return {"token": token, "seq": 6, "state": "done", "pct": 100, "step": "Scan complete", "at": at,
+            "scan_id": scan_doc["id"], "mode": scan_doc.get("mode"), "headline": headline(scan_doc),
+            "market": (scan_doc.get("market") or {}).get("label"), "by": "scan"}
+
+
 def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_path: str | None = None,
-        now=None) -> dict:
+        now=None, run_token: str | None = None) -> dict:
     now = now or cal.now_pt()
     out = pathlib.Path(out_dir)
     (out / "docs").mkdir(parents=True, exist_ok=True)
@@ -399,8 +474,10 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
         elif mode == "premarket" and vf == today:
             pm_checks.append(premarket_check(a, premarket, earnings, today))
     # writes: create-only. A document that already exists (a re-run of the same scan
-    # window, or one you've already acted on) is never overwritten.
+    # window, or one you've already acted on) is never overwritten; this scan's view of it
+    # travels in the scan document's alert_updates instead.
     writes = []
+    ctx = overlay_ctx(state, mode, session_day, today, now)
     ts = now.isoformat(timespec="seconds")
     existing = state["alerts"]
     for doc in entries:
@@ -442,11 +519,16 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
         "params_version": P.get("version"), "errors": errors[:40], "notes": notes,
         "session_day": str(session_day),
     }
+    scan_doc["alert_updates"] = build_overlay(scan_doc, entries, ctx)
     digest = make_digest(scan_doc, entries, positions, near, pm_checks, week_aplus, P, now)
     scan_doc["digest"] = digest
     _write(out, writes, "set", "scans", scan_id, scan_doc)
+    token = run_token if (run_token and TOKEN_RE.match(run_token)) else None
+    if token:  # the dashboard's progress bar finishes when this lands, together with the results
+        scan_doc["run_token"] = token
+        _write(out, writes, "set", "runs", f"{token}-s6", run_done_doc(scan_doc, token, _utc_now()))
     (out / "digest.md").write_text(digest)
-    (out / "scan.json").write_text(json.dumps({"scan": scan_doc, "entries": entries}, indent=1, default=str))
+    (out / "scan.json").write_text(json.dumps({"scan": scan_doc, "entries": entries, "ctx": ctx}, indent=1, default=str))
     chunks = [writes[i:i + 45] for i in range(0, len(writes), 45)]
     (out / "writes.json").write_text(json.dumps(chunks, indent=1))
     return {"scan_id": scan_id, "mode": mode, "entries": len(entries), "exits": scan_doc["counts"]["exit_alerts"],
@@ -513,6 +595,17 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
         lines += ["", "PRE-MARKET CHECK OF TODAY'S ORDERS"]
         for c in pm_checks:
             lines.append(f"- {c['ticker']}: {c['verdict'].upper()}. {c['text']}")
+    wd = [(k, v) for k, v in (scan.get("alert_updates") or {}).items() if v.get("withdrawn")]
+    if wd:
+        lines += ["", "WITHDRAWN SETUPS (cancel these orders if you placed them)"]
+        for k, v in wd:
+            tk = v.get("ticker") or (k.split("_")[2] if k.count("_") >= 3 else k)
+            lines.append(f"- {tk}: {v.get('withdrawn_reason')}")
+    pn = scan.get("position_news") or []
+    if pn:
+        lines += ["", "NEWS ON OPEN POSITIONS"]
+        for x in pn:
+            lines.append(f"- REVIEW {x['ticker']} position ({x['verdict']}): {x['reason']}")
     featured = [e for e in entries if not e.get("also_qualified")]
     extra = [e for e in entries if e.get("also_qualified")]
     if entries:
@@ -554,9 +647,10 @@ def main():
     ap.add_argument("--state", default=None)
     ap.add_argument("--out", required=True)
     ap.add_argument("--params", default=None)
+    ap.add_argument("--run-token", default=None, help="dashboard progress token (rt_...) from a Scan now press")
     a = ap.parse_args()
     try:
-        res = run(a.mode, a.data, a.state, a.out, a.params)
+        res = run(a.mode, a.data, a.state, a.out, a.params, run_token=a.run_token)
     except Exception as e:
         res = {"status": "failed", "error": repr(e), "trace": traceback.format_exc()[-2000:]}
         pathlib.Path(a.out).mkdir(parents=True, exist_ok=True)

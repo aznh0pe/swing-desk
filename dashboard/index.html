@@ -185,6 +185,38 @@ pre.digest { white-space: pre-wrap; font-family: var(--f-mono); font-size: 12px;
 .timeline .ev:last-child { border-bottom: 0; }
 @media (max-width: 600px) { .timeline .ev { grid-template-columns: minmax(0, 1fr) auto; } .timeline .ev .when { grid-column: 1 / -1; } }
 .disclaimer { color: var(--ink-3); font-size: 12px; max-width: 75ch; }
+/* scan-now progress */
+.runbar { border-top: 1px solid var(--line); background: var(--surface); }
+.runbar .wrap { display: flex; flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 6px; padding-block: 9px 10px; }
+.rb-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+.rb-label { font-weight: 600; }
+.rb-meta { color: var(--ink-3); font-size: 12.5px; font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
+.rb-row .sp { flex: 1; }
+.rb-track { position: relative; height: 8px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
+.rb-fill { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--series); border-radius: 999px; transition: width .6s ease; }
+.runbar.done .rb-fill { background: var(--good); }
+.runbar.failed .rb-fill { background: var(--crit); }
+.runbar.active .rb-fill::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255,255,255,.35), transparent); animation: rbshine 1.6s linear infinite; }
+@keyframes rbshine { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+.rb-steps { display: flex; flex-wrap: wrap; gap: 2px 14px; margin: 0; padding: 0; list-style: none; font-size: 12px; color: var(--ink-3); }
+.rb-steps li::before { content: "○ "; }
+.rb-steps li.ok { color: var(--ink-2); } .rb-steps li.ok::before { content: "● "; color: var(--good); }
+.rb-steps li.now { color: var(--ink); font-weight: 600; } .rb-steps li.now::before { content: "◉ "; color: var(--series); }
+@media (max-width: 600px) { .rb-steps { display: none; } .runbar .wrap { padding-block: 7px 8px; gap: 4px; } .rb-label { font-size: 13px; } }
+/* strategy lab extras */
+.checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 3px; font-size: 12.5px; }
+.checks li { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 6px; align-items: baseline; }
+.checks .ok { color: var(--good); font-weight: 700; } .checks .no { color: var(--crit); font-weight: 700; }
+.checks .need { color: var(--ink-3); font-family: var(--f-mono); font-size: 11.5px; white-space: nowrap; }
+.why-box { font-size: 12.5px; border-radius: var(--r-sm); padding: 7px 9px; background: var(--surface-2); color: var(--ink-2); }
+.why-box.off { background: var(--warn-bg); color: var(--warn); }
+.tag { display: inline-block; font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase; padding: 1px 6px; border-radius: 4px; background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.g-research { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); align-items: start; }
+.idea { display: flex; flex-direction: column; gap: 7px; }
+.idea .row { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.idea .rules { font-family: var(--f-mono); font-size: 11.5px; color: var(--ink-3); overflow-wrap: anywhere; }
+.funnel { display: flex; flex-wrap: wrap; gap: 8px; }
+.funnel .kpi { min-width: 110px; flex: 1; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 </style>
 
@@ -195,6 +227,7 @@ pre.digest { white-space: pre-wrap; font-family: var(--f-mono); font-size: 12px;
     <button class="btn primary" id="scanBtn" type="button" title="Run a market scan now">Scan now</button>
     <nav class="tabs" role="tablist" id="tabs"></nav>
   </div>
+  <div class="runbar" id="runbar" hidden aria-live="polite"></div>
 </header>
 <main class="wrap" id="main"></main>
 <div id="modalRoot"></div>
@@ -203,15 +236,27 @@ pre.digest { white-space: pre-wrap; font-family: var(--f-mono); font-size: 12px;
 (() => {
 "use strict";
 // ---------------------------------------------------------------- state
-const S = { settings: null, alerts: [], trades: [], ledger: [], scans: [], journal: [], params: null, backtest: null,
+const S = { settings: null, alerts: [], alertsRaw: [], trades: [], ledger: [], scans: [], journal: [], params: null, backtest: null,
+  runs: [], research: [], results: [], starting: null,
   loaded: {}, db: null, mcp: null, user: null, canWrite: true, tab: "overview", perf: "month", logFilter: "all", dbError: null };
+// Scan-now progress: the page writes step 0, the scan session writes 1-5, the scanner's results batch writes 6
+const RUN_STEPS = [
+  { seq: 0, pct: 4, label: "Starting the scan session", exp: 25 },
+  { seq: 1, pct: 12, label: "Loading scanner code and market data", exp: 25 },
+  { seq: 2, pct: 28, label: "Reading your positions, funds and alerts", exp: 15 },
+  { seq: 3, pct: 42, label: "Scanning stocks & ETFs for A+ setups", exp: 25 },
+  { seq: 4, pct: 62, label: "Checking news on the top setups", exp: 40 },
+  { seq: 5, pct: 86, label: "Saving results to your dashboard", exp: 20 },
+  { seq: 6, pct: 100, label: "Scan complete", exp: 0 },
+];
+const RUN_STALE_MS = 7 * 60000, RUN_SHOW_DONE_MS = 15 * 60000;
 const TABS = [["overview", "Overview"], ["alerts", "Alerts"], ["log", "Trade log"], ["funds", "Funds & income"], ["scans", "Scans"], ["lab", "Strategy lab"]];
 const SCHEDULE = [
   { when: "5:50 AM PT", days: "Mon–Fri", what: "Pre-market check", detail: "Re-checks today's orders against overnight news and pre-market gaps; warns before the 6:30 open." },
   { when: "12:25 PM PT", days: "Mon–Fri", what: "Pre-close exit scan", detail: "Live prices 35 min before the close: exit-at-close signals, time stops, earnings risk, buy-at-close setups." },
   { when: "2:05 PM PT", days: "Mon–Fri", what: "Post-close setup scan", detail: "Final daily bars: tomorrow's A+ setups with limit entry, stop and target to place tonight." },
-  { when: "3:12 PM PT", days: "Mon–Fri", what: "Daily learning review", detail: "Grades every alert against what the market did, updates win-rate estimates, writes the journal." },
-  { when: "10:14 AM PT", days: "Saturday", what: "Weekly recalibration", detail: "Re-runs the backtests on fresh history and re-fits the win-probability models." },
+  { when: "3:12 PM PT", days: "Mon–Fri", what: "Daily learning + strategy research", detail: "Grades every alert against what the market did, updates win-rate estimates and writes the journal; then researches and backtests a new strategy idea for the Strategy lab." },
+  { when: "10:14 AM PT", days: "Saturday", what: "Weekly recalibration", detail: "Re-runs every backtest on fresh history, re-tests Off strategies, promotes research candidates that pass, and re-fits the win-probability models." },
 ];
 const HOLIDAYS = new Set(["2025-01-01","2025-01-09","2025-01-20","2025-02-17","2025-04-18","2025-05-26","2025-06-19","2025-07-04","2025-09-01","2025-11-27","2025-12-25",
   "2026-01-01","2026-01-19","2026-02-16","2026-04-03","2026-05-25","2026-06-19","2026-07-03","2026-09-07","2026-11-26","2026-12-25",
@@ -238,10 +283,19 @@ function addDays(s, n) { const t = new Date(s + "T12:00:00"); t.setDate(t.getDat
 function tradingDaysBetween(a, b) { if (!a || !b || b <= a) return 0; let n = 0, d = a; while (d < b) { d = addDays(d, 1); if (isTradingDay(d)) n++; } return n; }
 function heldDays(t, end) { const e = end || todayPT(); return tradingDaysBetween(t.entry_date, e) + (isTradingDay(t.entry_date) ? 1 : 0); }
 const fmtHM = new Intl.DateTimeFormat("en-GB", { timeZone: "America/Los_Angeles", hour: "2-digit", minute: "2-digit", hour12: false });
+// Alerts are never overwritten once written; each later scan sends its view of them (rank, score,
+// news verdict, sizing, withdrawn) in its scan document's alert_updates. The newest scan wins.
+function mergeAlerts() {
+  const ov = {};
+  for (const sc of S.scans) { const au = sc.alert_updates; if (!au || typeof au !== "object") continue;
+    for (const id of Object.keys(au)) if (!(id in ov)) ov[id] = { ...au[id], _ov_at: sc.started_at, _ov_scan: sc.id }; }
+  S.alerts = S.alertsRaw.map((a) => { const o = ov[a.id]; if (!o) return a; const { ticker, ...rest } = o; return { ...a, ...rest }; });
+}
 function entryLive(a) {
   if (a.type !== "entry") return false;
   if (a.status === "placed") return true;
   if (a.status !== "new") return false;
+  if (a.withdrawn) return false;
   const t = todayPT();
   if (!a.valid_for || a.valid_for > t) return true;
   if (a.valid_for < t) return false;
@@ -300,13 +354,89 @@ function renderChips() {
     <div class="chip"><span class="k">Cash free</span><span class="v">${money(f.cash)}</span></div>
     <div class="chip"><span class="k">Open</span><span class="v">${f.open.length}/${esc(st.max_open_positions)}</span></div>
     <div class="chip"><span class="k">Last scan</span><span class="v" style="font-family:var(--f-body);font-size:13px">${scanPill}</span></div>`;
-  const b = $("#scanBtn"); const tid = st.manual_trigger_id;
-  b.disabled = !tid || !S.mcp;
-  b.title = !tid ? "Scans are being scheduled; the button turns on once they are." : !S.mcp ? "Open this page in claude.ai to run a scan from here." : "Run a market scan now";
+  const b = $("#scanBtn"); const tid = st.manual_trigger_id; const run = currentRun();
+  const busy = run && run.active;
+  b.disabled = !tid || !S.mcp || !S.db || busy || !!S.starting;
+  b.textContent = busy ? `Scanning… ${Math.round(run.pct)}%` : S.starting ? "Starting…" : "Scan now";
+  b.title = !tid ? "Scans are being scheduled; the button turns on once they are." : !S.mcp ? "Open this page in claude.ai to run a scan from here." : busy ? "A scan is running: progress is shown below." : "Run a market scan now";
+}
+
+// ---------------------------------------------------------------- scan-now progress
+function runsByToken() {
+  const by = {};
+  for (const r of S.runs) { if (!r.token) continue; (by[r.token] = by[r.token] || []).push(r); }
+  return by;
+}
+function currentRun() {
+  const by = runsByToken(); let best = null;
+  for (const [token, docs] of Object.entries(by)) {
+    const start = docs.find((d) => d.seq === 0) || docs.reduce((a, b) => ((Date.parse(a.at) || 0) <= (Date.parse(b.at) || 0) ? a : b));
+    const t0 = Date.parse(start.at) || 0;
+    if (!best || t0 > best.t0) best = { token, docs, t0 };
+  }
+  if (!best) return null;
+  const docs = best.docs.slice().sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+  const last = docs[docs.length - 1];
+  const fail = docs.find((d) => d.state === "failed");
+  const done = docs.find((d) => d.state === "done");
+  const lastAt = Math.max(...docs.map((d) => Date.parse(d.at) || 0));
+  const now = Date.now();
+  const state = done ? "done" : fail ? "failed" : now - lastAt > RUN_STALE_MS ? "stale" : "running";
+  const step = RUN_STEPS.find((s) => s.seq === (done ? 6 : last.seq)) || RUN_STEPS[0];
+  const next = RUN_STEPS.find((s) => s.seq > step.seq);
+  let pct = num(last.pct) ?? step.pct;
+  if (state === "running" && next) { const el = (now - (Date.parse(last.at) || now)) / 1000; pct = pct + (next.pct - pct) * 0.92 * (1 - Math.exp(-el / Math.max(5, step.exp))); }
+  if (state === "done") pct = 100;
+  const endAt = done ? Date.parse(done.at) : fail ? Date.parse(fail.at) : now;
+  return { token: best.token, docs, state, step, pct: Math.min(100, Math.max(2, pct)), t0: best.t0, elapsed: Math.max(0, (endAt || now) - best.t0),
+    active: state === "running", done, fail, last, finishedAt: done || fail ? endAt : null };
+}
+function mmss(ms) { const s = Math.round(ms / 1000); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); }
+let runTimer = null, runDismissed = null;
+try { runDismissed = localStorage.getItem("runDismissed"); } catch {}
+function renderRunbar() {
+  const el = $("#runbar"); const run = currentRun();
+  const show = run && run.token !== runDismissed && (run.active || run.state === "stale" || (run.finishedAt && Date.now() - run.finishedAt < RUN_SHOW_DONE_MS));
+  if (!show) { el.hidden = true; el.className = "runbar"; el.dataset.key = ""; if (runTimer) { clearInterval(runTimer); runTimer = null; } return; }
+  el.hidden = false;
+  el.className = "runbar " + (run.state === "done" ? "done" : run.state === "failed" ? "failed" : run.state === "stale" ? "failed" : "active");
+  let label, meta, extra = "";
+  if (run.state === "done") {
+    label = `Scan complete · ${esc(run.done.headline || "results saved")}`;
+    meta = `took ${mmss(run.elapsed)} · ${dtShort(run.done.at)}`;
+    extra = `<button class="btn small" type="button" data-tab="alerts">View alerts</button>`;
+  } else if (run.state === "failed") {
+    label = `Scan didn't finish: ${esc(run.fail.message || run.fail.step || "unknown problem")}`;
+    meta = `after ${mmss(run.elapsed)}`;
+  } else if (run.state === "stale") {
+    label = `No progress update for ${Math.round(RUN_STALE_MS / 60000)} minutes. The scan may have stopped; you can start another.`;
+    meta = `last step: ${esc(run.last.step || run.step.label)}`;
+  } else {
+    label = `${esc(run.last.step || run.step.label)}…`;
+    meta = `${Math.round(run.pct)}% · ${mmss(run.elapsed)} elapsed · usually about 2–3 min`;
+  }
+  const key = `${run.token}|${run.state}|${run.step.seq}|${run.last.step || ""}`;
+  if (el.dataset.key === key && $(".rb-fill", el)) {  // same step: just move the bar and the clock
+    $(".rb-meta", el).innerHTML = meta; $(".rb-fill", el).style.width = run.pct.toFixed(1) + "%";
+    $(".rb-track", el).setAttribute("aria-valuenow", String(Math.round(run.pct)));
+    if (run.active && !runTimer) runTimer = setInterval(() => { renderRunbar(); renderChips(); }, 1000);
+    return;
+  }
+  el.dataset.key = key;
+  const steps = RUN_STEPS.filter((s) => s.seq > 0).map((s) => {
+    const cls = run.state === "done" || s.seq < run.step.seq || (s.seq === run.step.seq && s.seq === 6) ? "ok" : s.seq === run.step.seq ? "now" : "";
+    return `<li class="${cls}">${esc(s.label)}</li>`; }).join("");
+  el.innerHTML = `<div class="wrap"><div class="rb-row"><span class="rb-label">${label}</span><span class="rb-meta">${meta}</span><span class="sp"></span>${extra}
+    ${run.active ? "" : `<button class="btn ghost small" type="button" id="rbClose" aria-label="Dismiss scan status">Dismiss</button>`}</div>
+    <div class="rb-track" role="progressbar" aria-label="Scan progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(run.pct)}"><div class="rb-fill" style="width:${run.pct.toFixed(1)}%"></div></div>
+    <ol class="rb-steps">${steps}</ol></div>`;
+  const c = $("#rbClose"); if (c) c.onclick = () => { runDismissed = run.token; try { localStorage.setItem("runDismissed", run.token); } catch {} renderRunbar(); renderChips(); };
+  if (run.active && !runTimer) runTimer = setInterval(() => { renderRunbar(); renderChips(); }, 1000);
+  if (!run.active && runTimer) { clearInterval(runTimer); runTimer = null; }
 }
 function modeLabel(m) { return { premarket: "Pre-market", preclose: "Pre-close", postclose: "Post-close", learning: "Learning", weekly: "Recalibration", manual: "Manual" }[m] || m || "Scan"; }
 function render() {
-  renderTabs(); renderChips();
+  renderTabs(); renderChips(); renderRunbar();
   const m = $("#main");
   const banner = S.dbError ? `<div class="banner crit">${esc(S.dbError)}</div>` : "";
   const v = { overview: viewOverview, alerts: viewAlerts, log: viewLog, funds: viewFunds, scans: viewScans, lab: viewLab }[S.tab]();
@@ -493,11 +623,11 @@ function viewAlerts() {
   html += `</section><section class="section"><div class="section-head"><h2>Open positions</h2><span class="meta">Filled orders being managed · hold days count trading sessions</span></div>${openTable()}</section>`;
   const recent = S.alerts.filter((a) => a.type === "entry" && !entryLive(a)).slice(0, 15);
   if (recent.length) html += `<section class="section"><details><summary>Recently handled setups (${recent.length})</summary><div class="tbl-wrap" style="margin-top:8px"><table><thead><tr><th>Signal</th><th>Ticker</th><th>Strategy</th><th class="n">Score</th><th class="n">Win %</th><th class="n">Entry</th><th>Status</th></tr></thead><tbody>
-    ${recent.map((a) => `<tr><td>${dShort(a.signal_date)}</td><td><span class="t">${esc(a.ticker)}</span></td><td>${esc(a.strategy_label)}</td><td class="n">${esc(a.score)}</td><td class="n">${pct(a.win_pct)}</td><td class="n">${px(a.entry)}</td><td>${statusPill(a.status === "new" ? "expired" : a.status)}</td></tr>`).join("")}
+    ${recent.map((a) => `<tr><td>${dShort(a.signal_date)}</td><td><span class="t">${esc(a.ticker)}</span></td><td>${esc(a.strategy_label)}</td><td class="n">${esc(a.score)}</td><td class="n">${pct(a.win_pct)}</td><td class="n">${px(a.entry)}</td><td>${statusPill(a.status === "new" ? (a.withdrawn ? "withdrawn" : "expired") : a.status)}${a.withdrawn && a.status === "new" ? `<div class="small muted">${esc(a.withdrawn_reason || "")}</div>` : ""}</td></tr>`).join("")}
     </tbody></table></div></details></section>`;
   return html;
 }
-function statusPill(s) { return `<span class="pill ${{ filled: "good", placed: "info", skipped: "neutral", expired: "neutral", new: "warn", done: "good" }[s] || "neutral"}">${esc({ filled: "Filled", placed: "Order placed", skipped: "Skipped", expired: "Expired", new: "New", done: "Done" }[s] || s)}</span>`; }
+function statusPill(s) { return `<span class="pill ${{ filled: "good", placed: "info", skipped: "neutral", expired: "neutral", new: "warn", done: "good", withdrawn: "crit" }[s] || "neutral"}">${esc({ filled: "Filled", placed: "Order placed", skipped: "Skipped", expired: "Expired", new: "New", done: "Done", withdrawn: "Withdrawn" }[s] || s)}</span>`; }
 function ladderSvg(a) {
   const e = num(a.entry), s = num(a.stop), t = num(a.target); if (e === null || s === null || t === null) return "";
   const H = 116, top = 8, bot = H - 8; const lo = s, hi = t; const Y = (v) => top + (1 - (v - lo) / Math.max(1e-9, hi - lo)) * (bot - top);
@@ -529,8 +659,10 @@ function ticket(a, today) {
       <div><b>Exit signal:</b> ${esc(a.exit_signal)}</div>
       <div><b>Risk:</b> ${money(a.risk_usd)} (${esc(a.pct_of_capital)}% of capital in the position) · <b>Earnings:</b> ${a.earnings_next ? dShort(a.earnings_next) : "none in the hold window"}</div>
       ${news}
+      <div class="small muted">Last checked by the ${dtShort(a._ov_at || a.created_at)} scan</div>
       ${Array.isArray(a.why) && a.why.length ? `<details><summary>Why it qualifies</summary><ul>${a.why.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></details>` : ""}
     </div>
+    ${a.withdrawn ? `<div class="note-strip" style="background:var(--crit-bg);color:var(--crit)"><b>Withdrawn:</b> ${esc(a.withdrawn_reason || "a later scan dropped this setup.")} If you placed the order, cancel it in your brokerage, then press Skip.</div>` : ""}
     ${a.topup_note ? `<div class="note-strip">${esc(a.topup_note)}</div>` : ""}
     ${a.size_note ? `<div class="note-strip">${esc(a.size_note)}</div>` : ""}
     ${a.capacity_note ? `<div class="note-strip">${esc(a.capacity_note)}</div>` : ""}
@@ -654,26 +786,100 @@ function viewLab() {
   const bt = S.backtest; const P = S.params?.params || S.params; const G = P?.grading || bt?.grading || {};
   let html = `<section class="section"><div class="section-head"><h2>Strategy playbook</h2><span class="meta">${bt ? `Backtest ${esc(bt.period?.[0])} to ${esc(bt.period?.[1])} · ${esc(bt.tickers)} stocks & ETFs · out-of-sample from ${esc(bt.split)}` : "Backtest results load after the first calibration"}</span></div>`;
   if (G.aplus_score) html += `<div class="banner info">A+ means score ≥ ${esc(G.aplus_score)} and estimated win rate ≥ ${pct(100 * G.aplus_pwin, 0)}.${G.oos_aplus_win_rate ? ` On out-of-sample data, setups at that bar won ${pct(100 * G.oos_aplus_win_rate)} of ${esc(G.oos_aplus_trades)} trades (avg ${spct(100 * G.oos_aplus_avg_ret, 2)}), about ${esc(G.oos_aplus_signals_per_week)} per week.` : ""}</div>`;
+  html += `<div class="banner info"><b>Why some strategies are Active and others Off.</b> A strategy trades live only while it clears five checks on 18 years of data: at least 58% winners and a profit factor of 1.30 or better on 2008–2021, an average trade above +0.20%, a profit factor of at least 1.05 on unseen 2022–now data, and a win rate that drops no more than 8 points on that unseen data. The daily review also pauses any strategy whose live record falls below 50% wins. Every Saturday all of them are re-tested on fresh data and switch on or off by themselves; each card says exactly which check decided it.</div>`;
   const strat = bt?.strategies || {};
-  const names = Object.keys(strat);
-  html += names.length ? `<div class="grid g-tickets">${names.map((n) => stratCard(n, strat[n], P?.live_adjust?.[n])).join("")}</div>` : `<div class="empty">The strategy cards fill in with backtested win rate, average trade, profit factor and out-of-sample results once the first calibration has run.</div>`;
+  const names = Object.keys(strat).sort((a, b) => (strat[b].enabled ? 1 : 0) - (strat[a].enabled ? 1 : 0) || (strat[b].custom ? 0 : 1) - (strat[a].custom ? 0 : 1));
+  html += names.length ? `<div class="grid g-tickets">${names.map((n) => stratCard(n, strat[n], P?.live_adjust?.[n], P?.strategies?.[n])).join("")}</div>` : `<div class="empty">The strategy cards fill in with backtested win rate, average trade, profit factor and out-of-sample results once the first calibration has run.</div>`;
   if (bt?.portfolio?.all_years) { const p = bt.portfolio.all_years, o = bt.portfolio.oos || {};
     html += `<div class="panel"><h3>Simulated $5,000 account, A+ setups only, ${esc(settings().max_open_positions)} slots</h3><div class="stats" style="margin-top:8px">
       ${stat("Trades", p.trades)}${stat("Win rate", pct(100 * p.win_rate))}${stat("CAGR", spct(100 * p.cagr))}${stat("Max drawdown", pct(100 * p.max_dd))}${stat("Trades/week", p.trades_per_week)}${stat("OOS win rate", o.win_rate != null ? pct(100 * o.win_rate) : "–")}${stat("OOS CAGR", o.cagr != null ? spct(100 * o.cagr) : "–")}
     </div><p class="small muted" style="margin:8px 0 0">Survivorship bias (today's index members) and perfect limit fills flatter backtests; expect live results to be somewhat lower.</p></div>`; }
-  html += `</section><section class="section"><div class="section-head"><h2>Learning journal</h2><span class="meta">What worked, what didn't, and what changed. Written daily after the close.</span></div>`;
+  html += `</section>` + viewResearch();
+  html += `<section class="section"><div class="section-head"><h2>Learning journal</h2><span class="meta">What worked, what didn't, and what changed. Written daily after the close.</span></div>`;
   html += S.journal.length ? S.journal.slice(0, 30).map(journalEntry).join("") : `<div class="empty">The first journal entry is written after the first daily learning review. Every alert is graded against what the market actually did, including setups you skipped.</div>`;
   return html + `</section>`;
 }
 function stat(k, v) { return `<div><div class="k">${k}</div><div class="v">${v ?? "–"}</div></div>`; }
-function stratCard(n, s, adj) {
+// same bar as engine/strategies.py ENABLE_RULE; used only if a backtest document predates the checks
+function fallbackChecks(tr, te) {
+  const dec = tr.win_rate != null && te.win_rate != null ? tr.win_rate - te.win_rate : null;
+  return [
+    { key: "train_win", label: "Win rate 2008-2021", value: tr.win_rate, need: ">= 58%", ok: tr.win_rate >= 0.58 },
+    { key: "train_pf", label: "Profit factor 2008-2021", value: tr.profit_factor, need: ">= 1.30", ok: tr.profit_factor >= 1.3 },
+    { key: "train_avg", label: "Average trade 2008-2021", value: tr.avg_ret, need: "> +0.20%", ok: tr.avg_ret > 0.002 },
+    { key: "oos_pf", label: "Profit factor 2022-now (unseen data)", value: te.profit_factor, need: ">= 1.05", ok: !!te.trades && te.profit_factor >= 1.05 },
+    { key: "oos_decay", label: "Win-rate drop on unseen data", value: dec, need: "<= 8 pts", ok: dec !== null && dec <= 0.08 + 1e-9 } ];
+}
+function fmtCheck(c) {
+  const v = num(c.value); if (v === null) return "–";
+  if (["train_win", "oos_win", "overlap"].includes(c.key)) return pct(100 * v);
+  if (c.key === "oos_decay") return (100 * v).toFixed(1) + " pts";
+  if (c.key === "train_avg") return spct(100 * v, 2);
+  if (c.key === "oos_trades") return String(Math.round(v));
+  return v.toFixed(2);
+}
+function checkList(checks) {
+  return `<ul class="checks">${checks.map((c) => `<li><span class="${c.ok ? "ok" : "no"}" aria-label="${c.ok ? "passed" : "failed"}">${c.ok ? "✓" : "✗"}</span><span>${esc(c.label)}: <b>${fmtCheck(c)}</b></span><span class="need">${esc(c.need)}</span></li>`).join("")}</ul>`;
+}
+function safeUrl(u) { return typeof u === "string" && /^https?:\/\//i.test(u) ? u : null; }
+function stratCard(n, s, adj, sp) {
   const tr = s.train || {}, te = s.test_oos || {};
-  return `<article class="panel strat"><div class="row"><h3>${esc(s.label || n)}</h3>${s.enabled ? `<span class="pill good">Active</span>` : `<span class="pill neutral">Off</span>`}</div>
+  const paused = sp && sp.enabled === false && sp.paused_reason;
+  const on = !!s.enabled && !(sp && sp.enabled === false);
+  const pill = on ? `<span class="pill good">Active</span>` : paused ? `<span class="pill warn">Paused</span>` : `<span class="pill neutral">Off</span>`;
+  const checks = Array.isArray(s.checks) && s.checks.length ? s.checks : fallbackChecks(tr, te);
+  const failed = checks.filter((c) => !c.ok).map((c) => c.label.toLowerCase());
+  const reason = paused ? sp.paused_reason : s.status_reason || (on ? "Active: passed every live-trading check." : failed.length ? `Off: failed ${failed.join(", ")}. Re-tested every Saturday.` : esc(s.reason || "Off."));
+  const src = safeUrl(s.source?.url);
+  return `<article class="panel strat"><div class="row"><h3>${esc(s.label || n)}</h3>${pill}${s.custom ? `<span class="tag">From research</span>` : ""}</div>
     <div class="small muted">${esc(s.family || "")}</div>
+    ${s.about ? `<div class="small">${esc(s.about)}</div>` : ""}
     <div class="stats">${stat("Win rate", tr.win_rate != null ? pct(100 * tr.win_rate) : "–")}${stat("Avg trade", tr.avg_ret != null ? spct(100 * tr.avg_ret, 2) : "–")}${stat("Profit factor", tr.profit_factor ?? "–")}${stat("Avg hold", tr.avg_hold != null ? tr.avg_hold + " d" : "–")}</div>
-    <div class="small"><b>Out of sample:</b> ${te.trades ? `${pct(100 * te.win_rate)} wins over ${esc(te.trades)} trades, avg ${spct(100 * te.avg_ret, 2)}, PF ${esc(te.profit_factor ?? "–")}` : "not enough trades"}</div>
-    ${adj ? `<div class="small muted">Live adjustment ${Number(adj.offset) >= 0 ? "+" : ""}${Number(adj.offset).toFixed(2)} (record ${esc(adj.wins)}/${esc(adj.n)} weighted)</div>` : ""}
-    ${!s.enabled && s.reason ? `<div class="small muted">${esc(s.reason)}</div>` : ""}</article>`;
+    <div class="small"><b>Out of sample (2022–now):</b> ${te.trades ? `${pct(100 * te.win_rate)} wins over ${esc(te.trades)} trades, avg ${spct(100 * te.avg_ret, 2)}, PF ${esc(te.profit_factor ?? "–")}` : "not enough trades"}</div>
+    ${s.aplus_oos?.aplus_trades_oos ? `<div class="small"><b>Its A+ trades (2022–now):</b> ${pct(100 * s.aplus_oos.aplus_win_oos)} wins over ${esc(s.aplus_oos.aplus_trades_oos)}, avg ${spct(100 * s.aplus_oos.aplus_avg_oos, 2)}</div>` : ""}
+    <div class="why-box ${on ? "" : "off"}">${esc(reason)}</div>
+    <details><summary>Live-trading checks${s.rules ? " and rules" : ""}</summary><div style="margin-top:6px;display:flex;flex-direction:column;gap:6px">${checkList(checks)}
+      ${s.rules ? `<div class="idea"><div class="rules">${esc(s.rules)}</div></div>` : ""}
+      ${src ? `<a class="small" href="${esc(src)}" target="_blank" rel="noopener noreferrer">Source: ${esc(s.source.title || src)}</a>` : ""}</div></details>
+    ${adj ? `<div class="small muted">Live adjustment ${Number(adj.offset) >= 0 ? "+" : ""}${Number(adj.offset).toFixed(2)} (record ${esc(adj.wins)}/${esc(adj.n)} weighted)</div>` : ""}</article>`;
+}
+
+// ---------------------------------------------------------------- research pipeline
+const IDEA_PILL = { live: ["good", "Live"], held: ["warn", "Promoted, now off"], candidate: ["info", "Candidate"], watch: ["warn", "Watch"],
+  queued: ["neutral", "Queued"], redundant: ["neutral", "Redundant"], rejected: ["neutral", "Rejected"] };
+const IDEA_ORDER = ["live", "candidate", "held", "watch", "queued", "redundant", "rejected"];
+function ideaStatus(i, r, P) {
+  if (P?.custom?.[i.id]) return P?.strategies?.[i.id]?.enabled ? "live" : "held";
+  if (!r) return "queued";
+  return IDEA_PILL[r.verdict] ? r.verdict : "rejected";
+}
+function viewResearch() {
+  const P = S.params?.params || S.params;
+  const latest = {};
+  for (const r of S.results) { const k = r.idea_id; if (k && (!latest[k] || String(r.tested_at) > String(latest[k].tested_at))) latest[k] = r; }
+  const ideas = S.research.map((i) => ({ i, r: latest[i.id], st: ideaStatus(i, latest[i.id], P) }))
+    .sort((a, b) => IDEA_ORDER.indexOf(a.st) - IDEA_ORDER.indexOf(b.st) || String(b.r?.tested_at || "").localeCompare(String(a.r?.tested_at || "")));
+  const count = (...k) => ideas.filter((x) => k.includes(x.st)).length;
+  let html = `<section class="section"><div class="section-head"><h2>Research pipeline</h2><span class="meta">New strategy ideas, researched and backtested every trading day after the close</span></div>
+    <div class="banner info">Every idea is written as exact rules and tested like the live strategies: its settings are tuned on 2008–2021 only, then judged on unseen 2022–now data. A <b>candidate</b> wins at least 62% of unseen-data trades with a profit factor of 1.15 or better and mostly finds trades the live strategies miss. Candidates go into Saturday's recalibration and trade live only if they pass there and keep or raise the A+ win rate.</div>
+    <div class="funnel">${kpi("Ideas tested", ideas.filter((x) => x.r).length, `${ideas.length} in the log`)}${kpi("Live", count("live"), "promoted strategies")}${kpi("Candidates", count("candidate"), "for Saturday")}${kpi("Watch", count("watch", "held"), "close to the bar")}${kpi("Queued", count("queued"), "next to test")}${kpi("Rejected", count("rejected", "redundant"), "didn't hold up")}</div>`;
+  html += ideas.length ? `<div class="grid g-research">${ideas.map(ideaCard).join("")}</div>` : `<div class="empty">The research log fills in after the daily review: each day one new idea is researched, written as rules and backtested.</div>`;
+  return html + `</section>`;
+}
+function ideaCard({ i, r, st }) {
+  const [cls, lab] = IDEA_PILL[st] || ["neutral", st];
+  const tr = r?.train || {}, te = r?.oos || {}; const src = safeUrl(i.source?.url);
+  const live = S.backtest?.strategies?.[i.id];
+  return `<article class="panel idea"><div class="row"><h3>${esc(i.label)}</h3><span class="pill ${cls}">${esc(lab)}</span></div>
+    <div class="small muted">${esc(i.family || "")}${r ? ` · tested ${dShort(String(r.tested_at || "").slice(0, 10))}` : ""}</div>
+    <div class="small">${esc(i.about || "")}</div>
+    ${r && r.train ? `<div class="stats">${stat("Win 2008–21", tr.win_rate != null ? pct(100 * tr.win_rate) : "–")}${stat("Win 2022–now", te.win_rate != null ? pct(100 * te.win_rate) : "–")}${stat("PF 2022–now", te.profit_factor ?? "–")}${stat("Overlap", r.overlap_live != null ? pct(100 * r.overlap_live, 0) : "–")}</div>` : ""}
+    <div class="why-box ${st === "candidate" || st === "live" ? "" : "off"}">${esc(r ? r.summary : "Queued: it is tested in an upcoming daily research run.")}</div>
+    ${(st === "live" || st === "held") && live?.status_reason ? `<div class="small"><b>Saturday recalibration:</b> ${esc(live.status_reason)}</div>` : ""}
+    <details><summary>Rules${src ? " and source" : ""}</summary><div style="margin-top:6px;display:flex;flex-direction:column;gap:6px"><div class="rules">${esc(r?.rules || i.rules || "")}</div>
+      ${r?.checks?.length ? checkList(r.checks) : ""}
+      ${src ? `<a class="small" href="${esc(src)}" target="_blank" rel="noopener noreferrer">${esc(i.source.title || src)}</a>` : i.source?.title ? `<div class="small muted">${esc(i.source.title)}</div>` : ""}</div></details>
+  </article>`;
 }
 function journalEntry(j) {
   const li = (arr) => (arr || []).map((x) => `<li>${esc(x)}</li>`).join("");
@@ -798,14 +1004,19 @@ async function copyOrder(a) {
   catch { modal(`Order for ${a.ticker}`, `<textarea id="cpy" rows="6" readonly>${esc(txt)}</textarea>`, "Done", async () => {}); setTimeout(() => { const el = $("#cpy"); el?.focus(); el?.select(); }, 40); }
 }
 async function scanNow() {
-  const st = settings(); const b = $("#scanBtn");
-  if (!S.mcp || !st.manual_trigger_id) return;
-  try { const last = Number(localStorage.getItem("lastScanFire") || 0); if (Date.now() - last < 120000) { toast("A scan was started less than 2 minutes ago. Results land here when it finishes."); return; } } catch {}
-  b.disabled = true; b.textContent = "Starting…";
+  const st = settings();
+  if (!S.mcp || !st.manual_trigger_id || !S.db || S.starting) return;
+  const cur = currentRun();
+  if (cur && cur.active) { toast("A scan is already running. Its progress is shown under the tabs."); return; }
+  const token = "rt_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  S.starting = token; runDismissed = null; renderChips();
   try {
-    await S.mcp.callTool("Claude Code Remote", "fire_trigger", { trigger_id: st.manual_trigger_id, text: `Manual scan requested from the dashboard at ${new Date().toISOString()}.` });
-    try { localStorage.setItem("lastScanFire", String(Date.now())); } catch {}
-    toast("Scan started. Results appear here in about 5–10 minutes, and any alerts are emailed to you.", 7000);
+    await S.db.doc("runs/" + token + "-s0").set({ token, seq: 0, state: "requested", pct: 4, step: "Starting the scan session", at: nowIso(), by: "page", kind: "manual" });
+  } catch (e) { S.starting = null; renderChips(); toast(writeErr(e)); return; }
+  try {
+    await S.mcp.callTool("Claude Code Remote", "fire_trigger", { trigger_id: st.manual_trigger_id,
+      text: `Run token: ${token}\nManual scan requested from the dashboard at ${new Date().toISOString()}. Report progress with this token as the task describes.` });
+    toast("Scan started. Follow its progress under the tabs; alerts are also emailed to you.", 6000);
   } catch (e) {
     const c = e?.code;
     const msg = { needs_reauth: "Reconnect Claude Code Remote in claude.ai Settings → Connectors, then try again.",
@@ -814,8 +1025,12 @@ async function scanNow() {
       approval_required: "Starting a scan needs your approval. Press Scan now again and allow it when asked.",
       tool_error: "The scan service refused the request: " + (e?.message || "unknown reason") + ".",
       server_unavailable: "The scan service didn't answer. Wait a minute and press Scan now again." }[c] || "Couldn't start the scan (" + (c || "error") + "). Try again shortly.";
+    try { await S.db.doc("runs/" + token + "-s9").set({ token, seq: 9, state: "failed", step: "Couldn't start", message: msg, at: nowIso(), by: "page" }); } catch {}
     toast(msg, 8000);
-  } finally { b.textContent = "Scan now"; renderChips(); }
+  } finally { S.starting = null; renderChips(); }
+  // tidy up: progress records older than two days (this press is the user action that allows it)
+  const cutoff = Date.now() - 2 * 86400000;
+  for (const r of S.runs.filter((x) => (Date.parse(x.at) || 0) < cutoff).slice(0, 25)) { try { await S.db.doc("runs/" + r.id).delete(); } catch { break; } }
 }
 
 // ---------------------------------------------------------------- events
@@ -870,10 +1085,13 @@ document.addEventListener("focusout", () => setTimeout(() => { if (pending && !t
   const onErr = (name) => (err) => { console.error(name, err); if (err?.code !== "unavailable") { S.dbError = `Couldn't load ${name} (${err?.code}).`; rerender(); } };
   const list = (snap) => snap.docs.map((d) => ({ id: d.id, ...d.data() }));
   db.doc("config/settings").onSnapshot((d) => { S.settings = d.exists ? d.data() : null; S.loaded.settings = true; rerender(); }, onErr("settings"));
-  db.collection("alerts").orderBy("created_at", "desc").limit(400).onSnapshot((s) => { S.alerts = list(s); S.loaded.alerts = true; if (!s.metadata.fromCache) { clearTimeout(loadTimer); S.dbError = null; } rerender(); }, onErr("alerts"));
+  db.collection("alerts").orderBy("created_at", "desc").limit(400).onSnapshot((s) => { S.alertsRaw = list(s); mergeAlerts(); S.loaded.alerts = true; if (!s.metadata.fromCache) { clearTimeout(loadTimer); S.dbError = null; } rerender(); }, onErr("alerts"));
   db.collection("trades").onSnapshot((s) => { S.trades = list(s); S.loaded.trades = true; rerender(); }, onErr("trades"));
   db.collection("ledger").onSnapshot((s) => { S.ledger = list(s); S.loaded.ledger = true; rerender(); }, onErr("ledger"));
-  db.collection("scans").orderBy("started_at", "desc").limit(60).onSnapshot((s) => { S.scans = list(s).sort((a, b) => (Date.parse(b.started_at) || 0) - (Date.parse(a.started_at) || 0)).slice(0, 40); rerender(); }, onErr("scans"));
+  db.collection("scans").orderBy("started_at", "desc").limit(60).onSnapshot((s) => { S.scans = list(s).sort((a, b) => (Date.parse(b.started_at) || 0) - (Date.parse(a.started_at) || 0)).slice(0, 40); mergeAlerts(); rerender(); }, onErr("scans"));
+  db.collection("runs").orderBy("at", "desc").limit(60).onSnapshot((s) => { S.runs = list(s); renderRunbar(); renderChips(); }, onErr("scan progress"));
+  db.collection("research").limit(400).onSnapshot((s) => { S.research = list(s); rerender(); }, onErr("research"));
+  db.collection("research_results").orderBy("tested_at", "desc").limit(400).onSnapshot((s) => { S.results = list(s); rerender(); }, onErr("research results"));
   db.collection("journal").orderBy("date", "desc").limit(60).onSnapshot((s) => { S.journal = list(s); rerender(); }, onErr("journal"));
   db.doc("strategy/params").onSnapshot((d) => { S.params = d.exists ? d.data() : null; rerender(); }, onErr("strategy params"));
   db.doc("strategy/backtest").onSnapshot((d) => { S.backtest = d.exists ? d.data() : null; rerender(); }, onErr("backtest"));

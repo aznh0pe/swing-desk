@@ -152,11 +152,80 @@ def _target(ind, sp):
             "cap_atr": float(t.get("cap_atr", 4.0))}
 
 
+def meta(name: str, P: dict | None = None) -> dict:
+    """Label / family / description for a built-in or a promoted research strategy."""
+    if name in STRATEGY_META:
+        return STRATEGY_META[name]
+    cu = ((P or {}).get("custom") or {}).get(name) or {}
+    spec = cu.get("spec") or {}
+    return {"label": cu.get("label") or spec.get("label") or name,
+            "family": cu.get("family") or spec.get("family") or "Research",
+            "about": cu.get("about") or spec.get("about") or "", "custom": True,
+            "source": spec.get("source")}
+
+
+# The bar every strategy must clear to trade live (re-checked at each weekly recalibration).
+ENABLE_RULE = {"train_win": 0.58, "train_pf": 1.30, "train_avg": 0.002, "oos_pf": 1.05, "oos_decay": 0.08}
+
+
+def enable_checks(st_train: dict, st_test: dict) -> tuple[bool, list, str]:
+    """(enabled, checks, plain-English reason) for the live-trading bar."""
+    R = ENABLE_RULE
+    tw, tpf, tav = st_train.get("win_rate"), st_train.get("profit_factor"), st_train.get("avg_ret")
+    ow, opf, on = st_test.get("win_rate"), st_test.get("profit_factor"), st_test.get("trades", 0)
+    dec = (tw - ow) if (tw is not None and ow is not None) else None
+    checks = [
+        {"key": "train_win", "label": "Win rate 2008-2021", "value": tw, "need": f">= {R['train_win']:.0%}",
+         "ok": tw is not None and tw >= R["train_win"]},
+        {"key": "train_pf", "label": "Profit factor 2008-2021", "value": tpf, "need": f">= {R['train_pf']:.2f}",
+         "ok": tpf is not None and tpf >= R["train_pf"]},
+        {"key": "train_avg", "label": "Average trade 2008-2021", "value": tav, "need": f"> +{100 * R['train_avg']:.2f}%",
+         "ok": tav is not None and tav > R["train_avg"]},
+        {"key": "oos_pf", "label": "Profit factor 2022-now (unseen data)", "value": opf, "need": f">= {R['oos_pf']:.2f}",
+         "ok": bool(on) and opf is not None and opf >= R["oos_pf"]},
+        {"key": "oos_decay", "label": "Win-rate drop on unseen data", "value": dec,
+         "need": f"<= {100 * R['oos_decay']:.0f} pts", "ok": dec is not None and dec <= R["oos_decay"] + 1e-9},
+    ]
+    ok = all(c["ok"] for c in checks)
+    if ok:
+        reason = (f"Active: passed every live-trading check ({100 * tw:.0f}% wins 2008-2021, "
+                  f"{100 * ow:.0f}% on unseen 2022-now data, profit factor {opf:.2f}).")
+    else:
+        bits = []
+        for c in checks:
+            if c["ok"]:
+                continue
+            v = c["value"]
+            if c["key"] == "train_win":
+                bits.append(f"only {100 * v:.1f}% of 2008-2021 trades won (needs {R['train_win']:.0%})" if v is not None else "no trades")
+            elif c["key"] == "train_pf":
+                bits.append(f"profit factor {v:.2f} on 2008-2021 data is below {R['train_pf']:.2f}: winners too small for the losers"
+                            if v is not None else "no profit factor")
+            elif c["key"] == "train_avg":
+                bits.append(f"average trade {100 * v:+.2f}% is too thin after costs" if v is not None else "no trades")
+            elif c["key"] == "oos_pf":
+                bits.append(f"on unseen 2022-now data it roughly broke even (profit factor {opf:.2f}, needs {R['oos_pf']:.2f})"
+                            + (f" even though {100 * ow:.0f}% of trades won" if ow else "") if opf is not None else
+                            "not enough unseen-data trades")
+            elif c["key"] == "oos_decay":
+                bits.append(f"win rate fell {100 * v:.1f} pts on unseen data (allowed {100 * R['oos_decay']:.0f}): the edge faded"
+                            if v is not None else "no unseen-data trades")
+        reason = "Off: " + "; ".join(bits) + ". Re-tested at every weekly recalibration; it switches back on by itself if it passes."
+    return ok, checks, reason
+
+
 def build(name: str, ind: dict, P: dict, b: dict | None = None) -> dict | None:
     sp = P["strategies"].get(name)
     if not sp or not sp.get("enabled", True):
         return None
     b = b or base_masks(ind, P)
+    cu = (P.get("custom") or {}).get(name)
+    if cu:
+        from .rules import build_plan
+        try:
+            return build_plan(cu["spec"], ind, P, b, cu.get("params"), name=name)
+        except Exception:
+            return None
     c, o, h, l = ind["close"], ind["open"], ind["high"], ind["low"]
     atr = ind["atr10"]
     uni = _universe_mask(b, sp.get("universe", "all")) & b["liquid"]
