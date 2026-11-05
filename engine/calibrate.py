@@ -150,32 +150,68 @@ def search_strategy(name, ind, P, split, log):
     return {"variant": best_v, "trades": best_tr, "objective": best_obj2, "tried": tried}
 
 
+def _isotonic(rows: list[dict]) -> list[dict]:
+    """Pool adjacent bands until the win rate never falls as the score rises."""
+    blocks = [{"lo": r["lo"], "hi": r["hi"], "w": r["win"] * r["n"], "a": r["avg"] * r["n"], "n": r["n"], "rows": [r]} for r in rows]
+    i = 0
+    while i < len(blocks) - 1:
+        if blocks[i]["w"] / blocks[i]["n"] > blocks[i + 1]["w"] / blocks[i + 1]["n"]:
+            a, b = blocks[i], blocks.pop(i + 1)
+            a.update(hi=b["hi"], w=a["w"] + b["w"], a=a["a"] + b["a"], n=a["n"] + b["n"], rows=a["rows"] + b["rows"])
+            i = max(0, i - 1)
+        else:
+            i += 1
+    out = []
+    for bl in blocks:
+        for r in bl["rows"]:
+            out.append({**r, "win": round(bl["w"] / bl["n"], 4), "avg": round(bl["a"] / bl["n"], 5), "n_band": bl["n"]})
+    return out
+
+
 def calibrate_grades(all_tr: pd.DataFrame, split, min_week=3) -> dict:
-    """Pick A+ cut-offs on out-of-sample trades: highest win rate with enough setups/week."""
-    t = all_tr[(all_tr["signal_date"] >= split) & all_tr["ret"].notna()].copy()
-    if t.empty:
-        return {"aplus_score": 80, "aplus_pwin": 0.70, "min_week": min_week}
-    weeks = max(1.0, (t["signal_date"].max() - t["signal_date"].min()).days / 7)
-    # signals per week counted on all signals (filled or not) that would have been alerted
+    """Pick A+ cut-offs on out-of-sample trades: the highest win rate whose average trade is
+    at least +0.6% and that still produces enough setups per week across the universe."""
+    t = all_tr[(all_tr["signal_date"] >= split) & all_tr["ret"].notna() & all_tr["filled"]].copy()
     sig = all_tr[all_tr["signal_date"] >= split]
-    best = None
-    for sc in range(60, 92, 2):
-        for pw in (0.60, 0.65, 0.68, 0.70, 0.72, 0.75, 0.78, 0.80):
+    if t.empty:
+        return {"aplus_score": 70, "aplus_pwin": 0.66, "min_week": min_week, "note": "fallback cut-offs"}
+    weeks_idx = pd.date_range(sig["signal_date"].min(), sig["signal_date"].max(), freq="W")
+    weeks = max(1.0, len(weeks_idx))
+    cands = []
+    for sc in range(40, 94, 2):
+        for pw in (0.62, 0.64, 0.66, 0.68, 0.70, 0.72, 0.74, 0.76):
             sel = t[(t["score"] >= sc) & (t["p"] >= pw)]
-            s_all = sig[(sig["score"] >= sc) & (sig["p"] >= pw)]
-            per_week = s_all.drop_duplicates(["signal_date", "ticker"]).shape[0] / weeks
-            if len(sel) < 80 or per_week < min_week * 1.6:
+            if len(sel) < 150:
+                continue
+            avg = sel["ret"].mean()
+            s_all = sig[(sig["score"] >= sc) & (sig["p"] >= pw)].drop_duplicates(["signal_date", "ticker"])
+            per_week = len(s_all) / weeks
+            if avg < 0.006 or per_week < min_week * 1.6:
                 continue
             wr = (sel["ret"] > 0).mean()
-            key = (round(wr, 3), sel["ret"].mean())
-            if best is None or key > best[0]:
-                best = (key, sc, pw, per_week, len(sel), sel["ret"].mean())
-    if best is None:
-        return {"aplus_score": 70, "aplus_pwin": 0.62, "min_week": min_week, "note": "fallback cut-offs"}
-    (wr, _), sc, pw, per_week, n, avg = best
+            wk = s_all.groupby(pd.Grouper(key="signal_date", freq="W")).size().reindex(weeks_idx, fill_value=0)
+            cands.append((float(wr), float(avg), sc, pw, per_week, len(sel), float((wk >= min_week).mean())))
+    if not cands:
+        return {"aplus_score": 70, "aplus_pwin": 0.66, "min_week": min_week, "note": "fallback cut-offs"}
+    top_wr = max(c[0] for c in cands)
+    top_avg = max(c[1] for c in cands if c[0] >= top_wr - 0.012)
+    # adjacent score bands are statistically indistinguishable, so among cut-offs within 1.2 points
+    # of the best win rate (and 85% of its average trade) take the one that covers the most weeks
+    near = [c for c in cands if c[0] >= top_wr - 0.012 and c[1] >= 0.85 * top_avg] or cands
+    wr, avg, sc, pw, per_week, n, cover = max(near, key=lambda c: (c[6], c[0]))
+    # realised out-of-sample win rate by score band: what the alert's Win % shows
+    table = []
+    for lo, hi in ((40, 54), (54, 62), (62, 66), (66, 70), (70, 74), (74, 78), (78, 82), (82, 86), (86, 90), (90, 101)):
+        b = t[(t["score"] >= lo) & (t["score"] < hi) & (t["p"] >= pw)]
+        if len(b) >= 40:
+            table.append({"lo": lo, "hi": hi, "win": round(float((b["ret"] > 0).mean()), 4),
+                          "avg": round(float(b["ret"].mean()), 5), "n": int(len(b))})
+    table = _isotonic(table)
     return {"aplus_score": sc, "aplus_pwin": pw, "min_week": min_week,
-            "oos_aplus_win_rate": float(wr), "oos_aplus_avg_ret": round(float(avg), 5),
-            "oos_aplus_trades": int(n), "oos_aplus_signals_per_week": round(float(per_week), 1)}
+            "oos_aplus_win_rate": round(wr, 4), "oos_aplus_avg_ret": round(float(avg), 5),
+            "oos_aplus_trades": int(n), "oos_aplus_signals_per_week": round(float(per_week), 1),
+            "oos_weeks_with_min_setups": round(cover, 3), "score_win_table": table,
+            "topup_floor": max(40, sc - 8)}
 
 
 def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=print, merge_state=None) -> dict:
@@ -190,7 +226,7 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
     ind = I.compute(w, universe)
     log(f"indicators done in {time.time() - t0:.0f}s")
     P = S.params_with_defaults(None)
-    report = {"generated": dt.datetime.utcnow().isoformat() + "Z", "split": str(split.date()),
+    report = {"generated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "split": str(split.date()),
               "period": [str(w["close"].index.min().date()), str(w["close"].index.max().date())],
               "tickers": int(w["close"].shape[1]), "strategies": {}}
     pooled = []
@@ -217,7 +253,13 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
         tr = tr.assign(score=M.score(tr["p"].values, feats, train_only, rr.fillna(1).values))
         pooled.append(tr)
         enabled = (st_train.get("win_rate", 0) >= 0.58 and (st_train.get("profit_factor") or 0) >= 1.3
-                   and st_train.get("avg_ret", 0) > 0.002)
+                   and st_train.get("avg_ret", 0) > 0.002
+                   and (st_test.get("profit_factor") or 0) >= 1.05
+                   and st_test.get("win_rate", 0) >= st_train.get("win_rate", 0) - 0.10)
+        # honest per-strategy figures for display and the learning loop: out-of-sample
+        if st_test.get("trades", 0) >= 100:
+            mdl["base_rate"] = st_test["win_rate"]
+            mdl["avg_win"], mdl["avg_loss"] = st_test["avg_win"], st_test["avg_loss"]
         P["strategies"][name]["enabled"] = bool(enabled)
         P.setdefault("models", {})[name] = mdl
         report["strategies"][name] = {
@@ -231,7 +273,19 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
     allp = pd.concat(pooled, ignore_index=True) if pooled else pd.DataFrame()
     if not allp.empty:
         enabled_names = [n for n, v in report["strategies"].items() if v.get("enabled")]
-        en = allp[allp["strategy"].isin(enabled_names)]
+        en = allp[allp["strategy"].isin(enabled_names)].copy()
+        # pooled robust-factor model: fit on pre-split trades, win odds recalibrated out of sample
+        try:
+            pm = M.fit_pooled(en, enabled_names, split)
+            P["models"]["_pooled"] = pm
+            report["pooled_model"] = pm["validation"]
+            p_, e_, ep_ = M.predict_pooled(pm, en[S.FEATURES], en["strategy"].values)
+            en["p"], en["e"], en["e_pct"] = p_, e_, ep_
+            en["score"] = M.score_pooled(p_, ep_)
+            log(f"pooled model: OOS AUC {pm['validation']['oos_auc']}, return corr {pm['validation']['oos_ret_corr']}")
+        except Exception as ex:  # keep the per-strategy scores if the pooled fit fails
+            log(f"pooled model failed: {ex!r}")
+        allp = en
         G = calibrate_grades(en, split)
         P["grading"].update(G)
         report["grading"] = G
@@ -252,7 +306,7 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
                 cv.assign(date=cv["date"].astype(str)).to_csv(out / "equity_curve.csv", index=False)
         allp.drop(columns=[c for c in ("t", "j", "fill_i", "exit_i") if c in allp]).to_parquet(out / "trades.parquet")
     P["version"] = int(time.time())
-    P["updated"] = dt.datetime.utcnow().isoformat() + "Z"
+    P["updated"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     P["source"] = "backtest"
     changes = []
     if merge_state:

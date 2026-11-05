@@ -482,7 +482,14 @@ function viewAlerts() {
   html += actions.length ? `<div class="grid">${actions.map(actionCard).join("")}</div>` : `<div class="empty">No exit or stop alerts right now. The pre-close scan (12:25 PM PT) and post-close scan (2:05 PM PT) check every open position.</div>`;
   html += `</section><section class="section"><div class="section-head"><h2>New A+ opportunities</h2>
     <span class="meta">${capLeft > 0 ? `${capLeft} of ${esc(st.max_open_positions)} position slots free · ${money(f.cash)} cash` : `All ${esc(st.max_open_positions)} slots are in use; setups still listed so you can swap into a stronger one`}</span></div>`;
-  html += entries.length ? `<div class="grid g-tickets">${entries.map((a) => ticket(a, today)).join("")}</div>` : `<div class="empty"><b>No open A+ setups.</b> New setups land after the 2:05 PM PT post-close scan, ready to place as limit orders before the next open. If a day has none, that is the filter doing its job.</div>`;
+  const featured = entries.filter((a) => !a.also_qualified).sort((a, b) => (num(a.rank) ?? 99) - (num(b.rank) ?? 99) || (num(b.score) || 0) - (num(a.score) || 0));
+  const extra = entries.filter((a) => a.also_qualified);
+  html += featured.length ? `<div class="grid g-tickets">${featured.map((a) => ticket(a, today)).join("")}</div>` : `<div class="empty"><b>No open A+ setups.</b> New setups land after the 2:05 PM PT post-close scan, ready to place as limit orders before the next open. If a day has none, that is the filter doing its job.</div>`;
+  if (extra.length) html += `<details class="panel"><summary>Also qualified tonight (${extra.length}): A+ setups outside the top 8 or capped by sector</summary>
+    <div class="tbl-wrap" style="margin-top:10px"><table><thead><tr><th>Ticker</th><th>Strategy</th><th class="n">Score</th><th class="n">Win %</th><th class="n">Buy limit</th><th class="n">Stop</th><th class="n">Target</th><th class="n">Shares</th><th class="n">Cost</th><th>Why not featured</th><th></th></tr></thead><tbody>
+    ${extra.map((a) => `<tr><td><span class="t">${esc(a.ticker)}</span></td><td class="small">${esc(a.strategy_label)}</td><td class="n">${esc(a.score)}</td><td class="n">${pct(a.win_pct, 0)}</td><td class="n">${px(a.entry)}</td><td class="n">${px(a.stop)}</td><td class="n">${px(a.target)}</td><td class="n">${esc(a.shares)}${a.fractional ? "*" : ""}</td><td class="n">${money(a.total_cost)}</td><td class="small muted">${esc(String(a.capacity_note || "").replace(/^Also qualified \(|\)\..*$/g, ""))}</td>
+      <td class="n" style="white-space:nowrap"><button class="btn small" type="button" data-act="fill" data-id="${esc(a.id)}">Filled</button> <button class="btn ghost small" type="button" data-act="skip" data-id="${esc(a.id)}">Skip</button></td></tr>`).join("")}
+    </tbody></table></div></details>`;
   html += `</section><section class="section"><div class="section-head"><h2>Open positions</h2><span class="meta">Filled orders being managed · hold days count trading sessions</span></div>${openTable()}</section>`;
   const recent = S.alerts.filter((a) => a.type === "entry" && !entryLive(a)).slice(0, 15);
   if (recent.length) html += `<section class="section"><details><summary>Recently handled setups (${recent.length})</summary><div class="tbl-wrap" style="margin-top:8px"><table><thead><tr><th>Signal</th><th>Ticker</th><th>Strategy</th><th class="n">Score</th><th class="n">Win %</th><th class="n">Entry</th><th>Status</th></tr></thead><tbody>
@@ -508,7 +515,7 @@ function ticket(a, today) {
   const news = a.news_check && a.news_check !== "pending" ? `<div><b>News check:</b> ${esc(a.news_check)}${a.news_note ? " · " + esc(a.news_note) : ""}</div>` : "";
   return `<article class="ticket ${a.capacity_note ? "overcap" : ""}" aria-label="${esc(a.ticker)} setup">
     <div class="t-head">${grade}<div class="t-title"><div class="tk">${esc(a.ticker)}</div><div class="nm" title="${esc(a.name)}">${esc(a.name)}</div>
-      <div class="st">${esc(a.strategy_label)} · ${esc(a.family)}</div></div>
+      <div class="st">${a.rank ? `#${esc(a.rank)} · ` : ""}${esc(a.strategy_label)} · ${esc(a.family)}</div></div>
       <div class="t-odds"><div class="lbl">Win est.</div><div class="big">${pct(a.win_pct, 0)}</div><div class="lbl">Score ${esc(a.score)}</div></div></div>
     <div class="t-body">${ladderSvg(a)}<div class="levels">
       <span class="lk">Target</span><span class="lv">${px(t)}</span><span class="ld">${spct(rewPct)}</span>
@@ -524,6 +531,7 @@ function ticket(a, today) {
       ${news}
       ${Array.isArray(a.why) && a.why.length ? `<details><summary>Why it qualifies</summary><ul>${a.why.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></details>` : ""}
     </div>
+    ${a.topup_note ? `<div class="note-strip">${esc(a.topup_note)}</div>` : ""}
     ${a.size_note ? `<div class="note-strip">${esc(a.size_note)}</div>` : ""}
     ${a.capacity_note ? `<div class="note-strip">${esc(a.capacity_note)}</div>` : ""}
     ${stale ? `<div class="note-strip">This order was for ${dShort(a.valid_for)}. If it filled, mark it done; otherwise skip it.</div>` : ""}

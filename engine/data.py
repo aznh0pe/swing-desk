@@ -144,7 +144,20 @@ def to_wide(long_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
         out[f] = w.astype("float64")
     # keep only tickers that have closes
     cols = out["close"].columns[out["close"].notna().any()]
-    return {k: v[cols] for k, v in out.items()}
+    out = {k: v[cols] for k, v in out.items()}
+    # drop phantom sessions (market holidays where the feed returned a stray bar for a few
+    # tickers): a session needs at least half of the tickers that traded around it
+    cnt = out["close"].notna().sum(axis=1)
+    typical = cnt.rolling(21, center=True, min_periods=5).median()
+    keep = cnt >= 0.5 * typical
+    if len(cnt):
+        keep &= pd.Series([cal.is_trading_day(d) for d in out["close"].index], index=cnt.index)
+    out = {k: v[keep] for k, v in out.items()}
+    # bridge isolated missing bars (halts, feed gaps) so rolling windows don't go blank
+    for f in ("open", "high", "low", "close"):
+        out[f] = out[f].ffill(limit=3)
+    out["volume"] = out["volume"].fillna(0)
+    return out
 
 
 def load_daily(d) -> dict[str, pd.DataFrame]:

@@ -105,8 +105,8 @@ def size_position(entry: float, stop: float, capital: float, cash: float, P: dic
     fractional = False
     if shares < 1:
         alloc = min(by_risk * entry, (budget if budget > 0 else cap_usd))
-        if alloc >= entry * 0.9:
-            shares = 1
+        if alloc >= entry * 0.9 or (per_share <= 1.6 * risk_usd and entry <= (budget if budget > 0 else cap_usd)):
+            shares = 1  # one whole share keeps it a limit order; risk stays within 1.6x the target
         else:
             shares = round(alloc / entry, 3)
             fractional = True

@@ -127,3 +127,87 @@ def live_offset(base_rate: float, wins: int, n: int, prior_n: float = 60.0, max_
     b = (1 - base_rate) * prior_n + (n - wins)
     post = a / (a + b)
     return float(np.clip(_logit(post) - _logit(base_rate), -max_shift, max_shift))
+
+
+# ----------------------------------------------------------------------------- pooled model
+# One small model across all enabled strategies, using only factors whose effect held up
+# out of sample: market stress (SPY 5-day drop, VIX vs its average, breadth), relative
+# strength, trend strength, volatility, depth of the 5-day drop, distance from the 200-day,
+# plus a per-strategy term. Win odds are Platt-recalibrated on out-of-sample trades so the
+# displayed win % matches what recent setups actually did.
+
+POOLED = ["spy_ret5", "spy_drop", "vix_ratio", "breadth50", "rs_pct", "rs_weak", "adx14",
+          "atr_pct", "ret5", "dist200"]
+
+
+def pooled_frame(feats: pd.DataFrame, strategies, strat_names) -> pd.DataFrame:
+    f = feats.reset_index(drop=True)
+    st = pd.Series(list(strategies)).reset_index(drop=True)
+    X = pd.DataFrame(index=f.index)
+    X["spy_ret5"] = f["spy_ret5"].astype(float).fillna(0).clip(-0.1, 0.05)
+    X["spy_drop"] = (-f["spy_ret5"].astype(float).fillna(0)).clip(0, 0.1)
+    X["vix_ratio"] = f["vix_ratio"].astype(float).fillna(1).clip(0.7, 2.0)
+    X["breadth50"] = f["breadth50"].astype(float).fillna(0.5)
+    is_etf = f["is_etf"].astype(float).fillna(0) > 0.5
+    X["rs_pct"] = np.where(is_etf, 0.6, f["rs_pct"].astype(float).fillna(0.5))
+    X["rs_weak"] = (X["rs_pct"] < 0.44).astype(float)
+    X["adx14"] = f["adx14"].astype(float).fillna(20).clip(5, 60)
+    X["atr_pct"] = f["atr_pct"].astype(float).fillna(0.02).clip(0.005, 0.08)
+    X["ret5"] = f["ret5"].astype(float).fillna(0).clip(-0.3, 0.1)
+    X["dist200"] = f["dist200"].astype(float).fillna(0.05).clip(-0.2, 0.8)
+    for s in strat_names:
+        X["s_" + s] = (st == s).astype(float).values
+    return X
+
+
+def fit_pooled(trades: pd.DataFrame, strat_names: list[str], split) -> dict:
+    from sklearn.linear_model import LogisticRegression, Ridge
+    from sklearn.metrics import roc_auc_score
+
+    t = trades[trades["filled"] & trades["ret"].notna() & trades["strategy"].isin(strat_names)].reset_index(drop=True)
+    X = pooled_frame(t, t["strategy"], strat_names)
+    y = (t["ret"] > 0).astype(int).values
+    r = t["ret"].clip(-0.25, 0.25).values
+    tr = (t["signal_date"] < split).values
+    te = ~tr
+    mu = X[tr].mean()
+    sd = X[tr].std().replace(0, 1).fillna(1)
+    Z = ((X - mu) / sd).values
+    lr = LogisticRegression(C=0.5, max_iter=2000).fit(Z[tr], y[tr])
+    rg = Ridge(alpha=10.0).fit(Z[tr], r[tr])
+    z_te = lr.decision_function(Z[te])
+    cal = LogisticRegression(C=1e6, max_iter=1000).fit(z_te.reshape(-1, 1), y[te])
+    a, b = float(cal.intercept_[0]), float(cal.coef_[0][0])
+    p_te = 1 / (1 + np.exp(-(a + b * z_te)))
+    e_te = rg.predict(Z[te])
+    m = {"kind": "pooled", "features": list(X.columns), "strategies": strat_names,
+         "mean": {k: float(v) for k, v in mu.items()}, "std": {k: float(v) for k, v in sd.items()},
+         "logit_coef": [float(v) for v in lr.coef_[0]], "logit_b0": float(lr.intercept_[0]),
+         "calib_a": a, "calib_b": b, "ridge_coef": [float(v) for v in rg.coef_], "ridge_b0": float(rg.intercept_),
+         "e_pct_cuts": [float(v) for v in np.quantile(e_te, np.linspace(0, 1, 101))],
+         "validation": {"oos_trades": int(te.sum()), "oos_auc": round(float(roc_auc_score(y[te], p_te)), 3),
+                        "oos_ret_corr": round(float(np.corrcoef(e_te, t["ret"].values[te])[0, 1]), 3)}}
+    dec = pd.qcut(e_te, 10, labels=False, duplicates="drop")
+    tb = pd.DataFrame({"dec": dec, "win": y[te], "ret": t["ret"].values[te]}).groupby("dec").agg(
+        win=("win", "mean"), avg=("ret", "mean"), n=("ret", "size"))
+    m["validation"]["oos_by_expected_return_decile"] = tb.round(4).reset_index().to_dict("records")
+    return m
+
+
+def predict_pooled(m: dict, feats: pd.DataFrame, strategies, offsets: dict | None = None):
+    X = pooled_frame(feats, strategies, m["strategies"])
+    Z = np.column_stack([(X[c].values - m["mean"][c]) / (m["std"][c] or 1) for c in m["features"]])
+    z = Z @ np.array(m["logit_coef"]) + m["logit_b0"]
+    z = m["calib_a"] + m["calib_b"] * z
+    if offsets:
+        z = z + np.array([float((offsets.get(s) or {}).get("offset", 0.0)) for s in strategies])
+    p = 1 / (1 + np.exp(-z))
+    e = Z @ np.array(m["ridge_coef"]) + m["ridge_b0"]
+    cuts = np.array(m["e_pct_cuts"])
+    e_pct = np.interp(e, cuts, np.linspace(0, 1, len(cuts)))
+    return np.clip(p, 0.5, 0.9), e, e_pct
+
+
+def score_pooled(p, e_pct) -> np.ndarray:
+    s_p = np.clip((np.asarray(p) - 0.62) / (0.78 - 0.62), 0, 1)
+    return np.round(100 * (0.55 * np.asarray(e_pct) + 0.45 * s_p), 1)

@@ -78,18 +78,27 @@ def regime_summary(ind) -> dict:
 
 
 def earnings_conflict(tk, earnings, start_day, hold) -> tuple[bool, str | None]:
+    """True if the company reported in the last 3 sessions (the dip is an earnings reaction)
+    or reports before the hold window ends (gap risk)."""
     e = (earnings or {}).get(tk) or {}
-    nxt = e.get("next")
-    if not nxt:
-        return False, None
-    try:
-        ed = cal._d(nxt)
-    except Exception:
-        return False, None
+    recent_cut = cal.prev_trading_day(start_day, 4)
     end = start_day
     for _ in range(hold):
         end = cal.next_trading_day(end)
-    return (start_day <= ed <= end), str(ed)
+    hit, nxt_s = False, None
+    for key in ("next", "last"):
+        v = e.get(key)
+        if not v:
+            continue
+        try:
+            ed = cal._d(v)
+        except Exception:
+            continue
+        if recent_cut <= ed <= end:
+            hit = True
+        if key == "next" and ed >= start_day:
+            nxt_s = str(ed)
+    return hit, nxt_s
 
 
 def exit_signal_text(plan_name, sp, dyn, target, stop, hold, earnings_next):
@@ -164,11 +173,32 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
             errors.append(f"strategy {name} failed: {e!r}"[:300])
     if not cands:
         return [], []
-    # score
+    # score: pooled robust-factor model when calibrated, else the per-strategy model
+    pm = P.get("models", {}).get("_pooled")
+    if pm and pm.get("kind") == "pooled":
+        fdf = pd.DataFrame([cd["feats"] for cd in cands])
+        names = [cd["name"] for cd in cands]
+        try:
+            p_, e_, ep_ = M.predict_pooled(pm, fdf, names, P.get("live_adjust"))
+            sc_ = M.score_pooled(p_, ep_)
+            for cd, pv, ev, epv, scv in zip(cands, p_, e_, ep_, sc_):
+                cd.update(p=float(pv), exp_ret=float(ev), e_pct=float(epv), score=float(scv))
+        except Exception as e:
+            errors.append(f"pooled model failed, using per-strategy scores: {e!r}"[:200])
+            pm = None
+    if not (pm and pm.get("kind") == "pooled"):
+        for cd in cands:
+            cd["score"] = float(M.score(np.array([cd["p"]]), pd.DataFrame([cd["feats"]]), cd["model"], np.array([cd["rr"]]))[0])
+    table = P["grading"].get("score_win_table") or []
     for cd in cands:
-        sc = M.score(np.array([cd["p"]]), pd.DataFrame([cd["feats"]]), cd["model"], np.array([cd["rr"]]))[0]
-        cd["score"] = float(sc)
         cd["grade"] = M.grade(cd["score"], cd["p"], P["grading"])
+        cd["model_p"] = cd["p"]
+        for row in table:  # Win % = how often past setups with this score actually won
+            if row["lo"] <= cd["score"] < row["hi"]:
+                n = row["n"]
+                cd["p"] = (row["win"] * n + cd["model_p"] * 30) / (n + 30)
+                cd["band_avg"] = row["avg"]
+                break
     # one setup per ticker: best score
     best = {}
     for cd in cands:
@@ -178,6 +208,21 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
         if b is None or cd["score"] > b["score"]:
             best[cd["ticker"]] = cd
     ranked = sorted(best.values(), key=lambda x: (-x["score"], -x["p"]))
+    # weekly minimum: from Wednesday's post-close scan on, top the week up to `min_week`
+    # setups with the best grade-A candidates (clearly labelled as such)
+    G = P["grading"]
+    wk_start = (asof - dt.timedelta(days=asof.weekday())).isoformat()
+    week_so_far = sum(1 for v in state["alerts"].values() if v["doc"].get("type") == "entry"
+                      and str(v["doc"].get("signal_date", "")) >= wk_start)
+    n_aplus = sum(1 for cd in ranked if cd["grade"] == "A+")
+    need = max(0, int(G.get("min_week", 3)) - week_so_far - n_aplus) if (mode == "postclose" and asof.weekday() >= 2) else 0
+    floor = float(G.get("topup_floor", G.get("aplus_score", 74) - 8))
+    for cd in ranked:
+        if need <= 0:
+            break
+        if cd["grade"] != "A+" and cd["score"] >= floor and cd["p"] >= G.get("aplus_pwin", 0.62):
+            cd["grade"], cd["topup"] = "A", True
+            need -= 1
     out, near = [], []
     cap_left = int(settings.get("max_open_positions", P["risk"]["max_open"])) - f["open_count"]
     cash_left = f["cash"]
@@ -194,11 +239,15 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
             sc = sector_of(v["doc"].get("ticker"))
             if sc:
                 sec_count[sc] = sec_count.get(sc, 0) + 1
+    FEATURED, PER_SECTOR = 8, 2
+    rank, featured_sec = 0, {}
     for cd in ranked:
         hold = int(cd["sp"]["max_hold"])
         conflict, e_next = earnings_conflict(cd["ticker"], earnings, session_day, hold)
         if conflict:
-            continue  # never carry a swing through earnings
+            continue  # never trade an earnings reaction or carry a swing through earnings
+        if cd["rr"] < 0.2:
+            continue  # too lopsided: one stop-out erases five targets
         u = universe.loc[cd["ticker"]] if cd["ticker"] in universe.index else None
         meta = S.STRATEGY_META[cd["name"]]
         size = size_position(cd["entry"], cd["stop"], f["capital"], cash_left, P, cd["score"], settings)
@@ -212,7 +261,8 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
             "sector": (u["sector"] if u is not None and isinstance(u["sector"], str) else None),
             "strategy": cd["name"], "strategy_label": meta["label"], "family": meta["family"],
             "grade": cd["grade"], "score": round(cd["score"], 1), "win_pct": round(100 * e_win, 1),
-            "exp_return_pct": round(100 * (e_win * aw + (1 - e_win) * al), 2),
+            "model_win_pct": round(100 * cd.get("model_p", e_win), 1),
+            "exp_return_pct": round(100 * (cd["exp_ret"] if "exp_ret" in cd else (e_win * aw + (1 - e_win) * al)), 2),
             "entry": _r(cd["entry"]), "stop": _r(cd["stop"]), "target": _r(cd["target"]),
             "rr": _r(cd["rr"], 2), "risk_per_share": _r(cd["entry"] - cd["stop"]),
             "reward_per_share": _r(cd["target"] - cd["entry"]),
@@ -235,19 +285,32 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
             "features": {k: _r(v, 4) for k, v in cd["feats"].items()},
             "partial_bar": bool(partial_bar),
         }
-        if cd["grade"] == "A+":
+        if cd.get("topup"):
+            doc["grade"] = "A"
+            doc["topup_note"] = ("Weekly top-up: the best grade-A setup, sent because this week has fewer than "
+                                 f"{G.get('min_week', 3)} A+ setups so far.")
+        if cd["grade"] == "A+" or cd.get("topup"):
             sc = sector_of(cd["ticker"])
-            if sc and sec_count.get(sc, 0) >= 2:
-                doc["size_note"] = ((doc.get("size_note") or "") + f" Sector check: {sec_count[sc]} positions/setups "
-                                    f"already in {sc}; taking more adds correlated risk.").strip()
-            if sc:
-                sec_count[sc] = sec_count.get(sc, 0) + 1
-            if cap_left <= 0:
-                doc["capacity_note"] = ("Max open positions reached. Only take this if it beats your "
-                                        "weakest open trade (score/win%), or if a position exits first.")
+            held_sec = sec_count.get(sc, 0) if sc else 0
+            # featured list: best scores first, at most 2 per sector (counting open positions)
+            is_featured = rank < FEATURED and (not sc or held_sec + featured_sec.get(sc, 0) < PER_SECTOR)
+            if is_featured:
+                rank += 1
+                doc["rank"] = rank
+                if sc:
+                    featured_sec[sc] = featured_sec.get(sc, 0) + 1
+                if rank > cap_left:
+                    doc["capacity_note"] = (f"Ranked #{rank} tonight and you have {max(cap_left, 0)} free position "
+                                            "slot(s). Place it only if you skip a higher-ranked setup, or once "
+                                            "a position closes.")
+                else:
+                    cash_left -= size["total_cost"]
             else:
-                cap_left -= 1
-                cash_left -= size["total_cost"]
+                doc["rank"] = None
+                doc["also_qualified"] = True
+                reason = (f"{held_sec + featured_sec.get(sc, 0)} positions/featured setups already in {sc}"
+                          if sc and held_sec + featured_sec.get(sc, 0) >= PER_SECTOR else "outside tonight's top 8")
+                doc["capacity_note"] = f"Also qualified ({reason}). Listed so you can swap into it if it suits you better."
             out.append(doc)
         elif cd["grade"] == "A" and len(near) < 8:
             near.append(doc)
@@ -450,11 +513,14 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
         lines += ["", "PRE-MARKET CHECK OF TODAY'S ORDERS"]
         for c in pm_checks:
             lines.append(f"- {c['ticker']}: {c['verdict'].upper()}. {c['text']}")
+    featured = [e for e in entries if not e.get("also_qualified")]
+    extra = [e for e in entries if e.get("also_qualified")]
     if entries:
-        lines += ["", f"A+ SETUPS ({len(entries)})"]
-        for i, e in enumerate(entries, 1):
+        lines += ["", f"SETUPS ({len(featured)} featured{f', {len(extra)} more below' if extra else ''}): A+ unless marked"]
+        for i, e in enumerate(featured, 1):
             frac = " (FRACTIONAL: market hours only)" if e["fractional"] else ""
-            lines.append(f"{i}. {e['ticker']} ({e['name']}) | {e['strategy_label']} | score {e['score']} | win {e['win_pct']}%")
+            tag = " [grade A, weekly top-up]" if e.get("topup_note") else ""
+            lines.append(f"{i}. {e['ticker']} ({e['name']}) | {e['strategy_label']} | score {e['score']} | win {e['win_pct']}%{tag}")
             lines.append(f"   Entry: {e['order']}")
             lines.append(f"   Stop ${e['stop']} | Target ${e['target']} | R:R {e['rr']} | hold up to {e['hold_max_days']} days")
             lines.append(f"   Size {e['shares']} sh{frac} = ${e['total_cost']:,.2f} ({e['pct_of_capital']}% of capital), risk ${e['risk_usd']}")
@@ -463,6 +529,11 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
                 lines.append(f"   Note: {e['capacity_note']}")
             if e.get("size_note"):
                 lines.append(f"   Note: {e['size_note']}")
+        if extra:
+            lines += ["", "ALSO QUALIFIED (A+, outside the top 8 or sector-capped)"]
+            for e in extra:
+                lines.append(f"- {e['ticker']} {e['strategy_label']}: score {e['score']}, limit ${e['entry']}, "
+                             f"stop ${e['stop']}, target ${e['target']}, {e['shares']} sh")
     elif scan["mode"] == "postclose":
         lines += ["", "No A+ setups tonight. Standing aside is a position."]
     if near and (week_aplus < P["grading"].get("min_week", 3)):
