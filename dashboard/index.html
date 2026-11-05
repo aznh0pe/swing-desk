@@ -873,7 +873,7 @@ document.addEventListener("focusout", () => setTimeout(() => { if (pending && !t
   db.collection("alerts").orderBy("created_at", "desc").limit(400).onSnapshot((s) => { S.alerts = list(s); S.loaded.alerts = true; if (!s.metadata.fromCache) { clearTimeout(loadTimer); S.dbError = null; } rerender(); }, onErr("alerts"));
   db.collection("trades").onSnapshot((s) => { S.trades = list(s); S.loaded.trades = true; rerender(); }, onErr("trades"));
   db.collection("ledger").onSnapshot((s) => { S.ledger = list(s); S.loaded.ledger = true; rerender(); }, onErr("ledger"));
-  db.collection("scans").orderBy("started_at", "desc").limit(40).onSnapshot((s) => { S.scans = list(s); rerender(); }, onErr("scans"));
+  db.collection("scans").orderBy("started_at", "desc").limit(60).onSnapshot((s) => { S.scans = list(s).sort((a, b) => (Date.parse(b.started_at) || 0) - (Date.parse(a.started_at) || 0)).slice(0, 40); rerender(); }, onErr("scans"));
   db.collection("journal").orderBy("date", "desc").limit(60).onSnapshot((s) => { S.journal = list(s); rerender(); }, onErr("journal"));
   db.doc("strategy/params").onSnapshot((d) => { S.params = d.exists ? d.data() : null; rerender(); }, onErr("strategy params"));
   db.doc("strategy/backtest").onSnapshot((d) => { S.backtest = d.exists ? d.data() : null; rerender(); }, onErr("backtest"));

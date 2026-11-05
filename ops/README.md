@@ -1,0 +1,1 @@
+Scheduled-task prompts. scan_prompt.md is a template: {MODE}, {MODE_LABEL}, {FRESHNESS_RULE}, {NEWS_STEP}, {OWNER}, {ARTIFACT} are filled per task (pre-market, pre-close, post-close, on-demand) when the tasks are created or updated.

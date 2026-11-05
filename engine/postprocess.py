@@ -50,6 +50,23 @@ def apply(out_dir: str, news: list[str], state_dir: str | None = None) -> dict:
         else:
             e["news_check"], e["news_note"] = "clean", note
         kept.append(e)
+    # re-rank the featured list on the news-adjusted scores
+    feat = sorted([e for e in kept if not e.get("also_qualified")], key=lambda e: -float(e["score"]))
+    max_open = int(((P or {}).get("risk") or {}).get("max_open", 5))
+    if state_dir:
+        try:
+            max_open = int(load_state(state_dir)["settings"].get("max_open_positions", max_open))
+        except Exception:
+            pass
+    cap_left = max(0, max_open - int(scan.get("funds", {}).get("open_count", 0)))
+    for i, e in enumerate(feat, 1):
+        e["rank"] = i
+        if i > cap_left:
+            e["capacity_note"] = (f"Ranked #{i} tonight and you have {cap_left} free position slot(s). Place it only "
+                                  "if you skip a higher-ranked setup, or once a position closes.")
+        elif str(e.get("capacity_note", "")).startswith("Ranked #"):
+            e.pop("capacity_note", None)
+    kept = feat + [e for e in kept if e.get("also_qualified")]
     keep_ids = {e["id"] for e in kept}
     drop_ids = {e["id"] for e in entries} - keep_ids
     # rewrite alert docs
