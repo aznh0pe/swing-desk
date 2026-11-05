@@ -322,7 +322,14 @@ def mode_history(out: pathlib.Path, tickers: list[str], meta: dict, now_et: dt.d
         return
     for c in ["open", "high", "low", "close"]:
         df[c] = df[c].astype("float32")
-    df.to_parquet(out / "history.parquet", index=False, compression="zstd")
+    df = df.sort_values(["ticker", "date"])
+    # split by period so no single file nears GitHub's 50 MB warning size
+    for old_f in out.glob("history*.parquet"):
+        old_f.unlink()
+    yr = df["date"].dt.year
+    for name, m in (("history_2008_2014.parquet", yr <= 2014), ("history_2015_2020.parquet", (yr >= 2015) & (yr <= 2020)),
+                    ("history_2021_now.parquet", yr >= 2021)):
+        df[m].to_parquet(out / name, index=False, compression="zstd")
     meta.update({"history_asof": now_et.isoformat(timespec="minutes"), "history_tickers": int(df["ticker"].nunique()),
                  "history_failed": failed[:50]})
     log(f"history: {len(df)} rows, {df['ticker'].nunique()} tickers")
@@ -338,7 +345,7 @@ def plan_auto(now_et: dt.datetime, meta: dict, out: pathlib.Path) -> list[str]:
     hist_age = None
     if meta.get("history_asof"):
         hist_age = (now_et - dt.datetime.fromisoformat(meta["history_asof"])).days
-    if not (out / "history.parquet").exists() or (hist_age is not None and hist_age >= 7):
+    if not list(out.glob("history*.parquet")) or (hist_age is not None and hist_age >= 7):
         modes.append("history")
     if not (out / "daily.csv.gz").exists():
         modes.append("daily")

@@ -153,10 +153,11 @@ def load_daily(d) -> dict[str, pd.DataFrame]:
 
 def load_history(d) -> dict[str, pd.DataFrame]:
     p = pathlib.Path(d)
-    for name in ["history.parquet", "history.csv.gz"]:
-        if (p / name).exists():
-            return to_wide(read_prices(p / name))
-    raise FileNotFoundError("no history file in " + str(p))
+    parts = sorted(p.glob("history*.parquet")) or sorted(p.glob("history*.csv.gz"))
+    if not parts:
+        raise FileNotFoundError("no history file in " + str(p))
+    frames = [pd.read_parquet(f) if f.suffix == ".parquet" else pd.read_csv(f) for f in parts]
+    return to_wide(_clean_long(pd.concat(frames, ignore_index=True)))
 
 
 def load_intraday(d) -> pd.DataFrame | None:
