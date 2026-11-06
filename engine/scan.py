@@ -388,6 +388,8 @@ def build_overlay(scan_doc: dict, entries: list, ctx: dict) -> dict:
 
 
 def headline(scan_doc: dict) -> str:
+    if scan_doc.get("status") == "closed":
+        return f"Market closed ({scan_doc.get('closed_reason') or 'holiday'})"
     c = scan_doc.get("counts") or {}
     bits = []
     if c.get("aplus"):
@@ -400,7 +402,10 @@ def headline(scan_doc: dict) -> str:
     wd = sum(1 for v in (scan_doc.get("alert_updates") or {}).values() if v.get("withdrawn"))
     if wd:
         bits.append(f"{wd} withdrawn")
-    return " · ".join(bits) if bits else "No action needed"
+    out = " · ".join(bits) if bits else "No action needed"
+    if (scan_doc.get("data") or {}).get("status") not in (None, "ok"):
+        out = "⚠ data " + str(scan_doc["data"]["status"]) + " · " + out
+    return out
 
 
 def _utc_now() -> str:
@@ -419,7 +424,11 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
     out = pathlib.Path(out_dir)
     (out / "docs").mkdir(parents=True, exist_ok=True)
     errors, notes = [], []
+    requested = mode
     mode = resolve_mode(mode, now)
+    if requested in ("premarket", "preclose", "postclose") and not cal.is_trading_day(now.date()):
+        # a scheduled scan on a weekend or market holiday: nothing trades, so nothing to scan
+        return closed_run(requested, now, out, run_token)
     _, close_pt = cal.session_times_pt(now.date())
     close_label = close_pt.strftime("%I:%M %p").lstrip("0") + " PT"
     if mode == "preclose" and cal.market_phase(now) == "postclose":
@@ -437,10 +446,26 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
     w = D.load_daily(data_dir)
     partial = False
     if mode == "preclose":
-        w, partial = D.append_partial_bar(w, D.load_intraday(data_dir))
+        intra = D.load_intraday(data_dir)
+        if intra is not None and len(intra) and intra["date"].max().date() != now.date():
+            intra = None  # a snapshot from another day is not today's price
+        w, partial = D.append_partial_bar(w, intra)
         if not partial:
-            notes.append("No intraday snapshot newer than the last daily bar; using the last close.")
+            notes.append("No live prices from today in the data feed yet, so buy-at-close setups were skipped and "
+                         "exit checks used the last close. Check live prices in your broker before acting.")
     premarket = D.load_premarket(data_dir) if mode == "premarket" else None
+    if premarket is not None and "asof" in premarket.columns:
+        pm_day = str(premarket["asof"].dropna().max())[:10] if premarket["asof"].notna().any() else ""
+        if pm_day != str(now.date()):
+            notes.append(f"Pre-market prices in the feed are from {pm_day or 'an unknown time'}, not this morning, "
+                         "so gap checks were skipped; earnings checks still ran.")
+            premarket = None
+    if mode == "preclose" and partial:
+        mins_left = (close_pt - now).total_seconds() / 60
+        if mins_left > 75:
+            notes.append(f"Early read: prices as of {now.strftime('%I:%M %p').lstrip('0')} PT, "
+                         f"{mins_left / 60:.1f} hours before the close. At-the-close exits and buy-at-close setups "
+                         "can change by then; the pre-close scan 35 minutes before the close confirms them.")
     health = D.data_health({k: v.iloc[:-1] if partial else v for k, v in w.items()}, meta, mode, now)
     # trim to what indicators need
     w = {k: v.iloc[-400:] for k, v in w.items()}
@@ -451,7 +476,7 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
     if mode == "postclose" and cal.market_phase(now) == "open":
         session_day = cal.next_trading_day(now.date())
     entries, near = ([], [])
-    if mode in ("postclose", "preclose"):
+    if mode == "postclose" or (mode == "preclose" and partial):
         entries, near = build_entries(ind, P, plans, state, earnings, universe, session_day, mode,
                                       partial, errors)
     # news-check placeholders are filled by the session after web checks
@@ -548,6 +573,34 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
             "data_status": health["status"], "errors": errors[:5]}
 
 
+def closed_run(mode: str, now, out: pathlib.Path, run_token: str | None = None) -> dict:
+    """A scheduled scan on a weekend or holiday: record that it ran and why there was nothing to do."""
+    reason = cal.closed_reason(now.date())
+    nxt = cal.next_trading_day(now.date())
+    scan_id = now.strftime("%Y%m%d-%H%M") + f"-{mode}"
+    ts = now.isoformat(timespec="seconds")
+    digest = "\n".join([
+        f"SWING DESK | {mode.upper()} SCAN | {now.strftime('%a %b %d, %I:%M %p')} PT", "",
+        f"Market closed today ({reason}). No orders fill and no exits trigger, so there was nothing to scan.",
+        f"Next session: {nxt.strftime('%a %b %d')}, {cal.hours_label(nxt)}. Your open positions and their stops "
+        "carry over unchanged.",
+        "", "Model-generated signals from backtested rules, not financial advice."])
+    scan_doc = {"id": scan_id, "mode": mode, "started_at": ts, "status": "closed", "closed_reason": reason,
+                "session_day": str(nxt), "counts": {"aplus": 0, "exit_alerts": 0}, "positions": [],
+                "notes": [f"Market closed ({reason})."], "digest": digest, "engine": engine_version.info()}
+    writes = []
+    _write(out, writes, "set", "scans", scan_id, scan_doc)
+    token = run_token if (run_token and TOKEN_RE.match(run_token)) else None
+    if token:
+        scan_doc["run_token"] = token
+        _write(out, writes, "set", "runs", f"{token}-s6", run_done_doc(scan_doc, token, _utc_now()))
+    (out / "digest.md").write_text(digest)
+    (out / "scan.json").write_text(json.dumps({"scan": scan_doc, "entries": [], "ctx": {}}, indent=1, default=str))
+    (out / "writes.json").write_text(json.dumps([writes], indent=1))
+    return {"scan_id": scan_id, "mode": mode, "entries": 0, "exits": 0, "writes": len(writes), "chunks": 1,
+            "status": "closed", "data_status": "n/a", "errors": []}
+
+
 def premarket_check(a, premarket, earnings, today) -> dict:
     tk = a.get("ticker")
     res = {"alert_id": a.get("id"), "ticker": tk, "verdict": "keep", "text": "No pre-market issues."}
@@ -600,7 +653,8 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
                  f"/{P['risk']['max_open']}")
     d = scan["data"]
     if d["status"] != "ok":
-        lines.append(f"Data note: {d['status']}: " + " ".join(d["notes"]))
+        lines.insert(1, f"⚠ DATA WARNING ({d['status']}): " + " ".join(n for n in d["notes"] if "refreshed" not in n)
+                     + " Verify prices in your broker before acting on anything below.")
     for n in scan.get("notes") or []:
         lines.append(f"Note: {n}")
     exits = [(p, s) for p in positions for s in p.get("signals", []) if s["level"] in ("alert", "good")]
