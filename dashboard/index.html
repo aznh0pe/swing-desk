@@ -53,6 +53,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .chip { display: inline-flex; flex-direction: column; padding: 4px 10px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface); min-width: 0; }
 .chip .k { font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-3); }
 .chip .v { font-family: var(--f-mono); font-variant-numeric: tabular-nums; font-size: 14px; font-weight: 600; }
+.chip-btn { font: inherit; color: inherit; text-align: left; cursor: pointer; }
+.chip-btn:hover { border-color: var(--ink-3); }
+.chip-btn:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
 .btn { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line-2); background: var(--surface); padding: 7px 12px; border-radius: var(--r-sm); cursor: pointer; font-weight: 500; white-space: nowrap; }
 .btn:hover { background: var(--surface-2); }
 .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
@@ -255,16 +258,29 @@ const RUN_STEPS = [
 const RUN_STALE_MS = 7 * 60000, RUN_SHOW_DONE_MS = 15 * 60000;
 const TABS = [["overview", "Overview"], ["alerts", "Alerts"], ["log", "Trade log"], ["funds", "Funds & income"], ["scans", "Scans"], ["lab", "Strategy lab"]];
 const SCHEDULE = [
-  { when: "5:50 AM PT", days: "Mon–Fri", what: "Pre-market check", detail: "Re-checks today's orders against overnight news and pre-market gaps; warns before the 6:30 open." },
-  { when: "12:25 PM PT", days: "Mon–Fri", what: "Pre-close exit scan", detail: "Live prices 35 min before the close: exit-at-close signals, time stops, earnings risk, buy-at-close setups." },
-  { when: "2:05 PM PT", days: "Mon–Fri", what: "Post-close setup scan", detail: "Final daily bars: tomorrow's A+ setups with limit entry, stop and target to place tonight." },
-  { when: "3:12 PM PT", days: "Mon–Fri", what: "Daily learning + strategy research", detail: "Grades every alert against what the market did, updates win-rate estimates and writes the journal; then researches and backtests a new strategy idea for the Strategy lab." },
-  { when: "10:14 AM PT", days: "Saturday", what: "Weekly recalibration", detail: "Re-runs every backtest on fresh history, re-tests Off strategies, promotes research candidates that pass, and re-fits the win-probability models." },
+  { when: "5:50 AM PT", backup: "6:02 AM", days: "Mon–Fri", what: "Pre-market check", detail: "Re-checks today's orders against overnight news and pre-market gaps; warns before the 6:30 open." },
+  { when: "12:25 PM PT", backup: "12:38 PM", days: "Mon–Fri", what: "Pre-close exit scan", detail: "Live prices 35 min before the close: exit-at-close signals, time stops, earnings risk, buy-at-close setups." },
+  { when: "2:05 PM PT", backup: "2:53 PM", days: "Mon–Fri", what: "Post-close setup scan", detail: "Final daily bars: tomorrow's A+ setups with limit entry, stop and target to place tonight." },
+  { when: "3:12 PM PT", backup: "4:23 PM", days: "Mon–Fri", what: "Daily learning + strategy research", detail: "Grades every alert against what the market did, updates win-rate estimates and writes the journal; then researches and backtests a new strategy idea for the Strategy lab." },
+  { when: "10:14 AM PT", backup: "Sun 10:23 AM", days: "Saturday", what: "Weekly recalibration", detail: "Re-runs every backtest on fresh history, re-tests Off strategies, promotes research candidates that pass, and re-fits the win-probability models." },
 ];
 const HOLIDAYS = new Set(["2025-01-01","2025-01-09","2025-01-20","2025-02-17","2025-04-18","2025-05-26","2025-06-19","2025-07-04","2025-09-01","2025-11-27","2025-12-25",
   "2026-01-01","2026-01-19","2026-02-16","2026-04-03","2026-05-25","2026-06-19","2026-07-03","2026-09-07","2026-11-26","2026-12-25",
   "2027-01-01","2027-01-18","2027-02-15","2027-03-26","2027-05-31","2027-06-18","2027-07-05","2027-09-06","2027-11-25","2027-12-24",
   "2028-01-17","2028-02-21","2028-04-14","2028-05-29","2028-06-19","2028-07-04","2028-09-04","2028-11-23","2028-12-25"]);
+// the market closes at 10:00 AM PT on these days (same tables as engine/calendar.py)
+const EARLY_CLOSES = new Set(["2026-11-27","2026-12-24","2027-11-26","2028-07-03","2028-11-24"]);
+const HOLIDAY_NAMES = { "2026-11-26": "Thanksgiving Day", "2026-12-25": "Christmas Day", "2027-01-01": "New Year's Day", "2027-01-18": "Martin Luther King Jr. Day",
+  "2027-02-15": "Presidents Day", "2027-03-26": "Good Friday", "2027-05-31": "Memorial Day", "2027-06-18": "Juneteenth (observed)", "2027-07-05": "Independence Day (observed)",
+  "2027-09-06": "Labor Day", "2027-11-25": "Thanksgiving Day", "2027-12-24": "Christmas Day (observed)", "2028-01-17": "Martin Luther King Jr. Day", "2028-02-21": "Presidents Day",
+  "2028-04-14": "Good Friday", "2028-05-29": "Memorial Day", "2028-06-19": "Juneteenth", "2028-07-04": "Independence Day", "2028-09-04": "Labor Day", "2028-11-23": "Thanksgiving Day", "2028-12-25": "Christmas Day" };
+// Each scheduled run, its backup check, and what counts as "it ran" (Pacific 24h clock). dur = minutes a run usually takes.
+const RUN_PLAN = [
+  { key: "premarket", label: "Pre-market check", at: "05:50", from: "05:40", backup: "06:02", dur: 20, modes: ["premarket"] },
+  { key: "preclose", label: "Pre-close exit scan", at: "12:25", from: "12:20", backup: "12:38", dur: 20, modes: ["preclose", "postclose"], half: { at: "09:20", from: "09:15" } },
+  { key: "postclose", label: "Post-close setup scan", at: "14:05", from: "13:55", backup: "14:53", dur: 45, modes: ["postclose"], half: { from: "10:55" } },
+  { key: "learning", label: "Daily learning + research", at: "15:12", backup: "16:23", dur: 50, journal: true },
+];
 
 // ---------------------------------------------------------------- utils
 const $ = (s, el = document) => el.querySelector(s);
@@ -290,6 +306,11 @@ function addDays(s, n) { const t = new Date(s + "T12:00:00"); t.setDate(t.getDat
 function tradingDaysBetween(a, b) { if (!a || !b || b <= a) return 0; let n = 0, d = a; while (d < b) { d = addDays(d, 1); if (isTradingDay(d)) n++; } return n; }
 function heldDays(t, end) { const e = end || todayPT(); return tradingDaysBetween(t.entry_date, e) + (isTradingDay(t.entry_date) ? 1 : 0); }
 const fmtHM = new Intl.DateTimeFormat("en-GB", { timeZone: "America/Los_Angeles", hour: "2-digit", minute: "2-digit", hour12: false });
+const nowHM = () => fmtHM.format(new Date()).replace(/^24/, "00");
+function to12(hm) { const [h, m] = String(hm).split(":").map(Number); return `${(h % 12) || 12}:${String(m).padStart(2, "0")} ${h < 12 ? "AM" : "PM"}`; }
+function addMin(hm, n) { const [h, m] = hm.split(":").map(Number); const t = Math.min(23 * 60 + 59, h * 60 + m + n); return String(Math.floor(t / 60)).padStart(2, "0") + ":" + String(t % 60).padStart(2, "0"); }
+function ptParts(iso) { const t = new Date(iso); return isNaN(t) ? null : { day: fmtPT.format(t), hm: fmtHM.format(t).replace(/^24/, "00") }; }
+function journalHM(j) { const m = /-(\d{2})(\d{2})$/.exec(String(j.id || "")); if (m) return m[1] + ":" + m[2]; const t = ptParts(j.created_at); return t ? t.hm : null; }
 // Alerts are never overwritten once written; each later scan sends its view of them (rank, score,
 // news verdict, sizing, withdrawn) in its scan document's alert_updates. The newest scan wins.
 function mergeAlerts() {
@@ -355,12 +376,14 @@ function renderTabs() {
 }
 function renderChips() {
   const f = funds(); const st = settings(); const last = S.scans[0];
-  const scanPill = last ? `<span class="pill ${last.status === "ok" ? "good" : last.status === "failed" ? "crit" : "warn"}">${esc(modeLabel(last.mode))} · ${dtShort(last.started_at)}</span>` : `<span class="pill neutral">No scans yet</span>`;
+  const scanPill = !last ? `<span class="pill neutral">No scans yet</span>` : last.status === "closed" ? `<span class="pill neutral">Market closed · ${dtShort(last.started_at)}</span>`
+    : `<span class="pill ${last.status === "ok" ? "good" : last.status === "failed" ? "crit" : "warn"}">${esc(modeLabel(last.mode))} · ${dtShort(last.started_at)}</span>`;
   $("#chips").innerHTML = `
     <div class="chip"><span class="k">Capital</span><span class="v">${money(f.capital)}</span></div>
     <div class="chip"><span class="k">Cash free</span><span class="v">${money(f.cash)}</span></div>
     <div class="chip"><span class="k">Open</span><span class="v">${f.open.length}/${esc(st.max_open_positions)}</span></div>
-    <div class="chip"><span class="k">Last scan</span><span class="v" style="font-family:var(--f-body);font-size:13px">${scanPill}</span></div>`;
+    <div class="chip"><span class="k">Last scan</span><span class="v" style="font-family:var(--f-body);font-size:13px">${scanPill}</span></div>
+    ${healthChip()}`;
   const b = $("#scanBtn"); const tid = st.manual_trigger_id; const run = currentRun();
   const busy = run && run.active;
   b.disabled = !tid || !S.mcp || !S.db || busy || !!S.starting;
@@ -402,6 +425,40 @@ function currentRun() {
   return { token: best.token, docs, state, step, pct: Math.min(100, Math.max(2, pct)), t0: best.t0, elapsed: Math.max(0, (endAt || now) - best.t0),
     active: state === "running", done, fail, last, finishedAt: done || fail ? endAt : null };
 }
+// Scan-now runs started in this browser: if one stops (the scan reports a failure, the service didn't answer,
+// or no progress for RETRY_STALE_MS), it is started again once by itself. Remembered per browser only.
+const RETRY_STALE_MS = 15 * 60000;
+function myRuns() { try { return JSON.parse(localStorage.getItem("myRuns") || "{}") || {}; } catch { return {}; } }
+function saveMyRuns(m) { try { localStorage.setItem("myRuns", JSON.stringify(m)); } catch {} }
+function noteMyRun(token, retryOf) {
+  const m = myRuns(); m[token] = { t0: Date.now(), retryOf: retryOf || null };
+  for (const k of Object.keys(m)) if (Date.now() - (m[k].t0 || 0) > 2 * 86400000) delete m[k];
+  saveMyRuns(m);
+}
+function retryReason(run) {
+  if (!run || run.state === "done" || run.state === "running") return null;
+  if (run.state === "failed") {
+    if (run.fail?.by === "page") return run.fail.code === "server_unavailable" && Date.now() - runTime(run.fail) > 60000 ? "service" : null;
+    return "failed";
+  }
+  return run.state === "stale" && Date.now() - Math.max(...run.docs.map(runTime)) > RETRY_STALE_MS ? "stalled" : null;
+}
+function autoRetryNote(run) {
+  const mine = myRuns()[run.token];
+  if (!mine) return "";
+  if (mine.retried) return " · started again automatically";
+  if (mine.retryOf) return " · this was the automatic retry; press Try again";
+  return run.state === "stale" ? " · it restarts by itself after 15 minutes without progress" : "";
+}
+function maybeAutoRetry() {
+  const run = currentRun(); if (!run || S.starting || !S.mcp || !S.db || !S.loaded.settings || !settings().manual_trigger_id) return;
+  const m = myRuns(), mine = m[run.token];
+  if (!mine || mine.retryOf || mine.retried || Date.now() - (mine.t0 || 0) > 3 * 3600000) return;
+  const why = retryReason(run); if (!why) return;
+  mine.retried = Date.now(); saveMyRuns(m);
+  toast(why === "service" ? "The scan service didn't answer, so the scan was started again." : "The scan stopped before finishing, so it was started again automatically.", 7000);
+  scanNow({ retryOf: run.token });
+}
 function mmss(ms) { const s = Math.round(ms / 1000); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); }
 let runTimer = null, runDismissed = null;
 try { runDismissed = localStorage.getItem("runDismissed"); } catch {}
@@ -418,10 +475,12 @@ function renderRunbar() {
     extra = `<button class="btn small" type="button" data-tab="alerts">View alerts</button>`;
   } else if (run.state === "failed") {
     label = `Scan didn't finish: ${esc(run.fail.message || run.fail.step || "unknown problem")}`;
-    meta = `after ${mmss(run.elapsed)}`;
+    meta = `after ${mmss(run.elapsed)}${autoRetryNote(run)}`;
+    extra = `<button class="btn small" type="button" id="rbRetry">Try again</button>`;
   } else if (run.state === "stale") {
-    label = `No progress update for ${Math.round(RUN_STALE_MS / 60000)} minutes. The scan may have stopped; you can start another.`;
-    meta = `last step: ${esc(run.last.step || run.step.label)}`;
+    label = `No progress update for ${Math.round(RUN_STALE_MS / 60000)} minutes. The scan may have stopped.`;
+    meta = `last step: ${esc(run.last.step || run.step.label)}${autoRetryNote(run)}`;
+    extra = `<button class="btn small" type="button" id="rbRetry">Try again</button>`;
   } else {
     label = `${esc(run.last.step || run.step.label)}…`;
     meta = `${Math.round(run.pct)}% · ${mmss(run.elapsed)} elapsed · usually about 2–3 min`;
@@ -442,8 +501,84 @@ function renderRunbar() {
     <div class="rb-track" role="progressbar" aria-label="Scan progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(run.pct)}"><div class="rb-fill" style="width:${run.pct.toFixed(1)}%"></div></div>
     <ol class="rb-steps">${steps}</ol></div>`;
   const c = $("#rbClose"); if (c) c.onclick = () => { runDismissed = run.token; try { localStorage.setItem("runDismissed", run.token); } catch {} renderRunbar(); renderChips(); };
+  const rt = $("#rbRetry"); if (rt) rt.onclick = () => scanNow({ retryOf: run.token });
   if (run.active && !runTimer) runTimer = setInterval(() => { renderRunbar(); renderChips(); }, 1000);
   if (!run.active && runTimer) { clearInterval(runTimer); runTimer = null; }
+}
+// ---------------------------------------------------------------- run health (did every scheduled run happen?)
+function judgeRun(p, at, hit, failed, now, backupLabel) {
+  const bk = p.backup;
+  if (hit) return { state: "ok", pill: "good", text: `Ran ${to12(hit)}`, note: failed ? "after a failed first try" : "" };
+  if (failed) {
+    if (now < bk) return { state: "retry", pill: "warn", text: `Failed ${to12(failed)}`, note: `The backup check at ${backupLabel} runs it again.` };
+    if (now < addMin(bk, p.dur)) return { state: "retry", pill: "warn", text: "Re-running", note: `The ${to12(failed)} run failed; the ${backupLabel} backup check is running it again.` };
+    return { state: "bad", pill: "crit", text: "Failed", note: "The run and its backup check both failed. Press Run now, or open the Swing Desk chat." };
+  }
+  if (now < at) return { state: "due", pill: "neutral", text: `Due ${to12(at)}`, note: "" };
+  if (now < addMin(at, p.dur)) return { state: "running", pill: "info", text: "Running", note: `Started ${to12(at)}; results usually arrive within ${p.dur} minutes.` };
+  if (now < bk) return { state: "late", pill: "warn", text: "Not in yet", note: `If it doesn't arrive, the backup check at ${backupLabel} runs it.` };
+  if (now < addMin(bk, p.dur)) return { state: "retry", pill: "warn", text: "Backup running", note: `It didn't arrive, so the ${backupLabel} backup check is running it now.` };
+  return { state: "bad", pill: "crit", text: "Missed", note: "Neither the run nor its backup check saved results. Press Run now, or open the Swing Desk chat." };
+}
+function runHealth() {
+  const day = todayPT(), now = nowHM(), wd = new Date(day + "T12:00:00").getDay();
+  const out = { day, items: [], closed: !isTradingDay(day), half: EARLY_CLOSES.has(day) };
+  out.reason = !out.closed ? "" : wd === 0 || wd === 6 ? "weekend" : HOLIDAY_NAMES[day] || "market holiday";
+  if (!out.closed) for (const p of RUN_PLAN) {
+    const at = (out.half && p.half?.at) || p.at, from = (out.half && p.half?.from) || p.from || p.at;
+    let hit = null, failed = null;
+    if (p.journal) { const j = S.journal.find((x) => x.date === day && !String(x.id).endsWith("-weekly")); if (j) hit = journalHM(j) || at; }
+    else for (const sc of S.scans) {
+      const t = ptParts(sc.started_at); if (!t || t.day !== day || t.hm < from || !p.modes.includes(sc.mode)) continue;
+      if (sc.status === "failed") { if (!failed || t.hm < failed) failed = t.hm; } else if (!hit || t.hm < hit) hit = t.hm;
+    }
+    out.items.push({ ...p, at, ...judgeRun(p, at, hit, failed, now, to12(p.backup)) });
+  }
+  if (wd === 6 || wd === 0) {  // this weekend's recalibration (Saturday, backup check Sunday)
+    const sat = wd === 6 ? day : addDays(day, -1);
+    const j = S.journal.find((x) => String(x.id).endsWith("-weekly") && (x.date === sat || x.date === addDays(sat, 1)));
+    const p = { key: "weekly", label: "Weekly recalibration", at: "10:14", backup: "10:23", dur: 60 };
+    let r;
+    if (j) r = { state: "ok", pill: "good", text: `Ran ${j.date === sat ? "Sat" : "Sun"} ${to12(journalHM(j) || "10:14")}`, note: "" };
+    else if (wd === 6) r = now < p.at ? { state: "due", pill: "neutral", text: "Due 10:14 AM", note: "" }
+      : now < addMin(p.at, p.dur) ? { state: "running", pill: "info", text: "Running", note: "Started 10:14 AM; usually done within an hour." }
+      : { state: "late", pill: "warn", text: "Not in yet", note: "If it doesn't arrive, the backup check runs it Sunday 10:23 AM." };
+    else r = now < p.backup ? { state: "late", pill: "warn", text: "Not in yet", note: "Saturday's run didn't save; the backup check runs it at 10:23 AM today." }
+      : now < addMin(p.backup, p.dur) ? { state: "retry", pill: "warn", text: "Backup running", note: "Saturday's run didn't save, so the 10:23 AM backup check is running it." }
+      : { state: "bad", pill: "crit", text: "Missed", note: "Neither Saturday's run nor Sunday's backup check saved results. Press Run now, or open the Swing Desk chat." };
+    out.items.push({ ...p, ...r, backupLabel: "Sun 10:23 AM" });
+  }
+  out.bad = out.items.filter((i) => i.state === "bad");
+  out.warn = out.items.filter((i) => i.state === "late" || i.state === "retry");
+  out.done = out.items.filter((i) => i.state === "ok").length;
+  return out;
+}
+function healthChip() {
+  const h = runHealth();
+  const pill = h.bad.length ? `<span class="pill crit">${h.bad.length} missed</span>`
+    : h.warn.length ? `<span class="pill warn">${h.warn.length === 1 ? esc(h.warn[0].label) : h.warn.length + " runs"}: checking</span>`
+    : h.closed && !h.items.length ? `<span class="pill neutral">Market closed</span>`
+    : `<span class="pill good">On track · ${h.done}/${h.items.length}</span>`;
+  return `<button type="button" class="chip chip-btn" data-tab="scans" title="Today's scheduled runs: open the Scans tab"><span class="k">Today's runs</span><span class="v" style="font-family:var(--f-body);font-size:13px">${pill}</span></button>`;
+}
+function healthPanel() {
+  const h = runHealth(); const sc = S.scans.find((x) => x.status !== "closed" && x.data) || null;
+  const d = sc?.data || {}, eng = sc?.engine || {};
+  const head = h.closed ? `Market closed today (${esc(h.reason)}).${h.items.length ? "" : " No scans run until the next session."}` : h.half ? "Half day: the market closes at 10:00 AM PT, so the pre-close scan runs at 9:20 AM." : "";
+  const rows = h.items.map((i) => `<tr><td><b>${esc(i.label)}</b></td><td class="num" style="white-space:nowrap">${to12(i.at)}</td>
+    <td><span class="pill ${i.pill}">${esc(i.text)}</span>${i.note ? ` <span class="small muted">${esc(i.note)}</span>` : ""}
+    ${i.state === "bad" ? ` <button class="btn small" type="button" data-act="runnow" data-run="${i.key}">Run now</button>` : ""}</td>
+    <td class="small muted" style="white-space:nowrap">${esc(i.backupLabel || to12(i.backup))}</td></tr>`).join("");
+  const feed = sc ? `Prices: last bar ${esc(d.last_bar || "–")}${d.partial_bar ? " (live intraday)" : ""} · data ${esc(d.status || "–")} as of the ${dtShort(sc.started_at)} scan` : "Prices: no scan yet";
+  const engine = eng.fingerprint ? ` · Engine ${esc(eng.source === "repo" ? "GitHub repo" : "dashboard copy")} ${esc(eng.fingerprint)}` : "";
+  return `<section class="section"><div class="section-head"><h2>Today's runs</h2><span class="meta">${dShort(h.day)} · each run has a backup check that re-runs it if it failed or never ran</span></div>
+    ${head ? `<div class="banner ${h.closed ? "info" : "warn"}" style="margin-bottom:8px">${head}</div>` : ""}
+    ${rows ? `<div class="tbl-wrap"><table><thead><tr><th>Run</th><th>Scheduled</th><th>Status</th><th>Backup check</th></tr></thead><tbody>${rows}</tbody></table></div>` : ""}
+    <div class="small muted" style="margin-top:6px">${feed}${engine}</div></section>`;
+}
+function attentionBanner() {
+  const h = runHealth(); if (!h.bad.length) return "";
+  return `<div class="banner crit" style="margin-bottom:12px"><b>${h.bad.map((i) => esc(i.label)).join(", ")} didn't run today.</b> The backup check couldn't recover ${h.bad.length === 1 ? "it" : "them"} either. <button class="btn small" type="button" data-tab="scans">See today's runs</button></div>`;
 }
 function modeLabel(m) { return { premarket: "Pre-market", preclose: "Pre-close", postclose: "Post-close", learning: "Learning", weekly: "Recalibration", manual: "Manual" }[m] || m || "Scan"; }
 function render() {
@@ -467,8 +602,8 @@ function viewOverview() {
   const ret = (f.capital - (num(st.initial_balance) || 5000) - f.deposit - f.withdrawal);
   const sel = { month: mtd, qtd: qtd, all: hist }[S.perf];
   const selLabel = { month: "This month", qtd: "Quarter to date", all: "All time" }[S.perf];
-  const last = S.scans[0];
-  let html = `<section class="section"><div class="section-head"><h2>Portfolio</h2><span class="meta">Started with ${money(st.initial_balance)} · sizing uses trading capital after income withdrawals</span></div>
+  const last = S.scans.find((x) => x.status !== "closed" && x.market) || S.scans.find((x) => x.status !== "closed");
+  let html = attentionBanner() + `<section class="section"><div class="section-head"><h2>Portfolio</h2><span class="meta">Started with ${money(st.initial_balance)} · sizing uses trading capital after income withdrawals</span></div>
   <div class="grid g-kpi">
     ${kpi("Trading capital", money(f.capital), `Equity incl. open P&L ${money(f.equity)}`)}
     ${kpi("Cash free for new trades", money(f.cash), `${money(f.openCost)} in ${f.open.length} open position${f.open.length === 1 ? "" : "s"}`)}
@@ -781,14 +916,14 @@ function viewFunds() {
 // ---------------------------------------------------------------- scans
 function viewScans() {
   const st = settings();
-  let html = `<section class="section"><div class="section-head"><h2>Daily scan schedule</h2><span class="meta">Pacific time · market holidays skipped automatically · email alerts go to your Claude account address</span></div>
-  <div class="tbl-wrap"><table><thead><tr><th>Time</th><th>Days</th><th>Scan</th><th>What it does</th></tr></thead><tbody>
-  ${SCHEDULE.map((s) => `<tr><td class="num" style="white-space:nowrap">${s.when}</td><td>${s.days}</td><td><b>${s.what}</b></td><td class="small">${s.detail}</td></tr>`).join("")}
+  let html = healthPanel() + `<section class="section"><div class="section-head"><h2>Daily scan schedule</h2><span class="meta">Pacific time · market holidays skipped automatically · email alerts go to your Claude account address</span></div>
+  <div class="tbl-wrap"><table><thead><tr><th>Time</th><th>Days</th><th>Scan</th><th>What it does</th><th>Backup check</th></tr></thead><tbody>
+  ${SCHEDULE.map((s) => `<tr><td class="num" style="white-space:nowrap">${s.when}</td><td>${s.days}</td><td><b>${s.what}</b></td><td class="small">${s.detail}</td><td class="small" style="white-space:nowrap">${s.backup || "–"}</td></tr>`).join("")}
   </tbody></table></div>
-  <div class="small muted">Prices refresh every 30 minutes from 4 AM to 3 PM PT through your GitHub data feed. ${st.manual_trigger_id ? "Use <b>Scan now</b> at the top for an extra scan at any time." : "The Scan now button activates once the scans are scheduled."}</div></section>`;
+  <div class="small muted">Each backup check confirms its run saved results and, if it failed or never ran, runs it again on the spot (re-run scans email you the full alert digest). On half days (the day after Thanksgiving, Christmas Eve) the pre-close scan runs at 9:20 AM. Prices refresh about every 15 minutes, 3 AM to 4 PM PT on weekdays, through your GitHub data feed. ${st.manual_trigger_id ? "Use <b>Scan now</b> at the top for an extra scan at any time." : "The Scan now button activates once the scans are scheduled."}</div></section>`;
   html += `<section class="section"><div class="section-head"><h2>Scan history</h2><span class="meta">${S.scans.length} most recent</span></div>`;
   html += S.scans.length ? `<div class="tbl-wrap"><table><thead><tr><th>Ran</th><th>Scan</th><th>Status</th><th>Data</th><th class="n">A+ setups</th><th class="n">Exit alerts</th><th>Details</th></tr></thead><tbody>
-    ${S.scans.map((s) => `<tr><td style="white-space:nowrap">${dtShort(s.started_at)}</td><td>${esc(modeLabel(s.mode))}</td><td><span class="pill ${s.status === "ok" ? "good" : s.status === "failed" ? "crit" : "warn"}">${esc((s.status || "").replace(/_/g, " "))}</span></td>
+    ${S.scans.map((s) => `<tr><td style="white-space:nowrap">${dtShort(s.started_at)}</td><td>${esc(modeLabel(s.mode))}</td><td><span class="pill ${s.status === "ok" ? "good" : s.status === "failed" ? "crit" : s.status === "closed" ? "neutral" : "warn"}">${esc(s.status === "closed" ? "market closed" : (s.status || "").replace(/_/g, " "))}</span></td>
       <td class="small">${esc(s.data?.status || "–")} · bar ${esc(s.data?.last_bar || "–")}</td><td class="n">${esc(s.counts?.aplus ?? 0)}</td><td class="n">${esc(s.counts?.exit_alerts ?? 0)}</td>
       <td style="min-width:220px">${s.digest ? `<details><summary>Digest</summary><pre class="digest">${fmtDigest(s.digest)}</pre></details>` : ""}${(s.errors || []).length ? `<div class="small muted">${esc(s.errors.length)} warning(s) handled</div>` : ""}${s.fixes ? `<div class="small muted">${esc(s.fixes)}</div>` : ""}</td></tr>`).join("")}
     </tbody></table></div>` : `<div class="empty">Each scan records its status, data health and results here, including any problem it recovered from.</div>`;
@@ -1051,34 +1186,52 @@ async function copyOrder(a) {
   try { await navigator.clipboard.writeText(txt); toast("Order copied."); }
   catch { modal(`Order for ${a.ticker}`, `<textarea id="cpy" rows="6" readonly>${esc(txt)}</textarea>`, "Done", async () => {}); setTimeout(() => { const el = $("#cpy"); el?.focus(); el?.select(); }, 40); }
 }
-async function scanNow() {
+function fireErr(e) {
+  const c = e?.code;
+  return { needs_reauth: "Reconnect Claude Code Remote in claude.ai Settings → Connectors, then try again.",
+    server_not_connected: "The scan service isn't available in this view. Open the dashboard in claude.ai to run a scan.",
+    not_in_manifest: "This page isn't allowed to start scans for you. Allow it in the artifact's permissions, then try again.",
+    approval_required: "Starting a scan needs your approval. Press the button again and allow it when asked.",
+    tool_error: "The scan service refused the request: " + (e?.message || "unknown reason") + ".",
+    server_unavailable: "The scan service didn't answer. It is tried again automatically in a minute." }[c] || "Couldn't start the scan (" + (c || "error") + "). Try again shortly.";
+}
+async function scanNow(opts = {}) {
   const st = settings();
   if (!S.mcp || !st.manual_trigger_id || !S.db || S.starting) return;
   const cur = currentRun();
   if (cur && cur.active) { toast("A scan is already running. Its progress is shown under the tabs."); return; }
   const token = "rt_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  const retryOf = opts.retryOf || null;
   S.starting = token; runDismissed = null; renderChips();
   try {
-    await S.db.doc("runs/" + token + "-s0").set({ token, seq: 0, state: "requested", pct: 4, step: "Starting the scan session", at: nowIso(), by: "page", kind: "manual" });
+    await S.db.doc("runs/" + token + "-s0").set({ token, seq: 0, state: "requested", pct: 4, step: retryOf ? "Starting the scan again" : "Starting the scan session", at: nowIso(), by: "page", kind: "manual", ...(retryOf ? { retry_of: retryOf } : {}) });
   } catch (e) { S.starting = null; renderChips(); toast(writeErr(e)); return; }
+  noteMyRun(token, retryOf);
   try {
     await S.mcp.callTool("Claude Code Remote", "fire_trigger", { trigger_id: st.manual_trigger_id,
-      text: `Run token: ${token}\nManual scan requested from the dashboard at ${new Date().toISOString()}. Report progress with this token as the task describes.` });
-    toast("Scan started. Follow its progress under the tabs; alerts are also emailed to you.", 6000);
+      text: `Run token: ${token}\n` + (retryOf ? `This is a retry: the scan started with run token ${retryOf} stopped before finishing, so finish this one end to end. ` : "") +
+        `Manual scan requested from the dashboard at ${new Date().toISOString()}. Report progress with this token as the task describes.` });
+    toast(retryOf ? "Scan started again. Follow its progress under the tabs." : "Scan started. Follow its progress under the tabs; alerts are also emailed to you.", 6000);
   } catch (e) {
-    const c = e?.code;
-    const msg = { needs_reauth: "Reconnect Claude Code Remote in claude.ai Settings → Connectors, then try again.",
-      server_not_connected: "The scan service isn't available in this view. Open the dashboard in claude.ai to run a scan.",
-      not_in_manifest: "This page isn't allowed to start scans for you. Allow it in the artifact's permissions, then try again.",
-      approval_required: "Starting a scan needs your approval. Press Scan now again and allow it when asked.",
-      tool_error: "The scan service refused the request: " + (e?.message || "unknown reason") + ".",
-      server_unavailable: "The scan service didn't answer. Wait a minute and press Scan now again." }[c] || "Couldn't start the scan (" + (c || "error") + "). Try again shortly.";
-    try { await S.db.doc("runs/" + token + "-s9").set({ token, seq: 9, state: "failed", step: "Couldn't start", message: msg, at: nowIso(), by: "page" }); } catch {}
+    const c = e?.code, msg = fireErr(e);
+    try { await S.db.doc("runs/" + token + "-s9").set({ token, seq: 9, state: "failed", step: "Couldn't start", message: msg, code: c || "error", at: nowIso(), by: "page" }); } catch {}
     toast(msg, 8000);
   } finally { S.starting = null; renderChips(); }
   // tidy up: progress records older than two days (this press is the user action that allows it)
   const cutoff = Date.now() - 2 * 86400000;
   for (const r of S.runs.filter((x) => (Date.parse(x.at) || 0) < cutoff).slice(0, 25)) { try { await S.db.doc("runs/" + r.id).delete(); } catch { break; } }
+}
+
+// a scheduled run that failed twice today (run + backup check): start it again from the Today's runs panel
+async function runNow(key) {
+  if (key !== "learning" && key !== "weekly") return scanNow();  // Scan now picks the right scan for the time of day
+  const id = settings().schedule_ids?.[key];
+  if (!S.mcp || !id) { toast("Open the dashboard in claude.ai to start it from here."); return; }
+  try {
+    await S.mcp.callTool("Claude Code Remote", "fire_trigger", { trigger_id: id,
+      text: `Started from the dashboard's Today's runs panel at ${new Date().toISOString()}: today's run and its backup check didn't save results.` });
+    toast(`${key === "weekly" ? "Weekly recalibration" : "Daily learning review"} started; it takes ${key === "weekly" ? "about an hour" : "30 to 50 minutes"}.`, 7000);
+  } catch (e) { toast(fireErr(e), 8000); }
 }
 
 // ---------------------------------------------------------------- events
@@ -1100,6 +1253,7 @@ document.addEventListener("click", async (e) => {
     else if (act === "close" && t) closeModal(t);
     else if (act === "edit" && t) editModal(t);
     else if (act === "income" && t) await applyIncome(t);
+    else if (act === "runnow") await runNow(btn.dataset.run);
   } catch (err) { console.error(err); toast(writeErr(err)); }
 });
 document.addEventListener("submit", async (e) => {
@@ -1115,7 +1269,7 @@ document.addEventListener("submit", async (e) => {
       if (init && num(init.amount) !== s.initial_balance) await updDoc("ledger/" + init.id, { amount: s.initial_balance });
       toast("Settings saved. The next scan uses them."); } catch (err) { toast(writeErr(err)); } }
 });
-$("#scanBtn").addEventListener("click", scanNow);
+$("#scanBtn").addEventListener("click", () => scanNow());
 
 // ---------------------------------------------------------------- boot
 try { const t = localStorage.getItem("tab"); if (t && TABS.some(([k]) => k === t)) S.tab = t; } catch {}
@@ -1137,7 +1291,10 @@ document.addEventListener("focusout", () => setTimeout(() => { if (pending && !t
   db.collection("trades").onSnapshot((s) => { S.trades = list(s); S.loaded.trades = true; rerender(); }, onErr("trades"));
   db.collection("ledger").onSnapshot((s) => { S.ledger = list(s); S.loaded.ledger = true; rerender(); }, onErr("ledger"));
   db.collection("scans").orderBy("started_at", "desc").limit(60).onSnapshot((s) => { S.scans = list(s).sort((a, b) => (Date.parse(b.started_at) || 0) - (Date.parse(a.started_at) || 0)).slice(0, 40); mergeAlerts(); rerender(); }, onErr("scans"));
-  db.collection("runs").orderBy("at", "desc").limit(60).onSnapshot((s) => { S.runs = list(s); noteRuns(); renderRunbar(); renderChips(); }, onErr("scan progress"));
+  db.collection("runs").orderBy("at", "desc").limit(60).onSnapshot((s) => { S.runs = list(s); noteRuns(); renderRunbar(); renderChips(); maybeAutoRetry(); }, onErr("scan progress"));
+  setInterval(() => { maybeAutoRetry(); renderRunbar(); renderChips(); }, 30000);
+  let healthSig = "";  // re-render when a run's status changes with the clock (due → running → late → backup)
+  setInterval(() => { const sig = runHealth().items.map((i) => i.state).join(","); if (sig !== healthSig) { healthSig = sig; rerender(); } }, 60000);
   db.collection("research").limit(400).onSnapshot((s) => { S.research = list(s); rerender(); }, onErr("research"));
   db.collection("learning").limit(20).onSnapshot((s) => { S.learning = Object.fromEntries(list(s).map((d) => [d.id, d])); rerender(); }, onErr("learning record"));
   db.collection("research_results").orderBy("tested_at", "desc").limit(400).onSnapshot((s) => { S.results = list(s); rerender(); }, onErr("research results"));

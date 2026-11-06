@@ -11,9 +11,10 @@ percentages are estimates and can be wrong. You place and manage every order you
 
 | Piece | Where | What it does |
 |---|---|---|
-| Market-data feed | `.github/workflows/market-data.yml`, `pipeline/` | GitHub Action, every 30 min 4 AM-3 PM PT on weekdays: daily bars (3 yrs), intraday snapshot, pre-market snapshot, earnings calendar; Saturday: full history since 2008. Writes the `data` branch (one squashed commit, no history bloat). |
+| Market-data feed | `.github/workflows/market-data.yml`, `pipeline/` | GitHub Action, asked every 15 min 3-4 AM to 3-4 PM PT on weekdays (GitHub delays or skips some scheduled runs, so the effective cadence is about every 30 min), plus a late-evening safety pass; a Saturday keepalive commit stops GitHub from pausing the schedule after 60 quiet days: daily bars (3 yrs), intraday snapshot, pre-market snapshot, earnings calendar; Saturday: full history since 2008. Writes the `data` branch (one squashed commit, no history bloat). |
 | Engine | `engine/` | Indicators, 7 built-in strategies plus research strategies from JSON rule specs, conservative backtester, win-probability model, scoring/grading, position sizing, exit monitor, daily learning, weekly recalibration. |
-| Scans | Claude scheduled tasks | Pre-market 5:50 AM PT, pre-close 12:25 PM PT, post-close 2:05 PM PT, learning 3:12 PM PT, recalibration Sat 10:14 AM PT. Each clones this repo + the `data` branch, reads the dashboard state, runs the engine, news-checks the setups, writes alerts, and emails the digest. |
+| Scans | Claude scheduled tasks (`ops/schedule.json`) | Pre-market 5:50 AM PT, pre-close 12:25 PM PT (9:20 AM on half days), post-close 2:05 PM PT, learning 3:12 PM PT, recalibration Sat 10:14 AM PT. Each attaches this repo (or, when a session can't, runs the identical engine copy published with the dashboard), clones the `data` branch, reads the dashboard state, runs the engine, news-checks the setups, writes alerts, confirms the scan document saved, and emails the digest. |
+| Backup checks | Claude scheduled tasks | 6:02 AM, 12:38 PM, 2:53 PM, 4:23 PM on weekdays and Sun 10:23 AM. Each confirms its run saved results (and waits if it is still running); if it failed or never ran, the backup carries out the full run itself, so no run stays failed. |
 | Dashboard | Claude artifact | Overview (monthly / QTD / historical), Alerts (exits, new A+ setups, open positions), Trade log, Funds & income, Scans (with Scan now), Strategy lab (backtests + learning journal). |
 
 ## Strategies
@@ -62,6 +63,15 @@ document carries `alert_updates` (rank, score, news verdict, sizing, withdrawn) 
 that already exist; the dashboard applies the newest one. Pressing Scan now writes
 `runs/<token>-s0`, fires the on-demand task with the token, the task records steps 1-5 and
 the scanner adds step 6 (done) to its results batch, which drives the progress bar.
+
+## Keeping runs reliable
+
+* **Two ways to get the engine.** Scheduled sessions attach this repo with `add_repo`; when a session lacks that tool they read the identical copy published with the dashboard (`engine/*` plus `engine/MANIFEST.json`). After any engine change run `python ops/publish_engine.py` and republish the dashboard with the printed files (`tests/test_engine_manifest.py` fails until the manifest matches the code). The daily review flags drift between the two.
+* **Backups.** Every scheduled run has a backup check (see `ops/schedule.json`). Backup prompts embed their task's prompt, so after editing a template run `python ops/build_prompts.py --artifact <dashboard url> --out ops/generated` and update both the task and its backup (`tests/test_prompts.py` fails while `ops/generated` is stale).
+* **Closed days and stale data.** Scheduled scans on weekends and holidays record a "closed" scan and stop. Intraday or pre-market prices from another day are never treated as today's; the digest and email headline start with a data warning whenever bars are behind.
+* **Saved-or-not.** Every run re-reads what it wrote; scans resend their results once and warn in the email if they still didn't save.
+* **Dashboard.** The Scans tab shows today's runs (ran / running / backup running / missed, with Run now), the data age and the engine version. Scan now retries a stopped scan once by itself and offers Try again.
+* **Half days.** One-shot pre-close tasks exist for Nov 27 and Dec 24, 2026. Add one for each later half day (Nov 26 2027, Jul 3 2028, Nov 24 2028) before it comes.
 
 ## Running locally
 
