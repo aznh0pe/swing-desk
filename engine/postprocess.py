@@ -36,6 +36,40 @@ def _verdicts(news: list[str]) -> dict:
     return out
 
 
+SEVERITY = {"clean": 0, "caution": 1, "avoid": 2}
+
+
+def prior_verdicts(state: dict | None, session_day) -> dict:
+    """Caution / avoid verdicts that earlier scans for the same session already gave (newest first)."""
+    out = {}
+    scans = sorted((v["doc"] for v in ((state or {}).get("scans") or {}).values()),
+                   key=lambda d: str(d.get("started_at", "")), reverse=True)
+    for sc in scans:
+        if str(sc.get("session_day")) != str(session_day) or sc.get("status") == "failed":
+            continue
+        try:
+            when = dt.datetime.fromisoformat(sc["started_at"]).strftime("%-I:%M %p").lower()
+        except Exception:
+            when = "earlier"
+        found = []
+        for d in sc.get("news_dropped") or []:
+            r = str(d.get("reason") or "")
+            if r.startswith("score fell below A+ after news caution:"):
+                found.append((d["ticker"], "caution", r.split(":", 1)[1].strip()))
+            else:
+                found.append((d["ticker"], "avoid", r))
+        for aid, u in (sc.get("alert_updates") or {}).items():
+            if u.get("news_check") == "caution":
+                tk = u.get("ticker") or (aid.split("_")[2] if aid.count("_") >= 3 else None)
+                if tk:
+                    found.append((tk, "caution", u.get("news_note") or "notable news"))
+        for tk, kind, note in found:
+            tk = str(tk).upper()
+            if tk not in out or SEVERITY[kind] > SEVERITY[out[tk][0]]:
+                out[tk] = (kind, f"{note} (from the {when} news check)")
+    return out
+
+
 def apply(out_dir: str, news: list[str], state_dir: str | None = None) -> dict:
     out = pathlib.Path(out_dir)
     sj = json.loads((out / "scan.json").read_text())
@@ -44,6 +78,13 @@ def apply(out_dir: str, news: list[str], state_dir: str | None = None) -> dict:
     P = load_params(state, None) if state else None
     cutoff = (P or {}).get("grading", {}).get("aplus_score", 80) if P else scan.get("aplus_cutoff", 80)
     verdicts = _verdicts(news)
+    # a later check of the same session never softens an earlier caution or avoid (win rate first)
+    kept_prior = []
+    for tk, (kind, note) in prior_verdicts(state, scan.get("session_day")).items():
+        cur = verdicts.get(tk)
+        if cur is None or SEVERITY.get(cur[0], 0) < SEVERITY[kind]:
+            verdicts[tk] = (kind, note)
+            kept_prior.append(tk)
     kept, dropped = [], []
     for e in entries:
         v = verdicts.get(e["ticker"].upper())
@@ -112,6 +153,8 @@ def apply(out_dir: str, news: list[str], state_dir: str | None = None) -> dict:
     scan["counts"]["aplus"] = len(kept)
     scan["news_dropped"] = dropped
     scan["news_checked"] = sorted(verdicts)
+    if kept_prior:
+        scan["news_kept_from_earlier"] = sorted(kept_prior)
     if ctx:
         scan["alert_updates"] = build_overlay(scan, kept, ctx)
     now = cal.now_pt()

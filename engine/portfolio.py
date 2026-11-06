@@ -45,7 +45,7 @@ def load_collection(state_dir, name) -> dict:
 def load_state(state_dir) -> dict:
     sd = pathlib.Path(state_dir) if state_dir else None
     if sd is None or not sd.exists():
-        return {"settings": dict(DEFAULT_SETTINGS), "trades": {}, "ledger": {}, "alerts": {},
+        return {"settings": dict(DEFAULT_SETTINGS), "trades": {}, "ledger": {}, "alerts": {}, "scans": {},
                 "params_doc": None, "versions": {}}
     settings = dict(DEFAULT_SETTINGS)
     cfg = load_collection(sd, "config")
@@ -57,7 +57,7 @@ def load_state(state_dir) -> dict:
         params_doc = strat["params"]["doc"]
     return {"settings": settings, "trades": load_collection(sd, "trades"),
             "ledger": load_collection(sd, "ledger"), "alerts": load_collection(sd, "alerts"),
-            "params_doc": params_doc,
+            "scans": load_collection(sd, "scans"), "params_doc": params_doc,
             "versions": {"config/settings": cfg.get("settings", {}).get("version"),
                          "strategy/params": strat.get("params", {}).get("version")}}
 

@@ -367,11 +367,15 @@ function runsByToken() {
   for (const r of S.runs) { if (!r.token) continue; (by[r.token] = by[r.token] || []).push(r); }
   return by;
 }
+// when a progress record happened: its own timestamp, unless that is ahead of when this page first saw it
+const runSeen = {};
+function noteRuns() { const t = Date.now(); for (const r of S.runs) if (!(r.id in runSeen)) runSeen[r.id] = t; }
+function runTime(d) { const a = Date.parse(d.at); const seen = runSeen[d.id] ?? Date.now(); return Number.isFinite(a) ? Math.min(a, seen) : seen; }
 function currentRun() {
   const by = runsByToken(); let best = null;
   for (const [token, docs] of Object.entries(by)) {
-    const start = docs.find((d) => d.seq === 0) || docs.reduce((a, b) => ((Date.parse(a.at) || 0) <= (Date.parse(b.at) || 0) ? a : b));
-    const t0 = Date.parse(start.at) || 0;
+    const start = docs.find((d) => d.seq === 0) || docs.reduce((a, b) => (runTime(a) <= runTime(b) ? a : b));
+    const t0 = runTime(start);
     if (!best || t0 > best.t0) best = { token, docs, t0 };
   }
   if (!best) return null;
@@ -380,14 +384,14 @@ function currentRun() {
   const fail = docs.find((d) => d.state === "failed");
   const done = docs.find((d) => d.state === "done");
   const now = Date.now();
-  const lastAt = Math.min(now, Math.max(...docs.map((d) => Date.parse(d.at) || 0)));
+  const lastAt = Math.max(...docs.map(runTime));
   const state = done ? "done" : fail ? "failed" : now - lastAt > RUN_STALE_MS ? "stale" : "running";
   const step = RUN_STEPS.find((s) => s.seq === (done ? 6 : last.seq)) || RUN_STEPS[0];
   const next = RUN_STEPS.find((s) => s.seq > step.seq);
   let pct = num(last.pct) ?? step.pct;
-  if (state === "running" && next) { const el = Math.max(0, (now - Math.min(now, Date.parse(last.at) || now)) / 1000); pct = pct + (next.pct - pct) * 0.92 * (1 - Math.exp(-el / Math.max(5, step.exp))); }
+  if (state === "running" && next) { const el = Math.max(0, (now - runTime(last)) / 1000); pct = pct + (next.pct - pct) * 0.92 * (1 - Math.exp(-el / Math.max(5, step.exp))); }
   if (state === "done") pct = 100;
-  const endAt = done ? Date.parse(done.at) : fail ? Date.parse(fail.at) : now;
+  const endAt = done ? runTime(done) : fail ? runTime(fail) : now;
   return { token: best.token, docs, state, step, pct: Math.min(100, Math.max(2, pct)), t0: best.t0, elapsed: Math.max(0, (endAt || now) - best.t0),
     active: state === "running", done, fail, last, finishedAt: done || fail ? endAt : null };
 }
@@ -1089,7 +1093,7 @@ document.addEventListener("focusout", () => setTimeout(() => { if (pending && !t
   db.collection("trades").onSnapshot((s) => { S.trades = list(s); S.loaded.trades = true; rerender(); }, onErr("trades"));
   db.collection("ledger").onSnapshot((s) => { S.ledger = list(s); S.loaded.ledger = true; rerender(); }, onErr("ledger"));
   db.collection("scans").orderBy("started_at", "desc").limit(60).onSnapshot((s) => { S.scans = list(s).sort((a, b) => (Date.parse(b.started_at) || 0) - (Date.parse(a.started_at) || 0)).slice(0, 40); mergeAlerts(); rerender(); }, onErr("scans"));
-  db.collection("runs").orderBy("at", "desc").limit(60).onSnapshot((s) => { S.runs = list(s); renderRunbar(); renderChips(); }, onErr("scan progress"));
+  db.collection("runs").orderBy("at", "desc").limit(60).onSnapshot((s) => { S.runs = list(s); noteRuns(); renderRunbar(); renderChips(); }, onErr("scan progress"));
   db.collection("research").limit(400).onSnapshot((s) => { S.research = list(s); rerender(); }, onErr("research"));
   db.collection("research_results").orderBy("tested_at", "desc").limit(400).onSnapshot((s) => { S.results = list(s); rerender(); }, onErr("research results"));
   db.collection("journal").orderBy("date", "desc").limit(60).onSnapshot((s) => { S.journal = list(s); rerender(); }, onErr("journal"));
