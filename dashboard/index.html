@@ -379,13 +379,13 @@ function currentRun() {
   const last = docs[docs.length - 1];
   const fail = docs.find((d) => d.state === "failed");
   const done = docs.find((d) => d.state === "done");
-  const lastAt = Math.max(...docs.map((d) => Date.parse(d.at) || 0));
   const now = Date.now();
+  const lastAt = Math.min(now, Math.max(...docs.map((d) => Date.parse(d.at) || 0)));
   const state = done ? "done" : fail ? "failed" : now - lastAt > RUN_STALE_MS ? "stale" : "running";
   const step = RUN_STEPS.find((s) => s.seq === (done ? 6 : last.seq)) || RUN_STEPS[0];
   const next = RUN_STEPS.find((s) => s.seq > step.seq);
   let pct = num(last.pct) ?? step.pct;
-  if (state === "running" && next) { const el = (now - (Date.parse(last.at) || now)) / 1000; pct = pct + (next.pct - pct) * 0.92 * (1 - Math.exp(-el / Math.max(5, step.exp))); }
+  if (state === "running" && next) { const el = Math.max(0, (now - Math.min(now, Date.parse(last.at) || now)) / 1000); pct = pct + (next.pct - pct) * 0.92 * (1 - Math.exp(-el / Math.max(5, step.exp))); }
   if (state === "done") pct = 100;
   const endAt = done ? Date.parse(done.at) : fail ? Date.parse(fail.at) : now;
   return { token: best.token, docs, state, step, pct: Math.min(100, Math.max(2, pct)), t0: best.t0, elapsed: Math.max(0, (endAt || now) - best.t0),
