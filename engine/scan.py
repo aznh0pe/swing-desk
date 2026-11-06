@@ -493,7 +493,9 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
             did = f"x_{pos['asof']}_{pos['trade_id']}_{sg['code']}"
             if did in existing:
                 continue
-            doc = {"id": did, "type": "exit" if sg["level"] in ("alert", "good") else "adjust",
+            # a stop that already filled is an exit to record, not a stop to move
+            is_exit = sg["level"] in ("alert", "good") or sg["code"] == "STOP_HIT"
+            doc = {"id": did, "type": "exit" if is_exit else "adjust",
                    "status": "new", "trade_id": pos["trade_id"], "ticker": pos["ticker"],
                    "code": sg["code"], "action": sg["action"], "urgency": sg["urgency"],
                    "text": sg["text"], "new_stop": sg.get("new_stop"), "last": pos["last"],

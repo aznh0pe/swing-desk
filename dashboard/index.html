@@ -679,8 +679,9 @@ function ticket(a, today) {
     </div></article>`;
 }
 function actionCard(a) {
-  const lvl = a.type === "adjust" ? "info" : a.code === "TARGET_HIT" || a.code === "GAP_ABOVE_TARGET" ? "good" : "alert";
-  const btns = a.type === "adjust"
+  const adjust = a.type === "adjust" && a.code !== "STOP_HIT" && a.new_stop != null;
+  const lvl = adjust ? "info" : a.code === "TARGET_HIT" || a.code === "GAP_ABOVE_TARGET" ? "good" : "alert";
+  const btns = adjust
     ? `<button class="btn primary small" type="button" data-act="applystop" data-id="${esc(a.id)}">Stop moved</button><button class="btn ghost small" type="button" data-act="dismiss" data-id="${esc(a.id)}">Dismiss</button>`
     : `<button class="btn primary small" type="button" data-act="exitdone" data-id="${esc(a.id)}">Mark done (sold)</button><button class="btn ghost small" type="button" data-act="dismiss" data-id="${esc(a.id)}">Dismiss</button>`;
   const urg = { now: "Now", today: "Before today's close", next: "Next session", open: "At the open" }[a.urgency] || a.urgency || "";
