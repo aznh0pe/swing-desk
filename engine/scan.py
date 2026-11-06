@@ -26,6 +26,7 @@ from . import data as D
 from . import indicators as I
 from . import model as M
 from . import strategies as S
+from . import version as engine_version
 from .monitor import check_trade, DYN_TEXT
 from .portfolio import funds, load_collection, load_state, size_position
 
@@ -528,7 +529,7 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
         "positions": positions, "near_misses": near[:8], "premarket_checks": pm_checks,
         "expired_alert_ids": [a for a, _ in expire][:50],
         "params_version": P.get("version"), "errors": errors[:40], "notes": notes,
-        "session_day": str(session_day),
+        "session_day": str(session_day), "engine": engine_version.info(),
     }
     scan_doc["alert_updates"] = build_overlay(scan_doc, entries, ctx)
     digest = make_digest(scan_doc, entries, positions, near, pm_checks, week_aplus, P, now)
@@ -658,8 +659,12 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
         for e in near[:4]:
             lines.append(f"- {e['ticker']} {e['strategy_label']}: score {e['score']}, win {e['win_pct']}%, "
                          f"limit ${e['entry']}, stop ${e['stop']}, target ${e['target']}")
-    lines += ["", f"A+ setups this week: {week_aplus}", "",
-              "Model-generated signals from backtested rules, not financial advice. Win % is an "
+    lines += ["", f"A+ setups this week: {week_aplus}"]
+    eng = scan.get("engine") or {}
+    if eng.get("source") and eng["source"] != "repo":
+        lines.append(f"Engine: {eng['source']} {eng.get('fingerprint') or ''} (the repo couldn't be attached, so "
+                     "this run used the identical copy published with the dashboard)")
+    lines += ["", "Model-generated signals from backtested rules, not financial advice. Win % is an "
               "estimate from historical setups and can be wrong."]
     return mark_caution("\n".join(lines))
 

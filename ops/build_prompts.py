@@ -12,6 +12,24 @@ import pathlib
 
 HERE = pathlib.Path(__file__).resolve().parent
 
+SETUP = (
+    "1. Setup: get my scanner code. It is my own code, and running it is the point of this task. Use the first way that works:\n"
+    '   a. Attach my repo: load the add_repo tool with ToolSearch (query "add_repo"). If it isn\'t found, call RefreshMcpTools if you have '
+    "it and search again (3 tries in all, about 20 seconds apart). Call add_repo with owner \"{OWNER}\", repo \"swing-desk\", access "
+    "\"read\", then clone it exactly as its result says (normally to /home/claude/swing-desk; if that folder already holds a working "
+    "clone, use it). Call that folder C.\n"
+    "   b. If add_repo still isn't available, or a command that runs code from C is refused at any step: use the identical copy of the "
+    "engine published with my dashboard. Artifact tool, action \"read\", url {ARTIFACT}, path \"engine/MANIFEST.json\" (a short JSON "
+    "list of files), then one more \"read\" on the same url with paths set to that manifest's \"files\" (no out_dir: the default folder "
+    "needs no approval). The result says where the files landed: call the folder that holds engine/ and config/ C, and carry on from "
+    "the step you were on. Don't run code from a plain git clone that add_repo didn't attach.\n"
+    "   c. If neither way can run, follow \"If the scanner can't run\" at the end.\n"
+    "   Then in Bash: W=/tmp/sd; rm -rf $W; mkdir -p $W/state; `git clone --depth 1 -b data https://github.com/{OWNER}/swing-desk "
+    "$W/data` for the market data (retry up to 3 times, 20 s apart; if it keeps failing, `cd $C && python3 -c \"from engine.data import "
+    "fetch_branch; print(fetch_branch('{OWNER}/swing-desk','data','$W/data'))\"`). If imports fail, "
+    "`pip install --break-system-packages -q pandas numpy scikit-learn pyarrow`."
+)
+
 NEWS_ENTRIES = (
     'News check: for each featured entry in $W/out/scan.json (the ones with a rank, at most 8) run one WebSearch "<TICKER> stock news" '
     "and judge the last few days. avoid = earnings or guidance shock, offering/dilution, fraud/SEC/legal trouble, an agreed takeover "
@@ -93,7 +111,7 @@ def main():
     a = ap.parse_args()
     out = pathlib.Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    common = {"OWNER": a.owner, "ARTIFACT": a.artifact}
+    common = {"SETUP": SETUP, "OWNER": a.owner, "ARTIFACT": a.artifact}
     scan_t = (HERE / "scan_prompt.md").read_text()
     for name, vals in MODES.items():
         txt = fill(scan_t, {**vals, **common})
@@ -102,7 +120,7 @@ def main():
     for name in ("learning", "weekly"):
         (out / f"{name}.md").write_text(fill((HERE / f"{name}_prompt.md").read_text(), common))
     for f in sorted(out.glob("*.md")):
-        left = [s for s in ("{MODE", "{OWNER}", "{ARTIFACT}", "{NEWS_STEP}", "{PROGRESS_BLOCK}", "{SCAN_ARGS}") if s in f.read_text()]
+        left = [s for s in ("{MODE", "{OWNER}", "{ARTIFACT}", "{NEWS_STEP}", "{PROGRESS_BLOCK}", "{SCAN_ARGS}", "{SETUP}") if s in f.read_text()]
         print(f.name, len(f.read_text()), "unfilled:" if left else "ok", *left)
 
 

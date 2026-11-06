@@ -174,6 +174,8 @@ textarea { font-family: var(--f-body); min-height: 60px; }
 .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(18px + env(safe-area-inset-bottom, 0px)); background: var(--ink); color: var(--surface); padding: 9px 14px; border-radius: 8px; font-size: 13px; z-index: 30; max-width: calc(100% - 32px); }
 details summary { cursor: pointer; color: var(--accent); font-weight: 500; }
 b.caution-word, .t-notes b.caution-word, .empty b.caution-word { color: var(--crit); font-weight: 800; }
+.sigline { margin: 1px 0 5px; min-width: 220px; max-width: 360px; line-height: 1.35; white-space: normal; }
+.sigline .small { color: var(--ink2); }
 pre.digest { white-space: pre-wrap; font-family: var(--f-mono); font-size: 12px; background: var(--surface-2); padding: 10px; border-radius: var(--r-sm); margin: 8px 0 0; overflow-x: auto; }
 .strat { display: flex; flex-direction: column; gap: 8px; }
 .strat .row { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
@@ -700,7 +702,9 @@ function openTable() {
   const marks = latestMarks();
   return `<div class="tbl-wrap"><table><thead><tr><th>Ticker</th><th>Strategy</th><th>Entered</th><th class="n">Entry</th><th class="n">Shares</th><th class="n">Cost</th><th class="n">Stop</th><th class="n">Target</th><th class="n">Last</th><th class="n">Open P&L</th><th class="n">Hold left</th><th>Signals</th><th></th></tr></thead><tbody>
   ${open.map((t) => { const m = marks[t.id] || {}; const held = heldDays(t); const left = (num(t.max_hold) || 7) - held;
-    const sig = (m.signals || []).filter((s) => s.level !== "warn").map((s) => `<span class="pill ${s.level === "alert" ? "crit" : s.level === "good" ? "good" : "info"}">${esc(s.code.replace(/_/g, " ").toLowerCase())}</span>`).join(" ");
+    // what the latest scan says to do with this position, and why (the same reason as its alert card)
+    const sig = (m.signals || []).map((s) => `<div class="sigline"><span class="pill ${s.level === "alert" ? "crit" : s.level === "good" ? "good" : "info"}">${esc(s.action || s.code.replace(/_/g, " ").toLowerCase())}</span> <span class="small">${hiCaution(s.text || "")}</span></div>`).join("")
+      + ((m.signals || []).length && m.scan_at ? `<div class="small muted">from the ${dtShort(m.scan_at)} scan</div>` : "");
     return `<tr><td><span class="t">${esc(t.ticker)}</span></td><td class="small">${esc(t.strategy_label || t.strategy || "Manual")}</td><td>${dShort(t.entry_date)}</td><td class="n">${px(t.entry_price)}</td><td class="n">${esc(t.shares)}</td><td class="n">${money(num(t.entry_price) * num(t.shares))}</td><td class="n">${px(t.stop)}</td><td class="n">${px(t.target)}</td><td class="n">${px(m.last)}</td><td class="n ${signCls(m.unrealized)}">${m.unrealized != null ? `${smoney(m.unrealized)}<br><span class="muted small">${spct(m.unrealized_pct)}</span>` : "–"}</td><td class="n">${left > 0 ? `${left} of ${esc(t.max_hold || 7)} d` : `<span class="pill crit">time stop</span>`}</td><td>${sig || '<span class="muted small">none</span>'}</td>
     <td class="n"><button class="btn small" type="button" data-act="close" data-tid="${esc(t.id)}">Close</button> <button class="btn ghost small" type="button" data-act="edit" data-tid="${esc(t.id)}">Edit</button></td></tr>`; }).join("")}
   </tbody></table></div>`;

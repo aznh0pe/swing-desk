@@ -1,0 +1,25 @@
+{
+ "fingerprint": "0b754bd90fe2",
+ "files": [
+  "engine/__init__.py",
+  "engine/backtest.py",
+  "engine/calendar.py",
+  "engine/calibrate.py",
+  "engine/data.py",
+  "engine/indicators.py",
+  "engine/learnlog.py",
+  "engine/model.py",
+  "engine/monitor.py",
+  "engine/portfolio.py",
+  "engine/postprocess.py",
+  "engine/research.py",
+  "engine/rules.py",
+  "engine/scan.py",
+  "engine/strategies.py",
+  "engine/version.py",
+  "config/backtest_report.json",
+  "config/params.json",
+  "config/research_seed.json"
+ ],
+ "about": "Swing Desk engine, identical to engine/ and config/ in the GitHub repo. Scheduled runs that can't attach the repo read these files with the Artifact tool and run them."
+}
