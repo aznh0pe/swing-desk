@@ -32,7 +32,7 @@ from . import strategies as S
 from .portfolio import load_collection, load_state
 
 QUALITY = {"oos_win": 0.62, "oos_pf": 1.15, "oos_trades": 80, "max_overlap": 0.70}
-SEED_FILE = pathlib.Path(__file__).resolve().parent.parent / "config" / "research_seed.json"
+SEED_FILE = pathlib.Path(__file__).resolve().parent / "research_seed.json"
 STAT_KEYS = ("trades", "win_rate", "avg_ret", "profit_factor", "avg_hold", "trades_per_year", "worst_loss",
              "max_consec_losses", "exit_mix", "fill_rate", "avg_win", "avg_loss")
 

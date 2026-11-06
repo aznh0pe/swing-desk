@@ -1,5 +1,5 @@
 {
- "fingerprint": "0b754bd90fe2",
+ "fingerprint": "df12a0827eef",
  "files": [
   "engine/__init__.py",
   "engine/backtest.py",
@@ -17,9 +17,7 @@
   "engine/scan.py",
   "engine/strategies.py",
   "engine/version.py",
-  "config/backtest_report.json",
-  "config/params.json",
-  "config/research_seed.json"
+  "engine/research_seed.json"
  ],
- "about": "Swing Desk engine, identical to engine/ and config/ in the GitHub repo. Scheduled runs that can't attach the repo read these files with the Artifact tool and run them."
+ "about": "Swing Desk engine, identical to engine/ in the GitHub repo. Scheduled runs that can't attach the repo read these files with the Artifact tool and run them."
 }

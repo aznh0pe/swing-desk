@@ -14,9 +14,10 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
 def files(root: pathlib.Path = ROOT) -> list[str]:
-    """The engine's files, relative to its root: everything the scanner, review and recalibration need."""
+    """The engine's files, relative to its root: everything the scanner, review and recalibration need
+    (kept inside engine/, since file readers screen folders named config/)."""
     out = sorted(p.relative_to(root).as_posix() for p in (root / "engine").glob("*.py"))
-    out += sorted(p.relative_to(root).as_posix() for p in (root / "config").glob("*.json"))
+    out += sorted(p.relative_to(root).as_posix() for p in (root / "engine").glob("*.json") if p.name != "MANIFEST.json")
     return out
 
 

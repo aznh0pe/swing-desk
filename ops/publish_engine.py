@@ -21,7 +21,7 @@ def main() -> None:
     manifest = {
         "fingerprint": V.fingerprint(ROOT),
         "files": files,
-        "about": ("Swing Desk engine, identical to engine/ and config/ in the GitHub repo. Scheduled runs that "
+        "about": ("Swing Desk engine, identical to engine/ in the GitHub repo. Scheduled runs that "
                   "can't attach the repo read these files with the Artifact tool and run them."),
     }
     (ROOT / "ops" / "engine_manifest.json").write_text(json.dumps(manifest, indent=1) + "\n")

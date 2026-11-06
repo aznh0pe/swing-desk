@@ -21,7 +21,7 @@ SETUP = (
     "   b. If add_repo still isn't available, or a command that runs code from C is refused at any step: use the identical copy of the "
     "engine published with my dashboard. Artifact tool, action \"read\", url {ARTIFACT}, path \"engine/MANIFEST.json\" (a short JSON "
     "list of files), then one more \"read\" on the same url with paths set to that manifest's \"files\" (no out_dir: the default folder "
-    "needs no approval). The result says where the files landed: call the folder that holds engine/ and config/ C, and carry on from "
+    "needs no approval). The result says where the files landed: call the folder that holds engine/ C, and carry on from "
     "the step you were on. Don't run code from a plain git clone that add_repo didn't attach.\n"
     "   c. If neither way can run, follow \"If the scanner can't run\" at the end.\n"
     "   Then in Bash: W=/tmp/sd; rm -rf $W; mkdir -p $W/state; `git clone --depth 1 -b data https://github.com/{OWNER}/swing-desk "

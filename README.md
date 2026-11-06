@@ -51,7 +51,7 @@ python -m engine.research test --queued 3 --data data --state state --out rs
 the live-trading checks and how many of its signals the live strategies already take.
 Verdicts: candidate (>= 62% wins and PF >= 1.15 on unseen data, mostly new trades), watch,
 redundant, rejected. The daily learning task tests one or two ideas (a queued one, or a new
-one it researched that day); `config/research_seed.json` is the starter backlog. Saturday's
+one it researched that day); `engine/research_seed.json` is the starter backlog. Saturday's
 recalibration evaluates the candidates with the live strategies and keeps one on only if it
 passes the live checks and keeps or raises the A+ win rate and average trade.
 

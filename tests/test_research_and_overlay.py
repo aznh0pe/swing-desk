@@ -22,7 +22,7 @@ def _ind(n=300, k=4):
 
 
 def test_seed_specs_are_valid():
-    seeds = json.loads((ROOT / "config" / "research_seed.json").read_text())
+    seeds = json.loads((ROOT / "engine" / "research_seed.json").read_text())
     assert len(seeds) >= 8
     for s in seeds:
         assert R.validate(s) == [], s["id"]
