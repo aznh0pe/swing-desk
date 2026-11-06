@@ -111,17 +111,18 @@ def _holidays() -> str:
 WEEKDAY_CLOSED = ('If today\'s Pacific date is a Saturday or Sunday, or one of these US market holidays: {HOLIDAYS}, end with '
                   'exactly: "Market closed today; nothing to check."')
 
-# backup checks: each runs after a scheduled task and re-runs it if it failed or never ran
+# backup checks: each runs after a scheduled task and re-runs it if it failed or never ran.
+# TARGET_ID is the scheduled task it backs up (to tell "still running" from "never ran").
 BACKUPS = {
     "backup_premarket": {
-        "TARGET": "premarket", "TARGET_LABEL": "today's pre-market check", "DUE": "5:50 AM PT", "CHECK_COLLECTION": "scans",
+        "TARGET_ID": "trig_01BC6UyGsrA3mesQsU6pFbRP", "TARGET": "premarket", "TARGET_LABEL": "today's pre-market check", "DUE": "5:50 AM PT", "CHECK_COLLECTION": "scans",
         "CHECK_ORDER": "started_at", "CLOSED_RULE": WEEKDAY_CLOSED,
         "CHECK_RULE": ('It ran if one of those scans has mode "premarket", a started_at today at or after 5:40 AM, and status "ok", '
                        '"ok_with_warnings" or "closed".'),
         "OK_LINE": "today's pre-market check ran at <its start time, e.g. 5:52 AM PT>.",
         "URGENCY": "The market opens at 6:30 AM PT, so go straight to it. "},
     "backup_preclose": {
-        "TARGET": "preclose", "TARGET_LABEL": "today's pre-close exit scan", "DUE": "12:25 PM PT", "CHECK_COLLECTION": "scans",
+        "TARGET_ID": "trig_015vu682N2v147NyT2kAdSLJ", "TARGET": "preclose", "TARGET_LABEL": "today's pre-close exit scan", "DUE": "12:25 PM PT", "CHECK_COLLECTION": "scans",
         "CHECK_ORDER": "started_at", "CLOSED_RULE": WEEKDAY_CLOSED,
         "CHECK_RULE": ('It ran if one of those scans has mode "preclose" or "postclose", a started_at today at or after 12:20 PM '
                        '(on a half day, when the market closes at 10:00 AM PT, at or after 9:15 AM), and status "ok", '
@@ -129,18 +130,18 @@ BACKUPS = {
         "OK_LINE": "today's pre-close scan ran at <its start time, e.g. 12:27 PM PT>.",
         "URGENCY": "The market closes at 1:00 PM PT, so go straight to it. "},
     "backup_postclose": {
-        "TARGET": "postclose", "TARGET_LABEL": "today's post-close setup scan", "DUE": "2:05 PM PT", "CHECK_COLLECTION": "scans",
+        "TARGET_ID": "trig_01VJiBMjH2dJJnBrAaTr9BcX", "TARGET": "postclose", "TARGET_LABEL": "today's post-close setup scan", "DUE": "2:05 PM PT", "CHECK_COLLECTION": "scans",
         "CHECK_ORDER": "started_at", "CLOSED_RULE": WEEKDAY_CLOSED,
         "CHECK_RULE": ('It ran if one of those scans has mode "postclose", a started_at today at or after 1:55 PM (on a half day '
                        'at or after 10:55 AM), and status "ok", "ok_with_warnings" or "closed".'),
         "OK_LINE": "today's post-close scan ran at <its start time, e.g. 2:17 PM PT>.", "URGENCY": ""},
     "backup_learning": {
-        "TARGET": "learning", "TARGET_LABEL": "today's daily learning review", "DUE": "3:12 PM PT", "CHECK_COLLECTION": "journal",
+        "TARGET_ID": "trig_01V9Hsf7VTMtsod6AoHQnyiP", "TARGET": "learning", "TARGET_LABEL": "today's daily learning review", "DUE": "3:12 PM PT", "CHECK_COLLECTION": "journal",
         "CHECK_ORDER": "date", "CLOSED_RULE": WEEKDAY_CLOSED,
         "CHECK_RULE": 'It ran if one of those documents has date equal to today (YYYY-MM-DD) and an id that doesn\'t end in "-weekly".',
         "OK_LINE": "today's daily review ran (journal <its id>).", "URGENCY": ""},
     "backup_weekly": {
-        "TARGET": "weekly", "TARGET_LABEL": "this week's Saturday recalibration", "DUE": "Saturday 10:14 AM PT",
+        "TARGET_ID": "trig_01QZiuM65EDHm187zYcSY7Kk", "TARGET": "weekly", "TARGET_LABEL": "this week's Saturday recalibration", "DUE": "Saturday 10:14 AM PT",
         "CHECK_COLLECTION": "journal", "CHECK_ORDER": "date",
         "CLOSED_RULE": "This check runs on Sunday; there is no closed-day rule.",
         "CHECK_RULE": 'It ran if one of those documents has an id ending in "-weekly" and a date of yesterday or today.',
@@ -178,7 +179,7 @@ def main():
         (out / f"{name}.md").write_text(txt.replace("{TARGET_PROMPT}", target))
     for f in sorted(out.glob("*.md")):
         left = [s for s in ("{MODE", "{OWNER}", "{ARTIFACT}", "{NEWS_STEP}", "{PROGRESS_BLOCK}", "{SCAN_ARGS}", "{SETUP}",
-                            "{TARGET", "{DUE}", "{CHECK_", "{OK_LINE}", "{URGENCY}", "{CLOSED_RULE}", "{HOLIDAYS}") if s in f.read_text()]
+                            "{TARGET", "{DUE}", "{CHECK_", "{OK_LINE}", "{URGENCY}", "{CLOSED_RULE}", "{HOLIDAYS}", "{TARGET_ID}") if s in f.read_text()]
         print(f.name, len(f.read_text()), "unfilled:" if left else "ok", *left)
 
 
