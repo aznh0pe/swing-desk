@@ -59,6 +59,12 @@ MODES = {
         "FRESHNESS_RULE": "intraday_asof should be within the last 45 minutes. If it is older, re-clone the data branch once after 5 minutes, then continue with what you have and mention the data time in the digest.",
         "NEWS_STEP": "If $W/out/scan.json lists entries (buy-at-close setups), run the news check. " + NEWS_ENTRIES,
         "PROGRESS_BLOCK": "", "SCAN_ARGS": ""},
+    # one-off runs on half days (close 10:00 AM PT), when the regular 12:25 PM run would come after the close
+    "preclose_halfday": {
+        "MODE": "preclose", "MODE_LABEL": "pre-close exit scan for today's half day (40 minutes before the 10:00 AM PT early close)",
+        "FRESHNESS_RULE": "intraday_asof should be within the last 45 minutes. If it is older, re-clone the data branch once after 5 minutes, then continue with what you have and mention the data time in the digest.",
+        "NEWS_STEP": "If $W/out/scan.json lists entries (buy-at-close setups), run the news check. " + NEWS_ENTRIES,
+        "PROGRESS_BLOCK": "", "SCAN_ARGS": ""},
     "postclose": {
         "MODE": "postclose", "MODE_LABEL": "post-close setup scan for the next session",
         "FRESHNESS_RULE": ("If today is a trading day and meta.json's daily_final_for is not today's date (Pacific), re-clone the data branch "

@@ -418,6 +418,14 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
     (out / "docs").mkdir(parents=True, exist_ok=True)
     errors, notes = [], []
     mode = resolve_mode(mode, now)
+    _, close_pt = cal.session_times_pt(now.date())
+    close_label = close_pt.strftime("%I:%M %p").lstrip("0") + " PT"
+    if mode == "preclose" and cal.market_phase(now) == "postclose":
+        # e.g. the 12:25 PM run on a half day (close 10:00 AM PT): the session is over, so selling
+        # "before the close" is impossible; run as a post-close scan instead
+        mode = "postclose"
+        notes.append(f"The market already closed at {close_label} today (half day), so this ran as a post-close "
+                     "scan: exits are for the next open and new setups for the next session.")
     scan_id = now.strftime("%Y%m%d-%H%M") + f"-{mode}"
     state = load_state(state_dir)
     P = load_params(state, params_path)
@@ -453,7 +461,7 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
         if t.get("status") != "open":
             continue
         try:
-            res = check_trade(t, ind, mode, earnings, premarket, P, partial)
+            res = check_trade(t, ind, mode, earnings, premarket, P, partial, close_label)
             if res:
                 positions.append(res)
         except Exception as e:
@@ -582,6 +590,8 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
     d = scan["data"]
     if d["status"] != "ok":
         lines.append(f"Data note: {d['status']}: " + " ".join(d["notes"]))
+    for n in scan.get("notes") or []:
+        lines.append(f"Note: {n}")
     exits = [(p, s) for p in positions for s in p.get("signals", []) if s["level"] in ("alert", "good")]
     if exits:
         lines += ["", "EXIT / ACTION ALERTS"]

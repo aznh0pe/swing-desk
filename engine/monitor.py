@@ -20,7 +20,7 @@ def _f(x, nd=2):
 
 
 def check_trade(tr: dict, ind: dict, mode: str, earnings: dict, premarket, P: dict,
-                partial_bar: bool) -> dict | None:
+                partial_bar: bool, close_label: str = "1:00 PM PT") -> dict | None:
     tk = tr.get("ticker")
     c = ind["close"]
     if tk not in c.columns:
@@ -55,7 +55,7 @@ def check_trade(tr: dict, ind: dict, mode: str, earnings: dict, premarket, P: di
         pm_last = np.nan
     unreal = (last - entry) * shares if entry else 0.0
     sigs = []
-    when_close = "before the 1:00 PM PT close today" if mode == "preclose" else "at the next open"
+    when_close = f"before the {close_label} close today" if mode == "preclose" else "at the next open"
 
     # fills the brokerage probably already handled (only for bars after the entry day)
     if last_day > entry_day or partial_bar:
