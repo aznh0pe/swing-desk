@@ -20,7 +20,7 @@ import datetime as dt
 import json
 import pathlib
 
-from .scan import _utc_now, build_overlay, load_params, make_digest, run_done_doc
+from .scan import _utc_now, build_overlay, load_params, make_digest, mark_caution, run_done_doc
 from .portfolio import load_state
 from . import calendar as cal
 
@@ -167,6 +167,7 @@ def apply(out_dir: str, news: list[str], state_dir: str | None = None) -> dict:
                          scan.get("premarket_checks", []), scan["counts"].get("week_aplus", len(kept)), P2, now)
     if dropped:
         digest += "\n\nDropped after news check: " + "; ".join(f"{d['ticker']} ({d['reason']})" for d in dropped)
+    digest = mark_caution(digest)
     scan["digest"] = digest
     (out / "docs" / "scans" / f"{scan['id']}.json").write_text(json.dumps(scan, default=str))
     if scan.get("run_token"):

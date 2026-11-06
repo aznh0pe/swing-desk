@@ -173,6 +173,7 @@ textarea { font-family: var(--f-body); min-height: 60px; }
 .modal .foot { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(18px + env(safe-area-inset-bottom, 0px)); background: var(--ink); color: var(--surface); padding: 9px 14px; border-radius: 8px; font-size: 13px; z-index: 30; max-width: calc(100% - 32px); }
 details summary { cursor: pointer; color: var(--accent); font-weight: 500; }
+b.caution-word, .t-notes b.caution-word, .empty b.caution-word { color: var(--crit); font-weight: 800; }
 pre.digest { white-space: pre-wrap; font-family: var(--f-mono); font-size: 12px; background: var(--surface-2); padding: 10px; border-radius: var(--r-sm); margin: 8px 0 0; overflow-x: auto; }
 .strat { display: flex; flex-direction: column; gap: 8px; }
 .strat .row { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
@@ -266,6 +267,10 @@ const HOLIDAYS = new Set(["2025-01-01","2025-01-09","2025-01-20","2025-02-17","2
 // ---------------------------------------------------------------- utils
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+// news checks: the word "caution" in red and bold (only the word), wherever it appears
+const hiCaution = (v) => esc(v).replace(/\bcaution\b/gi, (w) => `<b class="caution-word">${w}</b>`);
+// scan digests are written for email ("🔴 **caution**"): show them here with the same red, bold word
+const fmtDigest = (v) => esc(v).replace(/🔴 \*\*(caution)\*\*/gi, (m, w) => `<b class="caution-word">${w}</b>`).replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
 const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : null; };
 const money = (v, d = 2) => { const n = num(v); if (n === null) return "–"; return (n < 0 ? "−$" : "$") + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d }); };
 const smoney = (v) => { const n = num(v); if (n === null) return "–"; return (n > 0 ? "+" : n < 0 ? "−" : "") + "$" + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); };
@@ -627,7 +632,7 @@ function viewAlerts() {
   html += `</section><section class="section"><div class="section-head"><h2>Open positions</h2><span class="meta">Filled orders being managed · hold days count trading sessions</span></div>${openTable()}</section>`;
   const recent = S.alerts.filter((a) => a.type === "entry" && !entryLive(a)).slice(0, 15);
   if (recent.length) html += `<section class="section"><details><summary>Recently handled setups (${recent.length})</summary><div class="tbl-wrap" style="margin-top:8px"><table><thead><tr><th>Signal</th><th>Ticker</th><th>Strategy</th><th class="n">Score</th><th class="n">Win %</th><th class="n">Entry</th><th>Status</th></tr></thead><tbody>
-    ${recent.map((a) => `<tr><td>${dShort(a.signal_date)}</td><td><span class="t">${esc(a.ticker)}</span></td><td>${esc(a.strategy_label)}</td><td class="n">${esc(a.score)}</td><td class="n">${pct(a.win_pct)}</td><td class="n">${px(a.entry)}</td><td>${statusPill(a.status === "new" ? (a.withdrawn ? "withdrawn" : "expired") : a.status)}${a.withdrawn && a.status === "new" ? `<div class="small muted">${esc(a.withdrawn_reason || "")}</div>` : ""}</td></tr>`).join("")}
+    ${recent.map((a) => `<tr><td>${dShort(a.signal_date)}</td><td><span class="t">${esc(a.ticker)}</span></td><td>${esc(a.strategy_label)}</td><td class="n">${esc(a.score)}</td><td class="n">${pct(a.win_pct)}</td><td class="n">${px(a.entry)}</td><td>${statusPill(a.status === "new" ? (a.withdrawn ? "withdrawn" : "expired") : a.status)}${a.withdrawn && a.status === "new" ? `<div class="small muted">${hiCaution(a.withdrawn_reason || "")}</div>` : ""}</td></tr>`).join("")}
     </tbody></table></div></details></section>`;
   return html;
 }
@@ -646,7 +651,7 @@ function ticket(a, today) {
   const riskPct = e ? (100 * (s - e)) / e : null, rewPct = e ? (100 * (t - e)) / e : null;
   const stale = a.valid_for && a.valid_for < today;
   const grade = a.grade === "A+" ? `<div class="stamp" aria-label="Grade A plus">A+</div>` : `<div class="stamp a">${esc(a.grade || "A")}</div>`;
-  const news = a.news_check && a.news_check !== "pending" ? `<div><b>News check:</b> ${esc(a.news_check)}${a.news_note ? " · " + esc(a.news_note) : ""}</div>` : "";
+  const news = a.news_check && a.news_check !== "pending" ? `<div><b>News check:</b> ${hiCaution(a.news_check)}${a.news_note ? " · " + hiCaution(a.news_note) : ""}</div>` : "";
   return `<article class="ticket ${a.capacity_note ? "overcap" : ""}" aria-label="${esc(a.ticker)} setup">
     <div class="t-head">${grade}<div class="t-title"><div class="tk">${esc(a.ticker)}</div><div class="nm" title="${esc(a.name)}">${esc(a.name)}</div>
       <div class="st">${a.rank ? `#${esc(a.rank)} · ` : ""}${esc(a.strategy_label)} · ${esc(a.family)}</div></div>
@@ -666,7 +671,7 @@ function ticket(a, today) {
       <div class="small muted">Last checked by the ${dtShort(a._ov_at || a.created_at)} scan</div>
       ${Array.isArray(a.why) && a.why.length ? `<details><summary>Why it qualifies</summary><ul>${a.why.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></details>` : ""}
     </div>
-    ${a.withdrawn ? `<div class="note-strip" style="background:var(--crit-bg);color:var(--crit)"><b>Withdrawn:</b> ${esc(a.withdrawn_reason || "a later scan dropped this setup.")} If you placed the order, cancel it in your brokerage, then press Skip.</div>` : ""}
+    ${a.withdrawn ? `<div class="note-strip" style="background:var(--crit-bg);color:var(--crit)"><b>Withdrawn:</b> ${hiCaution(a.withdrawn_reason || "a later scan dropped this setup.")} If you placed the order, cancel it in your brokerage, then press Skip.</div>` : ""}
     ${a.topup_note ? `<div class="note-strip">${esc(a.topup_note)}</div>` : ""}
     ${a.size_note ? `<div class="note-strip">${esc(a.size_note)}</div>` : ""}
     ${a.capacity_note ? `<div class="note-strip">${esc(a.capacity_note)}</div>` : ""}
@@ -781,7 +786,7 @@ function viewScans() {
   html += S.scans.length ? `<div class="tbl-wrap"><table><thead><tr><th>Ran</th><th>Scan</th><th>Status</th><th>Data</th><th class="n">A+ setups</th><th class="n">Exit alerts</th><th>Details</th></tr></thead><tbody>
     ${S.scans.map((s) => `<tr><td style="white-space:nowrap">${dtShort(s.started_at)}</td><td>${esc(modeLabel(s.mode))}</td><td><span class="pill ${s.status === "ok" ? "good" : s.status === "failed" ? "crit" : "warn"}">${esc((s.status || "").replace(/_/g, " "))}</span></td>
       <td class="small">${esc(s.data?.status || "–")} · bar ${esc(s.data?.last_bar || "–")}</td><td class="n">${esc(s.counts?.aplus ?? 0)}</td><td class="n">${esc(s.counts?.exit_alerts ?? 0)}</td>
-      <td style="min-width:220px">${s.digest ? `<details><summary>Digest</summary><pre class="digest">${esc(s.digest)}</pre></details>` : ""}${(s.errors || []).length ? `<div class="small muted">${esc(s.errors.length)} warning(s) handled</div>` : ""}${s.fixes ? `<div class="small muted">${esc(s.fixes)}</div>` : ""}</td></tr>`).join("")}
+      <td style="min-width:220px">${s.digest ? `<details><summary>Digest</summary><pre class="digest">${fmtDigest(s.digest)}</pre></details>` : ""}${(s.errors || []).length ? `<div class="small muted">${esc(s.errors.length)} warning(s) handled</div>` : ""}${s.fixes ? `<div class="small muted">${esc(s.fixes)}</div>` : ""}</td></tr>`).join("")}
     </tbody></table></div>` : `<div class="empty">Each scan records its status, data health and results here, including any problem it recovered from.</div>`;
   return html + `</section>`;
 }

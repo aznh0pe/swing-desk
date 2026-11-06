@@ -15,6 +15,7 @@ import datetime as dt
 import json
 import math
 import pathlib
+import re
 import traceback
 
 import numpy as np
@@ -579,6 +580,15 @@ def _write(out, writes, op, coll, did, data, version=None):
     writes.append(w)
 
 
+_CAUTION = re.compile(r"(?<!\*\*)\b(caution)\b(?!\*\*)", re.IGNORECASE)
+
+
+def mark_caution(text: str) -> str:
+    """Make every news "caution" stand out in the email: a red marker and bold (markdown). Only the word is
+    marked, and running it twice changes nothing."""
+    return _CAUTION.sub(lambda m: f"🔴 **{m.group(1)}**", text or "")
+
+
 def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -> str:
     m = scan["market"]
     f = scan["funds"]
@@ -630,6 +640,8 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
             lines.append(f"   Stop ${e['stop']} | Target ${e['target']} | R:R {e['rr']} | hold up to {e['hold_max_days']} days")
             lines.append(f"   Size {e['shares']} sh{frac} = ${e['total_cost']:,.2f} ({e['pct_of_capital']}% of capital), risk ${e['risk_usd']}")
             lines.append(f"   Exit signal: {e['exit_signal']}")
+            if e.get("news_check") and e["news_check"] != "pending":
+                lines.append(f"   News check: {e['news_check']}" + (f" · {e['news_note']}" if e.get("news_note") else ""))
             if e.get("capacity_note"):
                 lines.append(f"   Note: {e['capacity_note']}")
             if e.get("size_note"):
@@ -649,7 +661,7 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
     lines += ["", f"A+ setups this week: {week_aplus}", "",
               "Model-generated signals from backtested rules, not financial advice. Win % is an "
               "estimate from historical setups and can be wrong."]
-    return "\n".join(lines)
+    return mark_caution("\n".join(lines))
 
 
 def main():
