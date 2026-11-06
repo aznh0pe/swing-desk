@@ -3,7 +3,8 @@
     python3 ops/build_prompts.py --owner aznh0pe --artifact https://claude.ai/artifact/... --out ops/generated
 
 Writes one prompt per scheduled task: premarket, preclose, postclose, manual (Scan now button),
-learning (daily review + strategy research) and weekly (recalibration).
+learning (daily review + strategy research), weekly (recalibration), and a backup check for each
+scheduled one (backup_*) that re-runs it when it failed or never ran.
 """
 from __future__ import annotations
 
@@ -97,6 +98,56 @@ MODES = {
 }
 
 
+def _holidays() -> str:
+    """Upcoming NYSE holidays, from the engine's calendar, for the backup checks' closed-day rule."""
+    import datetime as dt
+    import sys
+    sys.path.insert(0, str(HERE.parent))
+    from engine import calendar as cal
+    days = sorted(d for d in cal.HOLIDAYS if d >= dt.date.today().isoformat())
+    return ", ".join(dt.date.fromisoformat(d).strftime("%a %b %-d %Y") for d in days)
+
+
+WEEKDAY_CLOSED = ('If today\'s Pacific date is a Saturday or Sunday, or one of these US market holidays: {HOLIDAYS}, end with '
+                  'exactly: "Market closed today; nothing to check."')
+
+# backup checks: each runs after a scheduled task and re-runs it if it failed or never ran
+BACKUPS = {
+    "backup_premarket": {
+        "TARGET": "premarket", "TARGET_LABEL": "today's pre-market check", "DUE": "5:50 AM PT", "CHECK_COLLECTION": "scans",
+        "CHECK_ORDER": "started_at", "CLOSED_RULE": WEEKDAY_CLOSED,
+        "CHECK_RULE": ('It ran if one of those scans has mode "premarket", a started_at today at or after 5:40 AM, and status "ok", '
+                       '"ok_with_warnings" or "closed".'),
+        "OK_LINE": "today's pre-market check ran at <its start time, e.g. 5:52 AM PT>.",
+        "URGENCY": "The market opens at 6:30 AM PT, so go straight to it. "},
+    "backup_preclose": {
+        "TARGET": "preclose", "TARGET_LABEL": "today's pre-close exit scan", "DUE": "12:25 PM PT", "CHECK_COLLECTION": "scans",
+        "CHECK_ORDER": "started_at", "CLOSED_RULE": WEEKDAY_CLOSED,
+        "CHECK_RULE": ('It ran if one of those scans has mode "preclose" or "postclose", a started_at today at or after 12:20 PM '
+                       '(on a half day, when the market closes at 10:00 AM PT, at or after 9:15 AM), and status "ok", '
+                       '"ok_with_warnings" or "closed".'),
+        "OK_LINE": "today's pre-close scan ran at <its start time, e.g. 12:27 PM PT>.",
+        "URGENCY": "The market closes at 1:00 PM PT, so go straight to it. "},
+    "backup_postclose": {
+        "TARGET": "postclose", "TARGET_LABEL": "today's post-close setup scan", "DUE": "2:05 PM PT", "CHECK_COLLECTION": "scans",
+        "CHECK_ORDER": "started_at", "CLOSED_RULE": WEEKDAY_CLOSED,
+        "CHECK_RULE": ('It ran if one of those scans has mode "postclose", a started_at today at or after 1:55 PM (on a half day '
+                       'at or after 10:55 AM), and status "ok", "ok_with_warnings" or "closed".'),
+        "OK_LINE": "today's post-close scan ran at <its start time, e.g. 2:17 PM PT>.", "URGENCY": ""},
+    "backup_learning": {
+        "TARGET": "learning", "TARGET_LABEL": "today's daily learning review", "DUE": "3:12 PM PT", "CHECK_COLLECTION": "journal",
+        "CHECK_ORDER": "date", "CLOSED_RULE": WEEKDAY_CLOSED,
+        "CHECK_RULE": 'It ran if one of those documents has date equal to today (YYYY-MM-DD) and an id that doesn\'t end in "-weekly".',
+        "OK_LINE": "today's daily review ran (journal <its id>).", "URGENCY": ""},
+    "backup_weekly": {
+        "TARGET": "weekly", "TARGET_LABEL": "this week's Saturday recalibration", "DUE": "Saturday 10:14 AM PT",
+        "CHECK_COLLECTION": "journal", "CHECK_ORDER": "date",
+        "CLOSED_RULE": "This check runs on Sunday; there is no closed-day rule.",
+        "CHECK_RULE": 'It ran if one of those documents has an id ending in "-weekly" and a date of yesterday or today.',
+        "OK_LINE": "this week's recalibration ran (journal <its id>).", "URGENCY": ""},
+}
+
+
 def fill(text: str, values: dict) -> str:
     for k, v in values.items():
         text = text.replace("{" + k + "}", v)
@@ -119,8 +170,15 @@ def main():
         (out / f"{name}.md").write_text(txt)
     for name in ("learning", "weekly"):
         (out / f"{name}.md").write_text(fill((HERE / f"{name}_prompt.md").read_text(), common))
+    backup_t = (HERE / "backup_prompt.md").read_text()
+    for name, vals in BACKUPS.items():
+        target = (out / f"{vals['TARGET']}.md").read_text().strip()
+        txt = fill(backup_t, {k: v for k, v in vals.items() if k != "TARGET"})
+        txt = fill(txt, {"HOLIDAYS": _holidays(), "ARTIFACT": a.artifact})
+        (out / f"{name}.md").write_text(txt.replace("{TARGET_PROMPT}", target))
     for f in sorted(out.glob("*.md")):
-        left = [s for s in ("{MODE", "{OWNER}", "{ARTIFACT}", "{NEWS_STEP}", "{PROGRESS_BLOCK}", "{SCAN_ARGS}", "{SETUP}") if s in f.read_text()]
+        left = [s for s in ("{MODE", "{OWNER}", "{ARTIFACT}", "{NEWS_STEP}", "{PROGRESS_BLOCK}", "{SCAN_ARGS}", "{SETUP}",
+                            "{TARGET", "{DUE}", "{CHECK_", "{OK_LINE}", "{URGENCY}", "{CLOSED_RULE}", "{HOLIDAYS}") if s in f.read_text()]
         print(f.name, len(f.read_text()), "unfilled:" if left else "ok", *left)
 
 

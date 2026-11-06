@@ -20,7 +20,7 @@ import datetime as dt
 import json
 import pathlib
 
-from .scan import _utc_now, build_overlay, load_params, make_digest, mark_caution, run_done_doc
+from .scan import _utc_now, build_overlay, email_headline, load_params, make_digest, mark_caution, run_done_doc
 from .portfolio import load_state
 from . import calendar as cal
 
@@ -175,10 +175,11 @@ def apply(out_dir: str, news: list[str], state_dir: str | None = None) -> dict:
         if rp.exists():
             rp.write_text(json.dumps(run_done_doc(scan, scan["run_token"], _utc_now()), default=str))
     (out / "digest.md").write_text(digest)
+    (out / "headline.txt").write_text(email_headline(scan))
     (out / "scan.json").write_text(json.dumps({"scan": scan, "entries": kept, "ctx": ctx}, indent=1, default=str))
     chunks = [flat[i:i + 45] for i in range(0, len(flat), 45)]
     (out / "writes.json").write_text(json.dumps(chunks, indent=1))
-    return {"kept": len(kept), "dropped": dropped, "writes": len(flat),
+    return {"kept": len(kept), "dropped": dropped, "writes": len(flat), "headline": email_headline(scan),
             "withdrawn": sum(1 for v in (scan.get("alert_updates") or {}).values() if v.get("withdrawn"))}
 
 

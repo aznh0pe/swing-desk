@@ -5,9 +5,11 @@ name: market-data
 # so both daylight-saving regimes are covered.
 on:
   schedule:
-    - cron: "5,35 12-22 * * 1-5"   # every 30 min, ~4 AM to 3 PM Pacific, weekdays
-    - cron: "17 13 * * 6"          # Saturday history rebuild for the weekly recalibration
-    - cron: "41 1 * * 2-6"         # late-evening safety pass (catches a missed post-close run)
+    # GitHub runs scheduled workflows late or skips some at busy times (about one run an hour got
+    # through at 30-minute spacing), so ask every 15 minutes, off the busy top of the hour.
+    - cron: "4,19,34,49 11-23 * * 1-5"   # ~3-4 AM to 3-4 PM Pacific, weekdays (both DST regimes)
+    - cron: "17 13 * * 6"                # Saturday history rebuild for the weekly recalibration (+ keepalive)
+    - cron: "41 1 * * 2-6"               # late-evening safety pass (catches a missed post-close run)
   workflow_dispatch:
     inputs:
       mode:
@@ -56,6 +58,19 @@ jobs:
             python pipeline/fetch_data.py --mode "$MODE" --out out && break
             echo "attempt $attempt failed, retrying in 30s"; sleep 30
           done
+
+      - name: Keep the schedule alive (GitHub pauses schedules after 60 days without commits)
+        if: github.event.schedule == '17 13 * * 6'
+        run: |
+          last=$(git log -1 --format=%ct HEAD)
+          days=$(( ( $(date +%s) - last ) / 86400 ))
+          echo "last commit on main: $days days ago"
+          if [ "$days" -ge 40 ]; then
+            git config user.name "swing-desk-bot"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -q --allow-empty -m "keepalive: keep the market-data schedule active"
+            git push "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:main || true
+          fi
 
       - name: Publish data branch (one squashed commit, no history bloat)
         run: |

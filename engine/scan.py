@@ -408,6 +408,15 @@ def headline(scan_doc: dict) -> str:
     return out
 
 
+def email_headline(scan_doc: dict) -> str:
+    """The first line of the emailed digest: what to act on, then the market label."""
+    out = headline(scan_doc)
+    label = (scan_doc.get("market") or {}).get("label")
+    if label and scan_doc.get("status") != "closed":
+        out += f" · market {label}"
+    return out
+
+
 def _utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -565,12 +574,13 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
         scan_doc["run_token"] = token
         _write(out, writes, "set", "runs", f"{token}-s6", run_done_doc(scan_doc, token, _utc_now()))
     (out / "digest.md").write_text(digest)
+    (out / "headline.txt").write_text(email_headline(scan_doc))
     (out / "scan.json").write_text(json.dumps({"scan": scan_doc, "entries": entries, "ctx": ctx}, indent=1, default=str))
     chunks = [writes[i:i + 45] for i in range(0, len(writes), 45)]
     (out / "writes.json").write_text(json.dumps(chunks, indent=1))
     return {"scan_id": scan_id, "mode": mode, "entries": len(entries), "exits": scan_doc["counts"]["exit_alerts"],
             "writes": len(writes), "chunks": len(chunks), "status": scan_doc["status"],
-            "data_status": health["status"], "errors": errors[:5]}
+            "data_status": health["status"], "errors": errors[:5], "headline": email_headline(scan_doc)}
 
 
 def closed_run(mode: str, now, out: pathlib.Path, run_token: str | None = None) -> dict:
@@ -595,10 +605,11 @@ def closed_run(mode: str, now, out: pathlib.Path, run_token: str | None = None) 
         scan_doc["run_token"] = token
         _write(out, writes, "set", "runs", f"{token}-s6", run_done_doc(scan_doc, token, _utc_now()))
     (out / "digest.md").write_text(digest)
+    (out / "headline.txt").write_text(email_headline(scan_doc))
     (out / "scan.json").write_text(json.dumps({"scan": scan_doc, "entries": [], "ctx": {}}, indent=1, default=str))
     (out / "writes.json").write_text(json.dumps([writes], indent=1))
     return {"scan_id": scan_id, "mode": mode, "entries": 0, "exits": 0, "writes": len(writes), "chunks": 1,
-            "status": "closed", "data_status": "n/a", "errors": []}
+            "status": "closed", "data_status": "n/a", "errors": [], "headline": email_headline(scan_doc)}
 
 
 def premarket_check(a, premarket, earnings, today) -> dict:

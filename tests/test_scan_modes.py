@@ -167,3 +167,33 @@ def test_real_data_postclose_alerts_are_complete(tmp_path):
         missing = [k for k in ENTRY_FIELDS if e.get(k) in (None, "")]
         assert not missing, (e["ticker"], missing)
         assert e["stop"] < e["entry"] < e["target"] and e["shares"] >= 1
+
+
+def test_every_scan_writes_the_email_headline(synth, tmp_path):
+    # the scheduled prompt's final message starts with this line, so it must always exist
+    for mode, when, expect in (("postclose", "2026-11-05 14:10", "market "), ("premarket", "2026-11-26 05:50", "Market closed"),
+                               ("postclose", "2026-11-12 14:10", "⚠ data stale")):
+        sub = tmp_path / mode / when.replace(" ", "_").replace(":", "")
+        sub.mkdir(parents=True)
+        res, doc, digest, _ = _run(synth, sub, mode, when)
+        line = (sub / "out" / "headline.txt").read_text()
+        assert expect in line and "\n" not in line, line
+        assert res["headline"] == line
+
+
+def test_news_check_rewrites_digest_and_headline_together(synth, tmp_path):
+    from engine import postprocess
+    res, doc, digest, _ = _run(synth, tmp_path, "postclose", "2026-11-05 14:10")
+    out = tmp_path / "out"
+    tickers = [e["ticker"] for e in doc["entries"]]
+    news = [f"{t}=clean" for t in tickers[1:]] + ([f"{tickers[0]}=avoid:Agreed to be acquired"] if tickers else [])
+    r = postprocess.apply(str(out), news, str(tmp_path / "state"))
+    line = (out / "headline.txt").read_text()
+    assert r["headline"] == line
+    after = json.loads((out / "scan.json").read_text())["scan"]
+    assert after["counts"]["aplus"] == len(tickers) - (1 if tickers else 0)
+    if tickers:
+        assert "Dropped after news check" in (out / "digest.md").read_text()
+    for chunk in json.loads((out / "writes.json").read_text()):
+        for w in chunk:
+            assert pathlib.Path(w["file_path"]).exists()
