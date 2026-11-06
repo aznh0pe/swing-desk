@@ -231,6 +231,17 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
     ind = I.compute(w, universe)
     log(f"indicators done in {time.time() - t0:.0f}s")
     P = S.params_with_defaults(None)
+    pre_changes = []
+    if merge_state:  # learn from real fills: stop slippage worse than assumed -> backtest with yours
+        try:
+            lp = ((load_state(merge_state).get("learning") or {}).get("portfolio") or {}).get("doc") or {}
+            ss = lp.get("stop_slippage") or {}
+            if (ss.get("n") or 0) >= 10 and ss.get("avg_pct") is not None and -float(ss["avg_pct"]) > P["risk"]["slippage_pct"]:
+                P["risk"]["slippage_pct"] = round(-float(ss["avg_pct"]), 3)
+                pre_changes.append(f"Backtests now assume {P['risk']['slippage_pct']:.2f}% slippage on stops and exits, "
+                                   f"matching your last {ss['n']} stop fills.")
+        except Exception as ex:
+            log(f"learning/portfolio unavailable: {ex!r}")
     report = {"generated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "split": str(split.date()),
               "period": [str(w["close"].index.min().date()), str(w["close"].index.max().date())],
               "tickers": int(w["close"].shape[1]), "strategies": {}}
@@ -259,6 +270,7 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
         tr = tr.assign(score=M.score(tr["p"].values, feats, train_only, rr.fillna(1).values))
         pooled.append(tr)
         enabled, checks, reason = S.enable_checks(st_train, st_test)
+        oos_weeks = max(1.0, (ind["close"].index[-1] - split).days / 7.0)
         # honest per-strategy figures for display and the learning loop: out-of-sample
         if st_test.get("trades", 0) >= 100:
             mdl["base_rate"] = st_test["win_rate"]
@@ -269,7 +281,8 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
         rec = {"enabled": bool(enabled), "variant": res["variant"], "train": st_train,
                "test_oos": st_test, "all": st_all, "yearly": B.yearly(tr).reset_index().to_dict("records"),
                "model_validation": mdl.get("validation"), "label": mt["label"], "family": mt["family"],
-               "checks": checks, "status_reason": reason}
+               "checks": checks, "status_reason": reason,
+               "path": None if enabled else S.path_to_pass(st_train, st_test, oos_weeks)}
         if spec is not None:
             rec.update(custom=True, about=spec.get("about"), source=spec.get("source"),
                        rules=R.describe({**spec, "params": res["variant"], "grid": {}}))
@@ -288,10 +301,21 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
             continue
         evaluate(name, res)
     # research strategies: this week's candidates plus every research strategy promoted before
+    research_docs = []
     if merge_state and not strategies:
-        from .research import candidate_specs, search_spec
+        from .research import candidate_specs, evaluate_spec, retest_specs, search_spec
+        from .scan import load_params as _load_live
+        # ideas that fail only on 2022-now checks can pass as new data arrives: re-test them every week
         try:
-            cands = candidate_specs(merge_state, oldP)
+            P_live, P_r, now_r = _load_live(load_state(merge_state), None), S.params_with_defaults(None), cal.now_pt()
+            for spec in retest_specs(merge_state):
+                d = evaluate_spec(spec, ind, P_r, P_live, split, now_r, by="weekly re-test", log=log)
+                research_docs.append(d)
+                log(f"  re-test {spec['id']}: {d['verdict']}")
+        except Exception as ex:
+            log(f"research re-tests failed: {ex!r}")
+        try:
+            cands = candidate_specs(merge_state, oldP, extra_results=research_docs)
         except Exception as ex:
             cands = {}
             log(f"research candidates unavailable: {ex!r}")
@@ -396,7 +420,13 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
     P["version"] = int(time.time())
     P["updated"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     P["source"] = "backtest"
-    changes = []
+    changes = list(pre_changes)
+    if research_docs:
+        report["research_retests"] = [{"idea": d.get("idea_id"), "verdict": d.get("verdict"), "summary": d.get("summary")}
+                                      for d in research_docs]
+        for d in research_docs:
+            if d.get("verdict") == "candidate":
+                changes.append(f"Research idea {d.get('label')} became a candidate on this week's data.")
     if merge_state:
         if oldP.get("live_adjust"):
             P["live_adjust"] = oldP["live_adjust"]  # keep what live trading has taught us
@@ -435,6 +465,14 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
     (out / "doc_backtest.json").write_text(json.dumps(bt_doc, default=str))
     (out / "doc_params.json").write_text(json.dumps({"params": P, "updated_at": P["updated"],
                                                      "changelog_entry": changes or ["Weekly recalibration: no material changes."]}, default=str))
+    # re-tested research ideas: new (create-only) result documents
+    rw = []
+    for d in research_docs:
+        fp = out / "docs" / "research_results" / f"{d['id']}.json"
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        fp.write_text(json.dumps(d, default=str))
+        rw.append({"op": "set", "collection": "research_results", "doc_id": d["id"], "file_path": str(fp.resolve())})
+    (out / "research_writes.json").write_text(json.dumps([rw[i:i + 45] for i in range(0, len(rw), 45)], indent=1))
     log(f"backtest finished in {time.time() - t0:.0f}s")
     return report
 
@@ -507,6 +545,10 @@ def run_learning(data_dir, state_dir, out_dir, now=None) -> dict:
     closed = pd.DataFrame([t for t in trades if t.get("status") == "closed" and t.get("exit_price")])
     if not closed.empty:
         closed["ret"] = closed["exit_price"].astype(float) / closed["entry_price"].astype(float) - 1
+    from . import learnlog as LL
+    closed_list = [t for t in trades if t.get("status") == "closed" and t.get("exit_price")]
+    prev_stats = ((state.get("learning") or {}).get("stats") or {}).get("doc")
+    stats = LL.stats_doc(prev_stats, alerts, shadow, closed_list, len(state["alerts"]) < 1000, now)
     by = {}
     changes, insights = [], []
     for name in P["strategies"]:
@@ -516,13 +558,15 @@ def run_learning(data_dir, state_dir, out_dir, now=None) -> dict:
         l_sub = closed[closed["strategy"] == name] if not closed.empty else pd.DataFrame()
         sn, sw = len(s_sub), int((s_sub["ret"] > 0).sum()) if len(s_sub) else 0
         ln, lw = len(l_sub), int((l_sub["ret"] > 0).sum()) if len(l_sub) else 0
-        n_eff, w_eff = sn + 2 * ln, sw + 2 * lw  # real fills count double
+        # the permanent record (every month ever graded, live fills double, 6-month half-life)
+        n_w, w_w = LL.weighted_record(stats["months"], name, now)
+        n_eff, w_eff = int(round(n_w)), int(round(w_w))
         exp_p = np.mean([a.get("win_pct", 100 * base) for a in alerts if a.get("strategy") == name] or [100 * base]) / 100
         old = float(P.get("live_adjust", {}).get(name, {}).get("offset", 0.0))
         new = M.live_offset(base, w_eff, n_eff) if n_eff else 0.0
         by[name] = {"shadow_n": sn, "shadow_wins": sw, "live_n": ln, "live_wins": lw,
                     "expected_win": round(exp_p, 3), "base_rate": base, "offset_old": round(old, 3),
-                    "offset_new": round(new, 3),
+                    "offset_new": round(new, 3), "record_n": n_eff, "record_wins": w_eff,
                     "shadow_avg_ret": round(float(s_sub["ret"].mean()), 4) if sn else None,
                     "live_avg_ret": round(float(l_sub["ret"].mean()), 4) if ln else None}
         if abs(new - old) >= 0.02:
@@ -573,6 +617,10 @@ def run_learning(data_dir, state_dir, out_dir, now=None) -> dict:
                  for r in bad.itertuples() if r.ret <= 0]
     else:
         didnt = []
+    ledger = [v["doc"] for v in state["ledger"].values()]
+    port = LL.portfolio_stats(alerts, shadow, trades, ledger, now.date().isoformat(), P)
+    port["updated_at"] = now.isoformat(timespec="seconds")
+    insights += [f"Portfolio: {x}" for x in port.get("lessons", [])]
     day = now.date().isoformat()
     journal = {"id": day, "date": day, "created_at": now.isoformat(timespec="seconds"),
                "shadow": agg(sh), "live": agg(closed), "by_strategy": by, "worked": worked,
@@ -590,6 +638,10 @@ def run_learning(data_dir, state_dir, out_dir, now=None) -> dict:
         # existing doc: the session reads strategy/params first and fills in if_version
         _write(out, writes, "set", "strategy", "params", doc)
         writes[-1]["if_version"] = "VERSION_OF_strategy/params (get it first; omit only if the doc does not exist)"
+    for did, doc in (("stats", stats), ("portfolio", port)):
+        _write(out, writes, "set", "learning", did, doc)
+        if (state.get("learning") or {}).get(did):
+            writes[-1]["if_version"] = f"VERSION_OF_learning/{did} (get it first)"
     (out / "writes.json").write_text(json.dumps([writes], indent=1))
     (out / "journal.json").write_text(json.dumps(journal, indent=1, default=str))
     return {"journal": day, "changes": len(changes), "insights": len(insights), "writes": len(writes)}

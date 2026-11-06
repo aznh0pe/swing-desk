@@ -214,6 +214,97 @@ def enable_checks(st_train: dict, st_test: dict) -> tuple[bool, list, str]:
     return ok, checks, reason
 
 
+FIXED_KEYS = {"train_win", "train_pf", "train_avg"}  # measured on 2008-2021: new data never changes them
+
+
+def path_to_pass(st_train: dict, st_test: dict, oos_weeks: float, extra_checks: list | None = None,
+                 need: dict | None = None, bumps=(0.0, 0.05)) -> dict:
+    """What it would take for a strategy that is not live to pass as new weeks of data arrive.
+
+    New data only ever lands in the unseen 2022-now window, so checks measured on 2008-2021
+    can't change. For the unseen-data checks, assume future trades win at the strategy's
+    2008-2021 rate (and 5 points better) with its usual win and loss sizes, and count the
+    trades (and weeks at its usual pace) until every check passes.
+    """
+    ok, checks, _ = enable_checks(st_train, st_test)
+    checks = checks + list(extra_checks or [])
+    failing = [c for c in checks if not c["ok"]]
+    if not failing:
+        return {"status": "passing", "text": "Passes every check."}
+    fixed = [c for c in failing if c["key"] in FIXED_KEYS]
+    if fixed:
+        short = {"train_win": "win rate", "train_pf": "profit factor", "train_avg": "average trade"}
+        names = [short[c["key"]] for c in fixed]
+        names = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+        return {"status": "fixed", "blocking": [c["key"] for c in fixed],
+                "text": (f"New data can't switch it on: it fails the 2008-2021 {names} check{'s' if len(fixed) > 1 else ''}, and that period never "
+                         "changes. Only a different rule can fix it; rule variants go through the research pipeline.")}
+    only_overlap = all(c["key"] == "overlap" for c in failing)
+    if only_overlap:
+        return {"status": "overlap", "blocking": ["overlap"],
+                "text": ("It passes on its own, but most of its trades are ones the live strategies already take. That "
+                         "changes only if the live strategies change; it is re-checked every Saturday.")}
+    need = dict(need or {})
+    N = int(st_test.get("trades") or 0)
+    p = float(st_test.get("win_rate") or 0)
+    aw, al = float(st_test.get("avg_win") or 0), abs(float(st_test.get("avg_loss") or 0))
+    tw = float(st_train.get("win_rate") or 0)
+    pf_need = max(ENABLE_RULE["oos_pf"], float(need.get("oos_pf", 0)))
+    win_need = max(tw - ENABLE_RULE["oos_decay"], float(need.get("oos_win", 0)))
+    n_need = int(need.get("oos_trades", 0))
+    per_week = N / max(1.0, oos_weeks)
+    gp, gl = p * N * aw, (1 - p) * N * al
+    scen = []
+    for bump in bumps:
+        wf = min(0.95, tw + bump)
+        reqs = []
+        coef = wf * aw - pf_need * (1 - wf) * al
+        deficit = pf_need * gl - gp
+        if deficit > 0:
+            reqs.append(deficit / coef if coef > 0 else None)
+        if p < win_need:
+            reqs.append(N * (win_need - p) / (wf - win_need) if wf > win_need else None)
+        if N < n_need:
+            reqs.append(n_need - N)
+        if any(r is None for r in reqs):
+            scen.append({"future_win_rate": round(wf, 3), "trades": None, "weeks": None})
+            continue
+        n = int(np.ceil(max(reqs or [0])))
+        wk = n / per_week if per_week > 0 else None
+        scen.append({"future_win_rate": round(wf, 3), "trades": n, "weeks": round(wk, 1) if wk is not None else None})
+    blocking = [c["key"] for c in failing if c["key"] != "overlap"]
+    coef_now = p * aw - pf_need * (1 - p) * al
+    stuck = (pf_need * gl - gp > 0 and coef_now <= 0) or (p < win_need)
+    best = scen[-1]
+    realistic = [sc for sc in scen if sc["weeks"] is not None and sc["weeks"] <= 104]
+    if not realistic:
+        how = ("it would never reach the bar" if best["trades"] is None else
+               f"it would need about {best['trades']:,} more trades, roughly {best['weeks'] / 52:.0f} years")
+        text = (f"New data alone is very unlikely to switch it on: even if its trades won "
+                f"{100 * best['future_win_rate']:.0f}% from here, {how}. A better rule is the faster path, so the "
+                "research pipeline tests rule variants.")
+        status = "data_slow"
+    else:
+        parts = []
+        for i, sc in enumerate(scen):
+            w = f"{100 * sc['future_win_rate']:.0f}%" + (" (its 2008-2021 rate)" if i == 0 else "")
+            if sc["trades"] is None:
+                parts.append(f"if they win {w}, never")
+            elif sc["weeks"] is None or sc["weeks"] > 104:
+                parts.append(f"if they win {w}, more than 2 years")
+            elif sc["trades"] == 0:
+                parts.append(f"if they win {w}, right away")
+            else:
+                wk = max(1, round(sc["weeks"]))
+                parts.append(f"if they win {w}, about {sc['trades']:,} more trades, roughly {wk} week{'s' if wk != 1 else ''}")
+        text = (f"Can switch on with new data if it trades well. It makes about {per_week:.0f} trades a week across the "
+                "universe: " + "; ".join(parts) + "." + (f" At its recent {100 * p:.0f}% it stays off." if stuck else ""))
+        status = "data"
+    if any(c["key"] == "overlap" for c in failing):
+        text += " It also overlaps the live strategies too much, which only changes if they change."
+    return {"status": status, "blocking": blocking, "per_week": round(per_week, 1), "scenarios": scen, "text": text}
+
+
 def build(name: str, ind: dict, P: dict, b: dict | None = None) -> dict | None:
     sp = P["strategies"].get(name)
     if not sp or not sp.get("enabled", True):

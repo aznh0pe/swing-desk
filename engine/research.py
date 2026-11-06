@@ -55,9 +55,25 @@ def latest_results(results: dict) -> dict:
     return out
 
 
-def candidate_specs(state_dir, old_params: dict | None = None, cap: int = 6) -> dict:
-    """Specs the weekly recalibration should evaluate: research candidates plus strategies promoted earlier."""
+def retest_specs(state_dir, cap: int = 12) -> list[dict]:
+    """Ideas whose verdict can change with new data (they fail only on 2022-now checks): re-tested every Saturday."""
     ideas, latest = load_ideas(state_dir), latest_results(load_results(state_dir))
+    out = []
+    for iid, r in sorted(latest.items(), key=lambda kv: str(kv[1].get("tested_at", ""))):
+        if iid not in ideas or not ideas[iid].get("spec") or r.get("verdict") == "candidate":
+            continue
+        path = r.get("path") or {}
+        if path.get("status") in ("data", "data_slow", "overlap") or (not path and r.get("verdict") in ("watch", "redundant")):
+            out.append(ideas[iid]["spec"])
+    return out[:cap]
+
+
+def candidate_specs(state_dir, old_params: dict | None = None, cap: int = 6, extra_results: list | None = None) -> dict:
+    """Specs the weekly recalibration should evaluate: research candidates plus strategies promoted earlier."""
+    ideas, results = load_ideas(state_dir), load_results(state_dir)
+    for r in extra_results or []:
+        results[r["id"]] = r
+    latest = latest_results(results)
     pool = {}
     for iid, cu in ((old_params or {}).get("custom") or {}).items():
         if cu.get("spec"):
@@ -204,7 +220,11 @@ def evaluate_spec(spec: dict, ind: dict, P: dict, P_live: dict, split, now, by="
         verdict = "watch" if near else "rejected"
         summary = ("Watch: close to the bar but not there: " if near else "Rejected: ") + "; ".join(bits[:4]) + "."
     variant = res["variant"]
-    doc = {**base, "verdict": verdict, "summary": summary, "checks": checks + q, "live_rule_ok": bool(ok_live),
+    path = None
+    if verdict != "candidate":
+        path = S.path_to_pass(st_train, st_test, weeks, extra_checks=q,
+                              need={"oos_pf": QUALITY["oos_pf"], "oos_win": QUALITY["oos_win"], "oos_trades": QUALITY["oos_trades"]})
+    doc = {**base, "verdict": verdict, "summary": summary, "path": path, "checks": checks + q, "live_rule_ok": bool(ok_live),
            "live_reason": live_reason, "variant": variant, "rules": R.describe({**spec, "params": variant, "grid": {}}),
            "train": _compact(st_train), "oos": _compact(st_test), "overlap_live": round(overlap, 3),
            "oos_signals_per_week": round(per_week, 2),
