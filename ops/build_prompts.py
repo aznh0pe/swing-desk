@@ -31,29 +31,39 @@ SETUP = (
     "`pip install --break-system-packages -q pandas numpy scikit-learn pyarrow`."
 )
 
+# What the news check may act on. These strategies buy dips, so weakness explained by the market, the
+# sector or a theme is the setup itself, not a risk: in the 2008-2026 backtest, top setups taken while
+# the sector ETF was down 5%+ over a month won 80% (vs 75% overall), and stocks down 10%+ in a month 78%.
+VERDICTS = (
+    "Judge only news about the company itself. avoid = an earnings report or guidance change in the last 3 days or due before "
+    "the hold ends, an offering or dilution, fraud, accounting or SEC/legal action against the company, an agreed takeover or bid "
+    "pinning the price, a pending FDA, trial or court decision, delisting or bankruptcy risk; caution = other company-specific bad "
+    "news that isn't thesis-breaking (an analyst downgrade of this stock, a CEO or CFO exit, a recall, a lawsuit filed against it, "
+    "a lost major customer); clean = routine news, or a drop explained by the market, its sector or a theme (a sector selloff, "
+    'rate or AI fears, "down 13% this month"). Never mark a setup caution for market or sector weakness: those dips are what '
+    "these strategies buy, and in the backtest they won as often as other setups or more.")
+
 NEWS_ENTRIES = (
-    'News check: for each featured entry in $W/out/scan.json (the ones with a rank, at most 8) run one WebSearch "<TICKER> stock news" '
-    "and judge the last few days. avoid = earnings or guidance shock, offering/dilution, fraud/SEC/legal trouble, an agreed takeover "
-    "pinning the price, an FDA or other binary event, delisting risk; caution = notable but not thesis-breaking (downgrade, sector "
-    "selloff, CEO exit); clean = routine. Apply every verdict in one command (it re-ranks the list and refreshes the dashboard cards): "
-    '`cd $C && python3 -m engine.postprocess --out $W/out --state $W/state --news "TICKER=clean" "TICKER=caution:one-line reason" '
-    '"TICKER=avoid:one-line reason"`. If there are no entries, skip this step.')
+    'News check: for each entry in $W/out/scan.json, highest score first (at most 10; include the "also qualified" ones, which move '
+    'up if a ranked setup is dropped), run one WebSearch "<TICKER> stock news" and judge the last few days. ' + VERDICTS + " Apply every verdict in one command (it re-ranks the list and refreshes the "
+    'dashboard cards): `cd $C && python3 -m engine.postprocess --out $W/out --state $W/state --news "TICKER=clean" '
+    '"TICKER=caution:one-line reason" "TICKER=avoid:one-line reason"`. If there are no entries, skip this step.')
 
 NEWS_PREMARKET = (
     "News check on today's orders and open positions: take the tickers in scan.premarket_checks and in scan.positions in "
-    '$W/out/scan.json (at most 8). Run one WebSearch "<TICKER> stock news" each and look at the last day. avoid = material news '
-    "(earnings surprise, guidance cut, offering, legal/FDA shock, takeover announcement); caution = notable but not thesis-breaking; "
-    "clean = routine. Apply every verdict in one command: "
+    '$W/out/scan.json (at most 8). Run one WebSearch "<TICKER> stock news" each and look at the news since the last close. '
+    "avoid = material company news (earnings surprise, guidance cut, offering, legal/FDA shock, takeover announcement); caution = "
+    "other company-specific bad news; clean = routine news or moves explained by the market or the sector (a weak market is not a "
+    "reason to cancel: the plan already allows for it). Apply every verdict in one command: "
     '`cd $C && python3 -m engine.postprocess --out $W/out --state $W/state --news "TICKER=clean" "TICKER=avoid:one-line reason"`. '
     "It turns avoid on a pending order into a CANCEL line and withdraws that order on the dashboard, and adds a REVIEW line for an "
     "open position. If there is nothing to check, skip this step.")
 
 NEWS_AUTO = (
-    "News check: if $W/out/scan.json has featured entries (the ones with a rank, at most 8), check those; if it is a pre-market "
+    "News check: if $W/out/scan.json has entries, check them, highest score first (at most 10, including the \"also qualified\" "
+    "ones); if it is a pre-market "
     "scan, check the tickers in scan.premarket_checks and scan.positions instead (at most 8). Run one WebSearch "
-    '"<TICKER> stock news" each and judge the last few days. avoid = earnings or guidance shock, offering/dilution, fraud/SEC/legal '
-    "trouble, an agreed takeover pinning the price, an FDA or other binary event, delisting risk; caution = notable but not "
-    "thesis-breaking (downgrade, sector selloff, CEO exit); clean = routine. Apply every verdict in one command (it re-ranks, "
+    '"<TICKER> stock news" each and judge the last few days. ' + VERDICTS + " Apply every verdict in one command (it re-ranks, "
     "withdraws what you rule out and refreshes the dashboard cards): "
     '`cd $C && python3 -m engine.postprocess --out $W/out --state $W/state --news "TICKER=clean" "TICKER=caution:one-line reason" '
     '"TICKER=avoid:one-line reason"`. If there is nothing to check, skip this step.')
@@ -90,6 +100,10 @@ MODES = {
                            "every 5 minutes for up to 25 minutes until it is (use the Monitor tool or a background Bash loop to wait; don't "
                            "chain sleeps). If it still isn't, run anyway and put \"Provisional: data feed delayed, bars may be incomplete\" "
                            "at the top of the digest."),
+        "NEWS_STEP": NEWS_ENTRIES, "PROGRESS_BLOCK": "", "SCAN_ARGS": ""},
+    "weekend": {
+        "MODE": "auto", "MODE_LABEL": "weekend refresh of the next session's setups (runs after Saturday's recalibration, so they are scored by this week's strategies)",
+        "FRESHNESS_RULE": "Use the newest data; there is nothing to wait for on a weekend.",
         "NEWS_STEP": NEWS_ENTRIES, "PROGRESS_BLOCK": "", "SCAN_ARGS": ""},
     "manual": {
         "MODE": "auto", "MODE_LABEL": "on-demand scan (I pressed Scan now on the dashboard)",

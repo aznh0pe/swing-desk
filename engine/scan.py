@@ -123,6 +123,9 @@ def exit_signal_text(plan_name, sp, dyn, target, stop, hold, earnings_next):
     return " ".join(parts)
 
 
+HELD_SECTORS: dict = {}  # open positions per sector bucket from the last build_entries call (saved in ctx)
+
+
 def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, partial_bar,
                   errors) -> tuple[list, list]:
     c = ind["close"]
@@ -247,6 +250,8 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
             sc = sector_of(v["doc"].get("ticker"))
             if sc:
                 sec_count[sc] = sec_count.get(sc, 0) + 1
+    HELD_SECTORS.clear()
+    HELD_SECTORS.update(sec_count)
     FEATURED, PER_SECTOR = 8, 2
     rank, featured_sec = 0, {}
     for cd in ranked:
@@ -297,8 +302,9 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
             doc["grade"] = "A"
             doc["topup_note"] = ("Weekly top-up: the best grade-A setup, sent because this week has fewer than "
                                  f"{G.get('min_week', 3)} A+ setups so far.")
+        doc["sector_key"] = sector_of(cd["ticker"])
         if cd["grade"] == "A+" or cd.get("topup"):
-            sc = sector_of(cd["ticker"])
+            sc = doc["sector_key"]
             held_sec = sec_count.get(sc, 0) if sc else 0
             # featured list: best scores first, at most 2 per sector (counting open positions)
             is_featured = rank < FEATURED and (not sc or held_sec + featured_sec.get(sc, 0) < PER_SECTOR)
@@ -522,6 +528,7 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
     # travels in the scan document's alert_updates instead.
     writes = []
     ctx = overlay_ctx(state, mode, session_day, today, now)
+    ctx["held_sectors"] = dict(HELD_SECTORS)
     ts = now.isoformat(timespec="seconds")
     existing = state["alerts"]
     for doc in entries:

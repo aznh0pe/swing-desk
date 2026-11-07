@@ -19,6 +19,7 @@ import argparse
 import datetime as dt
 import json
 import pathlib
+import re
 
 from .scan import _utc_now, build_overlay, email_headline, load_params, make_digest, mark_caution, run_done_doc
 from .portfolio import load_state
@@ -37,6 +38,11 @@ def _verdicts(news: list[str]) -> dict:
 
 
 SEVERITY = {"clean": 0, "caution": 1, "avoid": 2}
+# Version of the verdict rules in the scan prompts. Verdicts given under older rules are not carried
+# forward (v1 marked sector selloffs as caution; v2 judges company-specific news only).
+NEWS_RULES = 2
+FEATURED, PER_SECTOR = 8, 2
+_FROM = re.compile(r"\s*\(from the [^()]* news check\)")
 
 
 def prior_verdicts(state: dict | None, session_day) -> dict:
@@ -47,6 +53,8 @@ def prior_verdicts(state: dict | None, session_day) -> dict:
     for sc in scans:
         if str(sc.get("session_day")) != str(session_day) or sc.get("status") == "failed":
             continue
+        if int(sc.get("news_rules") or 1) < NEWS_RULES:
+            continue  # judged under older rules
         try:
             when = dt.datetime.fromisoformat(sc["started_at"]).strftime("%-I:%M %p").lower()
         except Exception:
@@ -65,6 +73,7 @@ def prior_verdicts(state: dict | None, session_day) -> dict:
                     found.append((tk, "caution", u.get("news_note") or "notable news"))
         for tk, kind, note in found:
             tk = str(tk).upper()
+            note = _FROM.sub("", str(note or "")).strip() or "notable news"
             if tk not in out or SEVERITY[kind] > SEVERITY[out[tk][0]]:
                 out[tk] = (kind, f"{note} (from the {when} news check)")
     return out
@@ -121,7 +130,27 @@ def apply(out_dir: str, news: list[str], state_dir: str | None = None) -> dict:
             pos_news.append({"ticker": pos["ticker"], "verdict": v[0], "reason": v[1] or "material news"})
     if pos_news:
         scan["position_news"] = pos_news
-    # re-rank the featured list on the news-adjusted scores
+    # re-rank on the news-adjusted scores. Every kept setup competes for the top 8 again, so a setup that was
+    # only "also qualified" (sector cap or outside the top 8) moves up when the news check drops one ahead of it.
+    if all("sector_key" in e for e in kept):
+        held = dict(ctx.get("held_sectors") or {})
+        feat, extra, fsec = [], [], {}
+        for e in sorted(kept, key=lambda e: -float(e["score"])):
+            sk = e.get("sector_key")
+            n = (held.get(sk, 0) + fsec.get(sk, 0)) if sk else 0
+            if len(feat) < FEATURED and (not sk or n < PER_SECTOR):
+                feat.append(e)
+                e.pop("also_qualified", None)
+                if str(e.get("capacity_note", "")).startswith("Also qualified"):
+                    e.pop("capacity_note", None)
+                if sk:
+                    fsec[sk] = fsec.get(sk, 0) + 1
+            else:
+                e["also_qualified"], e["rank"] = True, None
+                why = f"{n} positions/featured setups already in {sk}" if sk and n >= PER_SECTOR else "outside tonight's top 8"
+                e["capacity_note"] = f"Also qualified ({why}). Listed so you can swap into it if it suits you better."
+                extra.append(e)
+        kept = feat + extra
     feat = sorted([e for e in kept if not e.get("also_qualified")], key=lambda e: -float(e["score"]))
     max_open = int(((P or {}).get("risk") or {}).get("max_open", 5))
     if state:
@@ -153,6 +182,7 @@ def apply(out_dir: str, news: list[str], state_dir: str | None = None) -> dict:
     scan["counts"]["aplus"] = len(kept)
     scan["news_dropped"] = dropped
     scan["news_checked"] = sorted(verdicts)
+    scan["news_rules"] = NEWS_RULES
     if kept_prior:
         scan["news_kept_from_earlier"] = sorted(kept_prior)
     if ctx:
