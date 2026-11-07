@@ -76,6 +76,7 @@ Progress for the dashboard's Scan now bar: the extra message after these instruc
 - "T-s4", "Checking news on the top setups", 62: in the same message as the first step 5 search (skip it if step 5 is skipped).
 - "T-s5", "Saving results to your dashboard", 86: in the same message as the first step 6 batch.
 The scanner adds the final "T-s6" (done) record to the results batch itself because step 4 passes it the token (without a run token, leave `--run-token T` out of that command). If the run ends without results for any reason, create "T-s9" with {"token": T, "seq": 9, "state": "failed", "step": "Scan failed", "message": "<one plain line on what went wrong>", "at": ..., "by": "scan"}. If a progress write fails, ignore it and carry on: the scan is the job, progress is a convenience. Without a run token, skip all of this.
+The extra message can reach you a little after you start. If the token turns up mid-run, write the record for the step you are on and carry on from there (skip the earlier ones); if step 4 already ran without it, create "T-s6" yourself right after the results are saved, with {"token": T, "seq": 6, "state": "done", "step": "Scan complete", "pct": 100, "scan_id": "<the scan id>", "at": ..., "by": "scan"}. Run the scan once per session: a message that arrives while you work or after you finish is never a request for another scan. If you had already finished, answer it with your final message again, unchanged (the headline line, a blank line, the full digest), without re-running anything.
 '''
 
 MODES = {
