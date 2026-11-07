@@ -425,7 +425,7 @@ function currentRun() {
   let done = docs.find((d) => d.state === "done");
   const now = Date.now();
   const lastAt = Math.max(...docs.map(runTime));
-  if (!done && !fail && now - lastAt > RUN_STALE_MS) {
+  if (!done && !fail && now - lastAt > 2 * 60000) {
     // progress records can lag (the run token can reach the scan session late); a scan saved since the press means it finished
     const sc = S.scans.find((x) => x.status !== "failed" && Date.parse(x.started_at) >= best.t0 - 60000);
     if (sc) done = { seq: 6, state: "done", at: sc.started_at, scan_id: sc.id, headline: "results saved", inferred: true };
