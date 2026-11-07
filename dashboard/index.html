@@ -263,7 +263,7 @@ const SCHEDULE = [
   { when: "2:05 PM PT", backup: "2:53 PM", days: "Mon–Fri", what: "Post-close setup scan", detail: "Final daily bars: tomorrow's A+ setups with limit entry, stop and target to place tonight." },
   { when: "3:12 PM PT", backup: "4:23 PM", days: "Mon–Fri", what: "Daily learning + strategy research", detail: "Grades every alert against what the market did, updates win-rate estimates and writes the journal; then researches and backtests a new strategy idea for the Strategy lab." },
   { when: "10:14 AM PT", backup: "Sun 10:23 AM", days: "Saturday", what: "Weekly recalibration", detail: "Re-runs every backtest on fresh history, re-tests Off strategies, promotes research candidates that pass, and re-fits the win-probability models." },
-  { when: "12:41 PM PT", days: "Saturday", what: "Weekend refresh", detail: "Re-scores the next session's setups with the freshly recalibrated strategies, re-checks their news and emails the updated list." },
+  { when: "12:41 PM PT", backup: "1:29 PM", days: "Saturday", what: "Weekend refresh", detail: "Re-scores the next session's setups with the freshly recalibrated strategies, re-checks their news and emails the updated list." },
 ];
 const HOLIDAYS = new Set(["2025-01-01","2025-01-09","2025-01-20","2025-02-17","2025-04-18","2025-05-26","2025-06-19","2025-07-04","2025-09-01","2025-11-27","2025-12-25",
   "2026-01-01","2026-01-19","2026-02-16","2026-04-03","2026-05-25","2026-06-19","2026-07-03","2026-09-07","2026-11-26","2026-12-25",
@@ -558,13 +558,15 @@ function runHealth() {
       : { state: "bad", pill: "crit", text: "Missed", note: "Neither Saturday's run nor Sunday's backup check saved results. Press Run now, or open the Swing Desk chat." };
     out.items.push({ ...p, ...r, backupLabel: "Sun 10:23 AM" });
     if (wd === 6) {  // Saturday refresh of the next session's setups, after the recalibration
-      const q = { key: "weekend", label: "Weekend refresh of next week's setups", at: "12:41", dur: 30 };
+      const q = { key: "weekend", label: "Weekend refresh of next week's setups", at: "12:41", backup: "13:29", dur: 30 };
       const hit = S.scans.map((sc) => ({ sc, t: ptParts(sc.started_at) })).find((x) => x.t && x.t.day === day && x.t.hm >= "12:30" && x.sc.status !== "failed" && x.sc.mode === "postclose");
       const rr = hit ? { state: "ok", pill: "good", text: `Ran ${to12(hit.t.hm)}`, note: "" }
         : now < q.at ? { state: "due", pill: "neutral", text: "Due 12:41 PM", note: "" }
         : now < addMin(q.at, q.dur) ? { state: "running", pill: "info", text: "Running", note: "Started 12:41 PM; usually done within 30 minutes." }
-        : { state: "late", pill: "warn", text: "Not in yet", note: "Press Scan now for the same refresh; Monday's 5:50 AM check re-checks every order either way." };
-      out.items.push({ ...q, ...rr, backupLabel: "Scan now" });
+        : now < q.backup ? { state: "late", pill: "warn", text: "Not in yet", note: "If it doesn't arrive, the backup check at 1:29 PM runs it." }
+        : now < addMin(q.backup, 45) ? { state: "retry", pill: "warn", text: "Backup running", note: "It didn't arrive, so the 1:29 PM backup check is running it now." }
+        : { state: "bad", pill: "crit", text: "Missed", note: "Neither the refresh nor its backup check saved results. Press Run now (it runs Scan now); Monday's 5:50 AM check re-checks every order either way." };
+      out.items.push({ ...q, ...rr, backupLabel: "1:29 PM" });
     }
   }
   out.bad = out.items.filter((i) => i.state === "bad");
