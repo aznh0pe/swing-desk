@@ -1,0 +1,26 @@
+{
+ "history_asof": "2026-11-07T08:59-05:00",
+ "history_tickers": 605,
+ "history_failed": [],
+ "daily_last_date": "2026-11-06",
+ "daily_tickers": 605,
+ "daily_failed": [],
+ "daily_status": "ok",
+ "daily_updated_utc": "2026-11-06T22:54:10+00:00",
+ "daily_final_for": "2026-11-06",
+ "earnings_asof": "2026-11-06T17:52-05:00",
+ "earnings_source": "nasdaq",
+ "earnings_count": 218,
+ "generated_utc": "2026-11-07T14:00:04+00:00",
+ "generated_et": "2026-11-07T08:59-05:00",
+ "modes_run": [
+  "history"
+ ],
+ "universe": 605,
+ "errors": [],
+ "version": 1,
+ "premarket_asof": "2026-11-06T09:09-05:00",
+ "premarket_tickers": 522,
+ "intraday_asof": "2026-11-06T15:17-05:00",
+ "intraday_tickers": 605
+}
