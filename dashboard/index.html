@@ -314,11 +314,20 @@ function ptParts(iso) { const t = new Date(iso); return isNaN(t) ? null : { day:
 function journalHM(j) { const m = /-(\d{2})(\d{2})$/.exec(String(j.id || "")); if (m) return m[1] + ":" + m[2]; const t = ptParts(j.created_at); return t ? t.hm : null; }
 // Alerts are never overwritten once written; each later scan sends its view of them (rank, score,
 // news verdict, sizing, withdrawn) in its scan document's alert_updates. The newest scan wins.
+// The trade plan (limit, stop, target...) follows the latest scan only until you act on the alert:
+// once an order is placed or filled, the card keeps the plan your order was placed at.
+const PLAN_FIELDS = ["entry", "stop", "target", "order", "rr", "risk_per_share", "reward_per_share", "last_close", "atr",
+  "exit_signal", "earnings_next", "hold_max_days", "hold_typical_days"];
 function mergeAlerts() {
   const ov = {};
   for (const sc of S.scans) { const au = sc.alert_updates; if (!au || typeof au !== "object") continue;
     for (const id of Object.keys(au)) if (!(id in ov)) ov[id] = { ...au[id], _ov_at: sc.started_at, _ov_scan: sc.id }; }
-  S.alerts = S.alertsRaw.map((a) => { const o = ov[a.id]; if (!o) return a; const { ticker, ...rest } = o; return { ...a, ...rest }; });
+  S.alerts = S.alertsRaw.map((a) => {
+    const o = ov[a.id]; if (!o) return a;
+    const { ticker, ...rest } = o;
+    if (a.status === "placed" || a.status === "filled" || a.trade_id) for (const k of PLAN_FIELDS) delete rest[k];
+    return { ...a, ...rest };
+  });
 }
 function entryLive(a) {
   if (a.type !== "entry") return false;

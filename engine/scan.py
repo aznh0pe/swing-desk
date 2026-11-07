@@ -37,6 +37,10 @@ USER_FIELDS = {"status", "actual_price", "actual_shares", "done_at", "user_note"
 SCAN_OWNED = ("rank", "score", "win_pct", "model_win_pct", "grade", "news_check", "news_note", "capacity_note",
               "also_qualified", "topup_note", "shares", "fractional", "total_cost", "risk_usd", "pct_of_capital",
               "size_note", "exp_return_pct")
+# the trade plan itself: refreshed on alerts nobody has acted on yet (a later scan on final prices can move
+# the limit, stop or target by a few cents); the dashboard keeps the original plan once an order is placed
+PLAN_FIELDS = ("entry", "stop", "target", "order", "rr", "risk_per_share", "reward_per_share", "last_close", "atr",
+               "exit_signal", "earnings_next", "hold_max_days", "hold_typical_days")
 TOKEN_RE = __import__("re").compile(r"^rt_[a-z0-9]{6,32}$")
 
 
@@ -372,7 +376,7 @@ def build_overlay(scan_doc: dict, entries: list, ctx: dict) -> dict:
     existing = set(ctx.get("existing_entry_ids") or [])
     for e in entries:
         if e["id"] in existing:
-            u = {**{k: e.get(k) for k in SCAN_OWNED}, "withdrawn": False}
+            u = {**{k: e.get(k) for k in SCAN_OWNED + PLAN_FIELDS}, "withdrawn": False}
             if e.get("news_check") in (None, "pending"):  # not news-checked this run: keep the earlier verdict
                 u.pop("news_check", None)
                 u.pop("news_note", None)

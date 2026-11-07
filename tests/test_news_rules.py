@@ -99,3 +99,12 @@ def test_sector_cap_still_applies_with_open_positions(tmp_path, monkeypatch):
     pp.apply(str(out), ["CRM=clean", "CRWD=clean"])
     by = {e["ticker"]: e for e in json.loads((out / "scan.json").read_text())["entries"]}
     assert by["CRM"]["rank"] == 1 and by["CRWD"].get("also_qualified")  # 1 held + 1 featured = the cap of 2
+
+
+def test_overlay_refreshes_the_plan_of_existing_alerts():
+    from engine import scan as sc
+    e = _entry("CRM", 80.2, "Information Technology", 1)
+    e.update(entry=213.65, stop=179.83, target=221.34, order="Buy LIMIT $213.65")
+    ups = sc.build_overlay({"news_dropped": []}, [e], {"existing_entry_ids": [e["id"]], "window": {}})
+    u = ups[e["id"]]
+    assert u["entry"] == 213.65 and u["target"] == 221.34 and u["order"] == "Buy LIMIT $213.65" and u["withdrawn"] is False
