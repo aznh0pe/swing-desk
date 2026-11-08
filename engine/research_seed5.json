@@ -1,0 +1,53 @@
+[
+ {
+  "id": "R_SECTOR_LAGGARD_SNAP",
+  "label": "Sector ETF Lagging the Market Snapback",
+  "family": "Mean reversion / relative value",
+  "about": "A sector or index ETF in an uptrend that has fallen at least 3 points more than SPY over the last five sessions and is short-term oversold. Relative underperformance of a whole sector inside a bull market tends to close; buy the laggard and target its 4-day mean.",
+  "source": {"title": "Relative-strength mean reversion between sectors (sector rotation literature; e.g. Fidelity sector rotation primer)", "url": "https://www.fidelity.com/learning-center/trading-investing/markets-sectors/sector-rotation"},
+  "universe": "etf",
+  "conditions": ["close > sma200", "ret5 < spy_ret5 - {gap}", "rsi2 < {r}", "spy_above200 > 0.5"],
+  "entry": {"kind": "limit_next", "price": "close - {k}*atr10"},
+  "stop": {"atr": 3.0},
+  "target": {"price": "mean4", "min_atr": 0.3, "cap_atr": 4},
+  "exit": "sma5",
+  "max_hold": 8,
+  "valid_days": 1,
+  "params": {"gap": 0.03, "r": 15, "k": 0.0},
+  "grid": {"gap": [0.02, 0.03], "r": [10, 20], "k": [0, 0.3]}
+ },
+ {
+  "id": "R_FRIDAY_DIP_WEEKEND",
+  "label": "Friday Dip, Weekend Bounce",
+  "family": "Calendar / mean reversion",
+  "about": "Uptrend stock or ETF that is short-term oversold at Friday's close. Buying ahead of the weekend captures the Monday-Tuesday reversal that short-term studies find after weak Fridays; sell on a close above the 5-day average.",
+  "source": {"title": "Day-of-week reversal effects in short-term mean reversion (Quantified Strategies: Monday reversal / weekend effect tests)", "url": "https://www.quantifiedstrategies.com/weekend-effect/"},
+  "universe": "all",
+  "conditions": ["dow == 4", "close > sma200", "close < sma5", "rsi2 < {r}"],
+  "entry": {"kind": "limit_next", "price": "close - {k}*atr10"},
+  "stop": {"atr": 3.0},
+  "target": {"price": "mean4", "min_atr": 0.3, "cap_atr": 4},
+  "exit": "sma5",
+  "max_hold": 6,
+  "valid_days": 1,
+  "params": {"r": 10, "k": 0.0},
+  "grid": {"r": [10, 20], "k": [0, 0.3]}
+ },
+ {
+  "id": "R_STRONG_TREND_PULLBACK_MR",
+  "label": "Pullback in a Strong Trend (ADX)",
+  "family": "Momentum pullback",
+  "about": "Stock in a strong, established trend (ADX above 30, above a rising 50-day that is above the 200-day) gets a sharp two-day pullback. Strong trends absorb pullbacks fast; buy the dip and target the 7-day closing high.",
+  "source": {"title": "ADX trend strength plus pullback entries (Wilder, New Concepts in Technical Trading Systems, 1978)", "url": "https://www.investopedia.com/terms/a/adx.asp"},
+  "universe": "stock",
+  "conditions": ["adx14 > {a}", "close > sma50", "sma50 > sma200", "slope50 > 0", "rsi2 < {r}", "close < sma5"],
+  "entry": {"kind": "limit_next", "price": "close - {k}*atr10"},
+  "stop": {"atr": 3.0},
+  "target": {"price": "max7c", "min_atr": 0.3, "cap_atr": 4},
+  "exit": "sma5",
+  "max_hold": 8,
+  "valid_days": 1,
+  "params": {"a": 30, "r": 10, "k": 0.0},
+  "grid": {"a": [25, 35], "r": [5, 10], "k": [0, 0.3]}
+ }
+]

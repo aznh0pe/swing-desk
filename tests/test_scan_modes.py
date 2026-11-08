@@ -139,7 +139,7 @@ def test_normal_postclose_scan_is_complete(synth, tmp_path):
     s = doc["scan"]
     assert res["status"] in ("ok", "ok_with_warnings") and s["data"]["status"] == "ok"
     assert s["engine"]["fingerprint"]
-    assert digest.startswith("SWING DESK | POSTCLOSE SCAN")
+    assert digest.startswith("SWING DESK | POST-CLOSE SCAN")
     for e in doc["entries"]:
         for k in ENTRY_FIELDS:
             assert e.get(k) not in (None, ""), (k, e["ticker"])

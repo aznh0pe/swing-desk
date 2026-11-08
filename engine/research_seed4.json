@@ -1,0 +1,53 @@
+[
+ {
+  "id": "R_LEADERS_ON_MARKET_DIP",
+  "label": "Leaders on a Market Dip",
+  "family": "Market stress reversal",
+  "about": "When the whole market is short-term oversold (SPY RSI(2) low), buy the relative-strength leaders that dipped with it: strong stocks above a rising 50-day that closed below their 5-day average. The trigger is the market, not the stock, so these come in clusters on selloff days.",
+  "source": {"title": "Market-wide oversold as the edge for buying leaders (Connors' SPY RSI(2) filter applied to stocks)", "url": "https://www.tradingmarkets.com/"},
+  "universe": "stock",
+  "conditions": ["spy_rsi2 < {m}", "rs_pct >= 0.85", "close > sma50", "sma50 > sma200", "close < sma5"],
+  "entry": {"kind": "limit_next", "price": "close - {k}*atr10"},
+  "stop": {"atr": 3.0},
+  "target": {"price": "max7c", "min_atr": 0.3, "cap_atr": 4},
+  "exit": "sma5",
+  "max_hold": 8,
+  "valid_days": 1,
+  "params": {"m": 10, "k": 0.0},
+  "grid": {"m": [10, 20], "k": [0, 0.3]}
+ },
+ {
+  "id": "R_ETF_FIRST_SMA20_PULLBACK",
+  "label": "ETF First Pullback Through the 20-Day",
+  "family": "Trend support",
+  "about": "An ETF in an uptrend that has held above its 20-day average for a week closes below it for the first time: the first pullback in a trend is the one most often bought. Buy the next session; sell on a close above the prior day's high.",
+  "source": {"title": "First pullback to a rising moving average (classic trend-following entry)", "url": "https://www.investopedia.com/terms/p/pullback.asp"},
+  "universe": "etf",
+  "conditions": ["close > sma200", "close < sma20", "close[1] > sma20[1]", "close[3] > sma20[3]", "close[5] > sma20[5]"],
+  "entry": {"kind": "limit_next", "price": "close - {k}*atr10"},
+  "stop": {"atr": "{stop}"},
+  "target": {"atr": 1.0},
+  "exit": "prev_high",
+  "max_hold": 6,
+  "valid_days": 1,
+  "params": {"k": 0.0, "stop": 2.5},
+  "grid": {"k": [0, 0.3, 0.6], "stop": [2.0, 3.0]}
+ },
+ {
+  "id": "R_MEAN4_DEEP_STRETCH",
+  "label": "Deep Stretch Below the 4-Day Mean",
+  "family": "Mean reversion",
+  "about": "Uptrend stock or ETF closes more than 1.5 ATR below its 4-day average price: a statistically rare stretch measured in the stock's own volatility rather than by RSI. Buy the next session and target the 4-day mean.",
+  "source": {"title": "ATR-normalised stretch from a short mean (mean-reversion literature, e.g. Quantified Strategies 'mean reversion' tests)", "url": "https://www.quantifiedstrategies.com/mean-reversion-trading-strategy/"},
+  "universe": "all",
+  "conditions": ["close > sma200", "close < mean4 - {d}*atr10", "rs_pct >= 0.4"],
+  "entry": {"kind": "limit_next", "price": "close - {k}*atr10"},
+  "stop": {"atr": 3.5},
+  "target": {"price": "mean4", "min_atr": 0.3, "cap_atr": 4},
+  "exit": "sma5",
+  "max_hold": 8,
+  "valid_days": 1,
+  "params": {"d": 1.5, "k": 0.0},
+  "grid": {"d": [1.5, 2.0], "k": [0, 0.3]}
+ }
+]

@@ -137,7 +137,7 @@ def test_seed_backlog_is_valid_distinct_and_consumed_in_order(tmp_path):
     backlog = RS.seed_backlog(known)
     assert backlog and backlog[0]["id"] not in known
     # a variant is detected even when its thresholds differ
-    v2 = [s for s in json.loads(RS.SEED_FILES[-1].read_text()) if s["id"] == "R_ETF_3DAY_HL_V2"][0]
+    v2 = [s for f in RS.SEED_FILES for s in json.loads(f.read_text()) if s["id"] == "R_ETF_3DAY_HL_V2"][0]
     sim = RS.similar_ideas(v2, known)
     assert sim and sim[0]["id"] == "R_ETF_3DAY_HL"
 
@@ -151,3 +151,31 @@ def test_research_next_offers_the_backlog_when_the_queue_is_empty(tmp_path):
     assert nx["from_backlog"] and nx["next"] == nx["backlog"][0]
     spec = json.loads(pathlib.Path(nx["spec_file"]).read_text())
     assert spec["id"] == nx["next"] and R.validate(spec) == []
+
+
+def test_every_position_signal_reaches_the_headline_and_the_email():
+    """No code the monitor can raise may fall through to 'No action needed'."""
+    from engine import scan as SC
+    import re as _re
+    codes = set(_re.findall(r'"code": "([A-Z_]+)"', pathlib.Path(MON.__file__).read_text()))
+    grouped = SC.EXIT_CODES | SC.FILL_CODES | SC.RAISE_CODES | SC.NOTICE_CODES | SC.CHECK_CODES
+    assert codes <= grouped, codes - grouped
+    acting = SC.EXIT_CODES | SC.FILL_CODES | SC.RAISE_CODES | SC.CHECK_CODES
+    for code in sorted(acting):
+        pos = [{"trade_id": "t", "ticker": "X", "last": 1, "unrealized": 0, "days_held": 1, "max_hold": 5,
+                "signals": [{"code": code, "level": "x", "action": "DO", "urgency": "now", "text": "t"}]}]
+        doc = {"counts": {"aplus": 0, **SC.signal_counts(pos)}, "alert_updates": {}, "premarket_checks": [], "data": {"status": "ok"}}
+        assert SC.headline(doc) != "No action needed", code
+
+
+def test_time_stop_is_announced_the_day_before():
+    P = S.params_with_defaults(None)
+    closes = [100] * 8
+    ind = _frames(closes, start="2026-01-02")  # entered Jan 2 -> day 8 is Jan 13; day 7 close = Jan 12
+    ind = {k: (v.iloc[:7] if hasattr(v, "iloc") else v) for k, v in ind.items()}
+    ind["market"] = ind["market"].iloc[:7]
+    codes = [s["code"] for s in MON.check_trade(_trade(max_hold=8), ind, "postclose", {}, None, P, False)["signals"]]
+    assert "TIME_STOP_NEXT" in codes and "TIME_STOP" not in codes
+    ind8 = _frames(closes, start="2026-01-02")
+    codes = [s["code"] for s in MON.check_trade(_trade(max_hold=8), ind8, "postclose", {}, None, P, False)["signals"]]
+    assert "TIME_STOP" in codes

@@ -349,7 +349,9 @@ def why_text(cd) -> list[str]:
     if f.get("dist200") == f.get("dist200") and f.get("dist200") is not None:
         w.append(f"{100 * f['dist200']:+.1f}% vs 200-day average (long-term uptrend)")
     if f.get("rs_pct") is not None and f.get("is_etf", 0) < 0.5:
-        w.append(f"Relative strength percentile {100 * f['rs_pct']:.0f}")
+        rs = f["rs_pct"]
+        w.append(f"Relative strength percentile {100 * rs:.0f}" + (" (weak: the model discounts it; the setup still cleared the bar)"
+                                                                 if rs < 0.44 else " (a leader)" if rs >= 0.8 else ""))
     if f.get("depth_atr") == f.get("depth_atr") and f.get("depth_atr") is not None:
         w.append(f"{f['depth_atr']:.1f} ATR below its 5-day average")
     if f.get("spy_above200", 0) >= 0.5:
@@ -412,6 +414,12 @@ def headline(scan_doc: dict) -> str:
         bits.append(f"{c['aplus']} A+ setup{'s' if c['aplus'] != 1 else ''}")
     if c.get("exit_alerts"):
         bits.append(f"{c['exit_alerts']} exit alert{'s' if c['exit_alerts'] != 1 else ''}")
+    if c.get("stop_raises"):
+        bits.append(f"{c['stop_raises']} stop{'s' if c['stop_raises'] != 1 else ''} to raise")
+    if c.get("fills_to_confirm"):
+        bits.append(f"{c['fills_to_confirm']} fill{'s' if c['fills_to_confirm'] != 1 else ''} to confirm")
+    if c.get("positions_to_check"):
+        bits.append(f"{c['positions_to_check']} position{'s' if c['positions_to_check'] != 1 else ''} to check")
     cancels = sum(1 for x in scan_doc.get("premarket_checks") or [] if x.get("verdict") == "cancel")
     if cancels:
         bits.append(f"{cancels} order{'s' if cancels != 1 else ''} to cancel")
@@ -422,6 +430,24 @@ def headline(scan_doc: dict) -> str:
     if (scan_doc.get("data") or {}).get("status") not in (None, "ok"):
         out = "⚠ data " + str(scan_doc["data"]["status"]) + " · " + out
     return out
+
+
+# Which position signals mean what for the headline and the email. Every code the monitor can raise is in
+# exactly one group, so nothing about an open position can fall through to "No action needed".
+EXIT_CODES = {"EXIT_RULE", "TIME_STOP", "TREND_BREAK", "EARNINGS", "GAP_BELOW_STOP", "GAP_ABOVE_TARGET"}
+FILL_CODES = {"STOP_HIT", "TARGET_HIT"}
+RAISE_CODES = {"RAISE_STOP"}
+NOTICE_CODES = {"TIME_STOP_NEXT", "MARKET_STRESS"}
+CHECK_CODES = {"NO_DATA"}
+
+
+def signal_counts(positions: list) -> dict:
+    sigs = [sg for p in positions for sg in p.get("signals", [])]
+    return {"exit_alerts": sum(1 for sg in sigs if sg["code"] in EXIT_CODES),
+            "fills_to_confirm": sum(1 for sg in sigs if sg["code"] in FILL_CODES),
+            "stop_raises": sum(1 for sg in sigs if sg["code"] in RAISE_CODES),
+            "positions_to_check": sum(1 for sg in sigs if sg["code"] in CHECK_CODES),
+            "notices": sum(1 for sg in sigs if sg["code"] in NOTICE_CODES)}
 
 
 def email_headline(scan_doc: dict) -> str:
@@ -549,13 +575,13 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
         _write(out, writes, "set", "alerts", did, doc)
     for pos in positions:
         for sg in pos.get("signals", []):
-            if sg["level"] not in ("alert", "good", "info"):
+            if sg["level"] not in ("alert", "good", "info") and sg["code"] not in CHECK_CODES:
                 continue
             did = f"x_{pos['asof']}_{pos['trade_id']}_{sg['code']}"
             if did in existing:
                 continue
             # a stop that already filled is an exit to record, not a stop to move
-            is_exit = sg["level"] in ("alert", "good") or sg["code"] == "STOP_HIT"
+            is_exit = sg["code"] in EXIT_CODES or sg["code"] in FILL_CODES or sg["code"] in CHECK_CODES
             doc = {"id": did, "type": "exit" if is_exit else "adjust",
                    "status": "new", "trade_id": pos["trade_id"], "ticker": pos["ticker"],
                    "code": sg["code"], "action": sg["action"], "urgency": sg["urgency"],
@@ -573,10 +599,9 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
                  "intraday_asof": meta.get("intraday_asof"), "partial_bar": partial,
                  "tickers": int(ind["close"].shape[1])},
         "market": regime_summary(ind), "funds": f,
-        "counts": {"aplus": len(entries), "near_misses": len(near), "exit_alerts": sum(
-            1 for p in positions for s in p.get("signals", []) if s["level"] in ("alert", "good")),
-            "open_positions": len(positions), "expired": len(expire), "week_aplus": week_aplus,
-            "new_docs": len(writes)},
+        "counts": {"aplus": len(entries), "near_misses": len(near), **signal_counts(positions),
+                   "open_positions": len(positions), "expired": len(expire), "week_aplus": week_aplus,
+                   "new_docs": len(writes)},
         "positions": positions, "near_misses": near[:8], "premarket_checks": pm_checks,
         "expired_alert_ids": [a for a, _ in expire][:50],
         "params_version": P.get("version"), "errors": errors[:40], "notes": notes,
@@ -671,13 +696,53 @@ def mark_caution(text: str) -> str:
     return _CAUTION.sub(lambda m: f"🔴 **{m.group(1)}**", text or "")
 
 
+def _hold_end(start, hold: int):
+    """Last session of a hold window that starts (fills) on `start`."""
+    try:
+        d = cal._d(start)
+    except Exception:
+        return None
+    for _ in range(max(0, int(hold) - 1)):
+        d = cal.next_trading_day(d)
+    return d
+
+
+def _day(d) -> str:
+    try:
+        return cal._d(d).strftime("%a %b %d").replace(" 0", " ")
+    except Exception:
+        return str(d)
+
+
+def _pct(a, b) -> str:
+    try:
+        return f"{100 * (float(a) / float(b) - 1):+.1f}%"
+    except Exception:
+        return ""
+
+
+def _money(x) -> str:
+    try:
+        return f"${float(x):,.2f}"
+    except Exception:
+        return str(x)
+
+
+SIGNAL_ORDER = {"GAP_BELOW_STOP": 0, "EARNINGS": 1, "EXIT_RULE": 2, "TIME_STOP": 3, "TREND_BREAK": 4, "GAP_ABOVE_TARGET": 5,
+                "STOP_HIT": 6, "TARGET_HIT": 7, "RAISE_STOP": 8, "NO_DATA": 9, "TIME_STOP_NEXT": 10, "MARKET_STRESS": 11}
+
+
 def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -> str:
+    """The email. Sections in the order you act on them: exits and fills first, then stop moves, then this
+    morning's order checks, withdrawn setups, every open position with its full status, and finally each new
+    setup with everything needed to place and manage it."""
     m = scan["market"]
     f = scan["funds"]
-    lines = [f"SWING DESK | {scan['mode'].upper()} SCAN | {now.strftime('%a %b %d, %I:%M %p')} PT", ""]
+    mode_label = {"premarket": "PRE-MARKET CHECK", "preclose": "PRE-CLOSE SCAN", "postclose": "POST-CLOSE SCAN"}.get(scan["mode"], scan["mode"].upper() + " SCAN")
+    lines = [f"SWING DESK | {mode_label} | {now.strftime('%a %b %d, %I:%M %p').replace(' 0', ' ')} PT", ""]
     lines.append(f"Market: {m['label']} | SPY {m['spy']} ({m['spy_vs_200d_pct']}% vs 200d, 5d {m['spy_5d_pct']}%) | "
                  f"breadth {m['breadth_above_50d_pct']}% above 50d | VIX {m['vix']}")
-    lines.append(f"Capital ${f['capital']:,.2f} | cash free ${f['cash']:,.2f} | open {f['open_count']}"
+    lines.append(f"Capital {_money(f['capital'])} | cash free {_money(f['cash'])} | open positions {f['open_count']}"
                  f"/{P['risk']['max_open']}")
     d = scan["data"]
     if d["status"] != "ok":
@@ -685,59 +750,80 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
                      + " Verify prices in your broker before acting on anything below.")
     for n in scan.get("notes") or []:
         lines.append(f"Note: {n}")
-    exits = [(p, s) for p in positions for s in p.get("signals", []) if s["level"] in ("alert", "good")]
-    if exits:
-        lines += ["", "EXIT / ACTION ALERTS"]
-        for p, s in exits:
-            lines.append(f"- {p['ticker']}: {s['action']} ({s['urgency']}). {s['text']} "
-                         f"[last ${p['last']}, P&L ${p['unrealized']}, day {p['days_held']}/{p['max_hold']}]")
-    adj = [(p, s) for p in positions for s in p.get("signals", []) if s["level"] == "info"]
-    if adj:
-        lines += ["", "STOP / POSITION UPDATES"]
-        for p, s in adj:
-            lines.append(f"- {p['ticker']}: {s['action']}. {s['text']}")
+
+    def pos_line(p):
+        return f"[last ${p['last']}, P&L ${p['unrealized']} ({p.get('unrealized_pct')}%), day {p['days_held']} of {p['max_hold']}]"
+
+    sigs = sorted(((p, sg) for p in positions for sg in p.get("signals", [])), key=lambda x: SIGNAL_ORDER.get(x[1]["code"], 99))
+    exits = [(p, sg) for p, sg in sigs if sg["code"] in EXIT_CODES]
+    fills = [(p, sg) for p, sg in sigs if sg["code"] in FILL_CODES]
+    raises = [(p, sg) for p, sg in sigs if sg["code"] in RAISE_CODES]
+    checks = [(p, sg) for p, sg in sigs if sg["code"] in CHECK_CODES]
+    notices = [(p, sg) for p, sg in sigs if sg["code"] in NOTICE_CODES]
+    if exits or checks:
+        lines += ["", "=== 1. EXIT NOW / ACT ON THESE POSITIONS ==="]
+        for p, sg in exits + checks:
+            lines.append(f"- {p['ticker']}: {sg['action']} ({sg['urgency']}). {sg['text']} {pos_line(p)}")
+    if fills:
+        lines += ["", "=== FILLS TO CONFIRM (your bracket order probably already handled these) ==="]
+        for p, sg in fills:
+            lines.append(f"- {p['ticker']}: {sg['action']}. {sg['text']} {pos_line(p)}")
+    if raises:
+        lines += ["", "=== 2. STOPS TO RAISE ==="]
+        for p, sg in raises:
+            lines.append(f"- {p['ticker']}: {sg['action']} (from ${p.get('stop')}). {sg['text']} {pos_line(p)}")
     if pm_checks:
-        lines += ["", "PRE-MARKET CHECK OF TODAY'S ORDERS"]
+        lines += ["", "=== 3. PRE-MARKET CHECK OF TODAY'S ORDERS ==="]
         for c in pm_checks:
             lines.append(f"- {c['ticker']}: {c['verdict'].upper()}. {c['text']}")
     wd = [(k, v) for k, v in (scan.get("alert_updates") or {}).items() if v.get("withdrawn")]
     if wd:
-        lines += ["", "WITHDRAWN SETUPS (cancel these orders if you placed them)"]
+        lines += ["", "=== WITHDRAWN SETUPS (cancel these orders if you placed them) ==="]
         for k, v in wd:
             tk = v.get("ticker") or (k.split("_")[2] if k.count("_") >= 3 else k)
             lines.append(f"- {tk}: {v.get('withdrawn_reason')}")
     pn = scan.get("position_news") or []
     if pn:
-        lines += ["", "NEWS ON OPEN POSITIONS"]
+        lines += ["", "=== NEWS ON OPEN POSITIONS ==="]
         for x in pn:
             lines.append(f"- REVIEW {x['ticker']} position ({x['verdict']}): {x['reason']}")
+    if positions:
+        lines += ["", f"=== OPEN POSITIONS ({len(positions)}) ==="]
+        for p in positions:
+            label = S.meta(p.get("strategy") or "", P)["label"] if p.get("strategy") else "manual"
+            codes = [sg["code"] for sg in p.get("signals", [])]
+            end = _hold_end(p.get("entry_date"), p.get("max_hold") or 0)
+            status = ("action above" if any(c in EXIT_CODES or c in FILL_CODES or c in RAISE_CODES or c in CHECK_CODES for c in codes)
+                      else "hold; nothing to do")
+            sh = p.get("shares")
+            sh = int(sh) if isinstance(sh, (int, float)) and float(sh).is_integer() else sh
+            lines.append(f"- {p['ticker']} | {label} | entered {_day(p.get('entry_date'))} at ${p.get('entry')} x {sh} | "
+                         f"last ${p['last']} ({_pct(p['last'], p.get('entry'))}) | P&L ${p['unrealized']} | day {p['days_held']} of {p['max_hold']}"
+                         f"{f', time stop at the close of {_day(end)}' if end else ''} | stop ${p.get('stop')} | target ${p.get('target')} | {status}")
+            dyn = p.get("dyn_exit")
+            if dyn and dyn != "none":
+                lines.append(f"    Exit rule: sell at the close once {DYN_TEXT.get(dyn, dyn)} (5-day avg now ${p.get('sma5')}).")
+            for p2, sg in notices:
+                if p2 is p:
+                    lines.append(f"    Note: {sg['text']}")
     featured = [e for e in entries if not e.get("also_qualified")]
     extra = [e for e in entries if e.get("also_qualified")]
     if entries:
-        lines += ["", f"SETUPS ({len(featured)} featured{f', {len(extra)} more below' if extra else ''}): A+ unless marked"]
+        sess = _day(entries[0].get("valid_for"))
+        lines += ["", f"=== NEW SETUPS FOR {sess.upper()} ({len(featured)} featured{f', {len(extra)} more below' if extra else ''}) ==="]
+        lines.append("Buy near today's close (limit at about the last price); attach the stop and target as a bracket once filled."
+                     if scan["mode"] == "preclose" else
+                     "Place each as a DAY limit order before the 6:30 AM PT open; attach the stop and target as a bracket once filled.")
         for i, e in enumerate(featured, 1):
-            frac = " (FRACTIONAL: market hours only)" if e["fractional"] else ""
-            tag = " [grade A, weekly top-up]" if e.get("topup_note") else ""
-            lines.append(f"{i}. {e['ticker']} ({e['name']}) | {e['strategy_label']} | score {e['score']} | win {e['win_pct']}%{tag}")
-            lines.append(f"   Entry: {e['order']}")
-            lines.append(f"   Stop ${e['stop']} | Target ${e['target']} | R:R {e['rr']} | hold up to {e['hold_max_days']} days")
-            lines.append(f"   Size {e['shares']} sh{frac} = ${e['total_cost']:,.2f} ({e['pct_of_capital']}% of capital), risk ${e['risk_usd']}")
-            lines.append(f"   Exit signal: {e['exit_signal']}")
-            if e.get("news_check") and e["news_check"] != "pending":
-                lines.append(f"   News check: {e['news_check']}" + (f" · {e['news_note']}" if e.get("news_note") else ""))
-            if e.get("capacity_note"):
-                lines.append(f"   Note: {e['capacity_note']}")
-            if e.get("size_note"):
-                lines.append(f"   Note: {e['size_note']}")
+            lines += setup_block(e, i)
         if extra:
-            lines += ["", "ALSO QUALIFIED (A+, outside the top 8 or sector-capped)"]
+            lines += ["", "=== ALSO QUALIFIED (A+, outside the top 8 or sector-capped): swap in if you prefer one ==="]
             for e in extra:
-                lines.append(f"- {e['ticker']} {e['strategy_label']}: score {e['score']}, limit ${e['entry']}, "
-                             f"stop ${e['stop']}, target ${e['target']}, {e['shares']} sh")
+                lines += setup_block(e, None)
     elif scan["mode"] == "postclose":
         lines += ["", "No A+ setups tonight. Standing aside is a position."]
     if near and (week_aplus < P["grading"].get("min_week", 3)):
-        lines += ["", "WATCHLIST (grade A, not A+, shown because the weekly A+ count is low)"]
+        lines += ["", "=== WATCHLIST (grade A, not A+, shown because the weekly A+ count is low) ==="]
         for e in near[:4]:
             lines.append(f"- {e['ticker']} {e['strategy_label']}: score {e['score']}, win {e['win_pct']}%, "
                          f"limit ${e['entry']}, stop ${e['stop']}, target ${e['target']}")
@@ -749,6 +835,38 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
     lines += ["", "Model-generated signals from backtested rules, not financial advice. Win % is an "
               "estimate from historical setups and can be wrong."]
     return mark_caution("\n".join(lines))
+
+
+def setup_block(e: dict, rank) -> list[str]:
+    """Everything needed to place and manage one setup, one labelled line per item."""
+    head = f"{rank}. " if rank else "- "
+    grade = e.get("grade", "A+") + (" (weekly top-up)" if e.get("topup_note") else "")
+    out = ["", f"{head}{e['ticker']} | {e['name']} | {e['strategy_label']} | {grade} | score {e['score']} | win est. {e['win_pct']}%"
+                f" | exp. {e.get('exp_return_pct', '')}% per trade"]
+    frac = " (FRACTIONAL: market hours only)" if e.get("fractional") else ""
+    out.append(f"   ORDER    {e['order']}")
+    out.append(f"   BRACKET  Stop ${e['stop']} ({_pct(e['stop'], e['entry'])}) | Target ${e['target']} ({_pct(e['target'], e['entry'])}) | "
+               f"reward:risk {e['rr']}")
+    cap = e.get("pct_of_capital")
+    out.append(f"   SIZE     {e['shares']} share{'s' if e['shares'] != 1 else ''}{frac} = ${e['total_cost']:,.2f}"
+               f"{f' ({cap}% of capital)' if cap is not None else ''} | risk if stopped ${e['risk_usd']}")
+    end = _hold_end(e.get("valid_for"), e.get("hold_max_days") or 0)
+    out.append(f"   HOLD     up to {e['hold_max_days']} sessions (typical {e.get('hold_typical_days', '?')})"
+               f"{f'; time stop at the close of {_day(end)}' if end else ''}")
+    out.append(f"   EXIT     {e['exit_signal']}")
+    why = e.get("why") or []
+    if why:
+        out.append(f"   WHY      {' · '.join(why)}")
+    out.append(f"   EARNINGS {e['earnings_next'] + ' (after the hold window)' if e.get('earnings_next') else 'none inside the hold window'}")
+    if e.get("news_check") and e["news_check"] != "pending":
+        out.append(f"   NEWS     {e['news_check']}" + (f" · {e['news_note']}" if e.get("news_note") else ""))
+    else:
+        out.append("   NEWS     pending (the news check fills this in before the email goes out)")
+    if e.get("capacity_note"):
+        out.append(f"   NOTE     {e['capacity_note']}")
+    if e.get("size_note"):
+        out.append(f"   NOTE     {e['size_note']}")
+    return out
 
 
 def main():

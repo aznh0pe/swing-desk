@@ -116,6 +116,10 @@ def check_trade(tr: dict, ind: dict, mode: str, earnings: dict, premarket, P: di
                      "urgency": "today" if mode == "preclose" else "next",
                      "text": f"Time stop: day {days_held} of {max_hold}. The edge decays after the hold "
                      f"window; exit {when_close}."})
+    elif days_left == 1 and mode == "postclose" and not rule_hit:
+        sigs.append({"code": "TIME_STOP_NEXT", "level": "info", "action": "LAST DAY TOMORROW",
+                     "urgency": "next", "text": f"Day {days_held} of {max_hold}: tomorrow is the last day of the hold "
+                     "window. Unless the target or stop fills first, the pre-close scan will tell you to sell at the close."})
     if strategy in ("TREND_PULLBACK", "BREAKOUT_RETEST", "GAP_HOLD") and math.isfinite(sma50):
         if last < sma50:
             sigs.append({"code": "TREND_BREAK", "level": "alert",
@@ -147,6 +151,8 @@ def check_trade(tr: dict, ind: dict, mode: str, earnings: dict, premarket, P: di
                      "urgency": "today", "text": f"Market stress (SPY {spy_r1:+.1%} today, VIX {vixr:.2f}x its "
                      "20-day average). Keep the stop in place; do not average down."})
     return {"trade_id": tr.get("id"), "ticker": tk, "strategy": strategy,
+            "entry": _f(entry), "stop": _f(stop), "target": _f(target), "shares": shares,
+            "entry_date": str(entry_day), "dyn_exit": dyn,
             "last": _f(last), "asof": str(last_day), "partial_bar": bool(partial_bar),
             "unrealized": _f(unreal), "unrealized_pct": _f((last / entry - 1) * 100 if entry else 0, 2),
             "days_held": int(days_held), "days_left": int(days_left), "max_hold": max_hold,
