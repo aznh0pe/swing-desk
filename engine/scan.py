@@ -28,7 +28,7 @@ from . import model as M
 from . import strategies as S
 from . import version as engine_version
 from .monitor import check_trade, DYN_TEXT
-from .portfolio import funds, load_collection, load_state, size_position
+from .portfolio import funds, load_collection, load_state, risk_governor, size_position
 
 USER_FIELDS = {"status", "actual_price", "actual_shares", "done_at", "user_note", "trade_id",
                "skipped_at"}
@@ -142,7 +142,8 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
     T = len(c) - 1
     asof = c.index[T].date()
     f = funds(state)
-    settings = state["settings"]
+    gov = risk_governor(state, f["capital"], state["settings"])
+    settings = {**state["settings"], "risk_pct": gov["risk_pct"]}
     open_tickers = {v["doc"].get("ticker") for v in state["trades"].values()
                     if v["doc"].get("status") == "open"}
     cands = []
@@ -532,6 +533,8 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
                                       partial, errors)
     # news-check placeholders are filled by the session after web checks
     f = funds(state)
+    gov = risk_governor(state, f["capital"], state["settings"])
+    f["risk_pct"], f["risk_reason"] = gov["risk_pct"], gov["reason"]
     positions = []
     for tid, v in state["trades"].items():
         t = dict(v["doc"])
@@ -743,7 +746,7 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
     lines.append(f"Market: {m['label']} | SPY {m['spy']} ({m['spy_vs_200d_pct']}% vs 200d, 5d {m['spy_5d_pct']}%) | "
                  f"breadth {m['breadth_above_50d_pct']}% above 50d | VIX {m['vix']}")
     lines.append(f"Capital {_money(f['capital'])} | cash free {_money(f['cash'])} | open positions {f['open_count']}"
-                 f"/{P['risk']['max_open']}")
+                 f"/{P['risk']['max_open']}" + (f" | risk per trade {f['risk_pct']:g}% ({f['risk_reason']})" if f.get("risk_pct") else ""))
     d = scan["data"]
     if d["status"] != "ok":
         lines.insert(1, f"⚠ DATA WARNING ({d['status']}): " + " ".join(n for n in d["notes"] if "refreshed" not in n)

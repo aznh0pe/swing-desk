@@ -9,9 +9,52 @@ DEFAULT_SETTINGS = {
     "initial_balance": 5000.0,
     "income_default_pct": 30.0,
     "max_open_positions": 5,
-    "risk_pct": 1.25,
+    "risk_pct": 2.0,
     "max_position_pct": 25.0,
 }
+
+# Risk governor: the full risk per trade is earned by the live record. Position size steps down to the
+# floor while the account is in a drawdown deeper than `dd_step_down` from its peak (realised P&L), or
+# while the last `window` closed trades won less than `win_step_down`; it steps back up once the drawdown
+# is inside `dd_restore` and the trailing win rate is back above `win_restore`. Nov 2026 backtest, A+ only,
+# 5 slots, 2008-2026: 1.25% risk -> +6.0%/yr with a -6.8% worst drawdown; 2.0% -> +9.6%/yr, -10.8%.
+# Win rate does not change with size, so the governor only protects the account while the edge is unproven.
+GOVERNOR = {"floor_pct": 1.25, "dd_step_down": 0.08, "dd_restore": 0.04, "window": 20,
+            "win_step_down": 0.60, "win_restore": 0.65}
+
+
+def risk_governor(state: dict, capital: float, settings: dict) -> dict:
+    """Effective risk per trade for this scan, with the reason, from the account's own record."""
+    full = float(settings.get("risk_pct", DEFAULT_SETTINGS["risk_pct"]))
+    g = {**GOVERNOR, **(settings.get("governor") or {})}
+    floor = min(full, float(g["floor_pct"]))
+    led = sorted((v["doc"] for v in state["ledger"].values()), key=lambda d: str(d.get("date") or d.get("at") or ""))
+    eq, peak = 0.0, 0.0
+    for d in led:
+        eq += float(d.get("amount") or 0)
+        if d.get("type") in ("initial", "deposit", "withdrawal"):
+            peak = max(eq, peak) if d.get("type") != "withdrawal" else max(peak + float(d.get("amount") or 0), eq)
+        peak = max(peak, eq)
+    if not led:
+        eq = peak = capital
+    dd = (peak - eq) / peak if peak > 0 else 0.0
+    closed = [v["doc"] for v in state["trades"].values()
+              if v["doc"].get("status") == "closed" and v["doc"].get("exit_price") and v["doc"].get("entry_price")]
+    closed.sort(key=lambda t: str(t.get("exit_date") or t.get("closed_at") or ""))
+    recent = closed[-int(g["window"]):]
+    wr = (sum(1 for t in recent if float(t["exit_price"]) > float(t["entry_price"])) / len(recent)) if len(recent) >= int(g["window"]) else None
+    was_down = bool((state.get("learning", {}).get("governor") or {}).get("doc", {}).get("stepped_down"))
+    reasons = []
+    if dd >= g["dd_step_down"] or (was_down and dd > g["dd_restore"]):
+        reasons.append(f"drawdown {100 * dd:.1f}% from the account's peak")
+    if wr is not None and (wr < g["win_step_down"] or (was_down and wr < g["win_restore"])):
+        reasons.append(f"last {len(recent)} trades won {100 * wr:.0f}%")
+    if reasons:
+        return {"risk_pct": floor, "full_pct": full, "stepped_down": True, "drawdown": round(dd, 4), "trailing_win": wr,
+                "reason": "stepped down to %.2f%% (%s); back to %.2f%% once the drawdown is under %d%% and the last %d trades win %d%%+"
+                % (floor, "; ".join(reasons), full, round(100 * g["dd_restore"]), g["window"], round(100 * g["win_restore"]))}
+    return {"risk_pct": full, "full_pct": full, "stepped_down": False, "drawdown": round(dd, 4), "trailing_win": wr,
+            "reason": "full size: drawdown %.1f%% from peak%s" % (100 * dd, f", last {len(recent)} trades won {100 * wr:.0f}%" if wr is not None else "")}
 
 
 def _unwrap(obj):

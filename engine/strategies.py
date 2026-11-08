@@ -64,7 +64,7 @@ STRATEGY_META = {
 DEFAULT_PARAMS = {
     "version": 1,
     "updated": None,
-    "risk": {"risk_pct": 1.25, "risk_pct_top": 1.5, "max_position_pct": 25.0,
+    "risk": {"risk_pct": 2.0, "risk_pct_top": 2.0, "max_position_pct": 25.0,
              "max_open": 5, "min_position_usd": 150.0, "slippage_pct": 0.05},
     "filters": {"min_price": 10.0, "min_dv_stock": 30e6, "min_dv_etf": 20e6,
                 "earnings_buffer_days": 1, "allow_leveraged": True},

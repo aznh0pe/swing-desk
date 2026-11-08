@@ -179,3 +179,22 @@ def test_time_stop_is_announced_the_day_before():
     ind8 = _frames(closes, start="2026-01-02")
     codes = [s["code"] for s in MON.check_trade(_trade(max_hold=8), ind8, "postclose", {}, None, P, False)["signals"]]
     assert "TIME_STOP" in codes
+
+
+def test_risk_governor_steps_down_and_restores():
+    from engine.portfolio import risk_governor
+    base = {"settings": {"risk_pct": 2.0}, "trades": {}, "ledger": {"i": {"doc": {"type": "initial", "amount": 5000, "date": "2026-11-05"}}}, "learning": {}}
+    g = risk_governor(base, 5000, base["settings"])
+    assert g["risk_pct"] == 2.0 and not g["stepped_down"]
+    # a 9% realised drawdown steps the size down to the floor
+    dd = dict(base); dd["ledger"] = {**base["ledger"], "l": {"doc": {"type": "pnl", "amount": -450, "date": "2026-12-01"}}}
+    g = risk_governor(dd, 4550, dd["settings"])
+    assert g["risk_pct"] == 1.25 and g["stepped_down"] and "drawdown 9.0%" in g["reason"]
+    # 20 closed trades at 55% wins step it down even with no drawdown
+    tr = {f"t{i}": {"doc": {"status": "closed", "entry_price": 100, "exit_price": 101 if i < 11 else 99, "exit_date": f"2026-12-{i+1:02d}"}} for i in range(20)}
+    wk = dict(base); wk["trades"] = tr
+    g = risk_governor(wk, 5000, wk["settings"])
+    assert g["risk_pct"] == 1.25 and "won 55%" in g["reason"]
+    # the user's own setting below the floor is respected as is
+    low = dict(base); low["settings"] = {"risk_pct": 1.0}
+    assert risk_governor(low, 5000, low["settings"])["risk_pct"] == 1.0
