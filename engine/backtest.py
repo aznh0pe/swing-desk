@@ -22,12 +22,25 @@ def _arr(x):
 
 
 def simulate(plan: dict, ind: dict, P: dict, last_signal_row: int | None = None,
-             include_unfilled: bool = False) -> pd.DataFrame:
+             include_unfilled: bool = False, manage: dict | None = None) -> pd.DataFrame:
+    """`manage` (optional) replays the position-management rules the daily scans apply live,
+    so they can be measured instead of assumed: {"be_atr": 1.0, "lock_atr": 1.5, "lock_to": 0.5}
+    raises the stop to breakeven after a close 1 ATR above the fill and to fill + 0.5 ATR after
+    1.5 ATR; {"exit_below_sma50": True} sells at a close below the 50-day average;
+    {"fill": "through"} only fills a limit when the session's low trades strictly below it."""
     O, H, L, C = (_arr(ind[k]) for k in ["open", "high", "low", "close"])
     ATR = _arr(ind["atr10"])
     SMA5 = _arr(ind["sma5"])
+    SMA50 = _arr(ind["sma50"]) if "sma50" in ind else None
     RSI2 = _arr(ind["rsi2"])
     MAX7 = _arr(ind["max7c"])
+    mg = dict(P.get("manage") or {})
+    mg.update(manage or {})
+    be_atr = float(mg.get("be_atr") or 0) or None
+    lock_atr = float(mg.get("lock_atr") or 0) or None
+    lock_to = float(mg.get("lock_to", 0.5))
+    below50 = bool(mg.get("exit_below_sma50")) and SMA50 is not None
+    through = mg.get("fill") == "through"
     T = C.shape[0]
     mask = _arr(plan["mask"]).copy()
     lim_last = T - 1 if last_signal_row is None else last_signal_row
@@ -61,7 +74,7 @@ def simulate(plan: dict, ind: dict, P: dict, last_signal_row: int | None = None,
                 lo = L[d, j]
                 if not np.isfinite(lo):
                     continue
-                if lo <= limit:
+                if (lo < limit) if through else (lo <= limit):
                     fill_i, fill = d, min(O[d, j], limit)
                     break
         if fill_i < 0:
@@ -120,9 +133,17 @@ def simulate(plan: dict, ind: dict, P: dict, last_signal_row: int | None = None,
             if sig:
                 exit_i, exit_p, reason = d, cl * (1 - slip), "signal"
                 break
+            if below50 and d > fill_i and np.isfinite(SMA50[d, j]) and cl < SMA50[d, j]:
+                exit_i, exit_p, reason = d, cl * (1 - slip), "trend_break"
+                break
             if held >= hold:
                 exit_i, exit_p, reason = d, cl * (1 - slip), "time"
                 break
+            # stop management after the close (the scans tell the trader to raise the stop for the next session)
+            if lock_atr and cl - fill >= lock_atr * atr and stop < fill + lock_to * atr:
+                stop = fill + lock_to * atr
+            elif be_atr and cl - fill >= be_atr * atr and stop < fill:
+                stop = fill
         rows.append((t, j, fill_i, fill, exit_i, exit_p, reason, held, stop, tgt, limit))
 
     if not rows:

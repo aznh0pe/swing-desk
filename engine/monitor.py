@@ -116,27 +116,26 @@ def check_trade(tr: dict, ind: dict, mode: str, earnings: dict, premarket, P: di
                      "urgency": "today" if mode == "preclose" else "next",
                      "text": f"Time stop: day {days_held} of {max_hold}. The edge decays after the hold "
                      f"window; exit {when_close}."})
-    if strategy in ("TREND_PULLBACK", "BREAKOUT_RETEST", "GAP_HOLD", "LEADER_PULLBACK") and math.isfinite(sma50):
+    if strategy in ("TREND_PULLBACK", "BREAKOUT_RETEST", "GAP_HOLD") and math.isfinite(sma50):
         if last < sma50:
             sigs.append({"code": "TREND_BREAK", "level": "alert",
                          "action": "SELL AT CLOSE" if mode == "preclose" else "SELL AT OPEN",
                          "urgency": "today" if mode == "preclose" else "next",
                          "text": f"Trend break: price ${last:.2f} is below the 50-day average ${sma50:.2f}. "
                          "The setup's premise is gone."})
-    # stop management
-    if entry and math.isfinite(atr) and atr > 0:
+    # stop management: measured in the backtest (Nov 2026). A breakeven stop after +1 ATR cut the A+ win
+    # rate by about a point (bounces oscillate before they finish), so it is not used. Locking in +1 ATR
+    # once a position is up 2 ATR changed nothing measurable, so that is the one adjustment kept.
+    mg = P.get("manage") or {}
+    lock_atr, lock_to = float(mg.get("lock_atr") or 2.0), float(mg.get("lock_to") if mg.get("lock_to") is not None else 1.0)
+    if entry and math.isfinite(atr) and atr > 0 and lock_atr > 0:
         gain_atr = (last - entry) / atr
-        if gain_atr >= 1.5 and stop < entry + 0.5 * atr:
-            new = round(entry + 0.5 * atr, 2)
+        if gain_atr >= lock_atr and stop < entry + lock_to * atr:
+            new = round(entry + lock_to * atr, 2)
             sigs.append({"code": "RAISE_STOP", "level": "info", "action": f"RAISE STOP TO ${new:.2f}",
                          "urgency": "next", "new_stop": new,
-                         "text": f"Up {gain_atr:.1f} ATR. Lock in profit: move the stop to ${new:.2f}."})
-        elif gain_atr >= 1.0 and stop < entry:
-            new = round(entry, 2)
-            sigs.append({"code": "BREAKEVEN", "level": "info", "action": f"RAISE STOP TO ${new:.2f}",
-                         "urgency": "next", "new_stop": new,
-                         "text": f"Up {gain_atr:.1f} ATR. Move the stop to breakeven (${new:.2f}) so this "
-                         "can't turn into a loss."})
+                         "text": f"Up {gain_atr:.1f} ATR. Lock in part of the gain: move the stop to ${new:.2f} "
+                         f"(entry + {lock_to:g} ATR). Leave the target in place."})
     mk = ind["market"]
     try:
         spy_r1 = float(mk["spy"].iloc[-1] / mk["spy"].iloc[-2] - 1)

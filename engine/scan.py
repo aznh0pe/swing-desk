@@ -113,15 +113,21 @@ def earnings_conflict(tk, earnings, start_day, hold) -> tuple[bool, str | None]:
     return hit, nxt_s
 
 
+# Trend-continuation setups whose premise is the trend itself: a close below the 50-day ends it.
+# (Measured Nov 2026: the same rule on the dip-buying Leader 7-Day Pullback cut its win rate 68.5% -> 64.5%,
+# so dip strategies keep their wide stop and time stop instead.)
+TREND_FOLLOWING = ("TREND_PULLBACK", "BREAKOUT_RETEST", "GAP_HOLD")
+
+
 def exit_signal_text(plan_name, sp, dyn, target, stop, hold, earnings_next):
     parts = []
     if dyn and dyn != "none":
         parts.append(f"Sell at the close if {DYN_TEXT.get(dyn, dyn)} (the daily scans alert you).")
     parts.append(f"Time stop: sell at the close on day {hold} if neither the target ${target:.2f} "
                  f"nor the stop ${stop:.2f} has filled.")
-    if plan_name in ("TREND_PULLBACK", "BREAKOUT_RETEST", "GAP_HOLD", "LEADER_PULLBACK"):
+    if plan_name in TREND_FOLLOWING:
         parts.append("Exit early on a close below the 50-day average.")
-    parts.append("Raise the stop to breakeven once up 1 ATR (scan will flag it).")
+    parts.append("Once up 2 ATR, raise the stop to entry + 1 ATR to lock in part of the gain (scan will flag it).")
     if earnings_next:
         parts.append(f"Next earnings {earnings_next}: exit before it if still open.")
     return " ".join(parts)
@@ -288,7 +294,7 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
                            f"(place before the 6:30 AM PT open). Attach stop ${cd['stop']:.2f} and "
                            f"limit-sell target ${cd['target']:.2f} once filled (bracket/OCO)."),
             "valid_for": str(session_day if cd["plan"]["entry_kind"] != "close" else asof),
-            "hold_max_days": hold,
+            "hold_max_days": hold, "valid_days": int(cd["plan"].get("valid_days", 1)),
             "hold_typical_days": int(max(1, round((mdl.get("avg_hold") or min(4, hold)) ))),
             "dyn_exit": cd["plan"]["dyn_exit"],
             "exit_signal": exit_signal_text(cd["name"], cd["sp"], cd["plan"]["dyn_exit"], cd["target"],

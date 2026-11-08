@@ -83,14 +83,20 @@ GRIDS = {
     },
 }
 
-FLOORS = {"min_trades": 120, "min_pf": 1.35, "min_avg": 0.0035}
+FLOORS = {"min_trades": 120, "min_pf": 1.35, "min_avg": 0.0035, "min_fill": 0.45}
 
 
 def objective(s: dict) -> float:
+    """Grid-search objective on 2008-2021 trades: win rate first, expectancy second, with floors.
+    A limit that sits so deep that most orders never fill looks great per filled trade but produces
+    few setups and misses the bounces that start without a dip, so fill rate has a floor too."""
     if not s or s.get("trades", 0) < FLOORS["min_trades"]:
         return -1.0
     pf = s.get("profit_factor") or 0
     pen = 0.0
+    fr = s.get("fill_rate")
+    if fr is not None and fr < FLOORS["min_fill"]:
+        pen += 0.25 + (FLOORS["min_fill"] - fr)
     if pf < FLOORS["min_pf"]:
         pen += 0.25 + (FLOORS["min_pf"] - pf)
     if s["avg_ret"] < FLOORS["min_avg"]:
@@ -169,13 +175,32 @@ def _isotonic(rows: list[dict]) -> list[dict]:
     return out
 
 
-def calibrate_grades(all_tr: pd.DataFrame, split, min_week=3) -> dict:
-    """Pick A+ cut-offs on out-of-sample trades: the highest win rate whose average trade is
-    at least +0.6% and that still produces enough setups per week across the universe."""
-    t = all_tr[(all_tr["signal_date"] >= split) & all_tr["ret"].notna() & all_tr["filled"]].copy()
-    sig = all_tr[all_tr["signal_date"] >= split]
+CAL_END = "2024-01-01"  # the post-split window is reported in two halves (2022-23 and 2024-now) so regime shifts show
+
+
+def _aplus_window(tr_all: pd.DataFrame, sc: int, pw: float, min_week: int) -> dict:
+    """A+ results inside one window of signals: filled-trade win rate, average trade, setups per week."""
+    if tr_all.empty:
+        return {"trades": 0}
+    filled = tr_all[tr_all["ret"].notna() & tr_all["filled"]]
+    sel = filled[(filled["score"] >= sc) & (filled["p"] >= pw)]
+    s_all = tr_all[(tr_all["score"] >= sc) & (tr_all["p"] >= pw)].drop_duplicates(["signal_date", "ticker"])
+    weeks_idx = pd.date_range(tr_all["signal_date"].min(), tr_all["signal_date"].max(), freq="W")
+    weeks = max(1.0, len(weeks_idx))
+    wk = s_all.groupby(pd.Grouper(key="signal_date", freq="W")).size().reindex(weeks_idx, fill_value=0)
+    return {"trades": int(len(sel)), "win_rate": round(float((sel["ret"] > 0).mean()), 4) if len(sel) else None,
+            "avg_ret": round(float(sel["ret"].mean()), 5) if len(sel) else None,
+            "signals_per_week": round(float(len(s_all) / weeks), 1),
+            "weeks_with_min_setups": round(float((wk >= min_week).mean()), 3),
+            "window": [str(tr_all["signal_date"].min().date()), str(tr_all["signal_date"].max().date())]}
+
+
+def _select_cutoffs(sig: pd.DataFrame, min_week: int):
+    """The (score, win-odds) bar with the highest filled-trade win rate whose average trade is at least
+    +0.6% and that still produces enough setups a week across the universe; None if nothing clears it."""
+    t = sig[sig["ret"].notna() & sig["filled"]]
     if t.empty:
-        return {"aplus_score": 70, "aplus_pwin": 0.66, "min_week": min_week, "note": "fallback cut-offs"}
+        return None
     weeks_idx = pd.date_range(sig["signal_date"].min(), sig["signal_date"].max(), freq="W")
     weeks = max(1.0, len(weeks_idx))
     cands = []
@@ -193,14 +218,31 @@ def calibrate_grades(all_tr: pd.DataFrame, split, min_week=3) -> dict:
             wk = s_all.groupby(pd.Grouper(key="signal_date", freq="W")).size().reindex(weeks_idx, fill_value=0)
             cands.append((float(wr), float(avg), sc, pw, per_week, len(sel), float((wk >= min_week).mean())))
     if not cands:
-        return {"aplus_score": 70, "aplus_pwin": 0.66, "min_week": min_week, "note": "fallback cut-offs"}
+        return None
     top_wr = max(c[0] for c in cands)
     top_avg = max(c[1] for c in cands if c[0] >= top_wr - 0.012)
     # adjacent score bands are statistically indistinguishable, so among cut-offs within 1.2 points
     # of the best win rate (and 85% of its average trade) take the one that covers the most weeks
     near = [c for c in cands if c[0] >= top_wr - 0.012 and c[1] >= 0.85 * top_avg] or cands
-    wr, avg, sc, pw, per_week, n, cover = max(near, key=lambda c: (c[6], c[0]))
-    # realised out-of-sample win rate by score band: what the alert's Win % shows
+    return max(near, key=lambda c: (c[6], c[0]))
+
+
+def calibrate_grades(all_tr: pd.DataFrame, split, min_week=3, cal_end=CAL_END) -> dict:
+    """Pick A+ cut-offs on the post-split trades (2022-now): the highest win rate whose average trade is at
+    least +0.6% and that still produces enough setups per week across the universe.
+
+    Honesty notes that travel with the result: the cut-offs were chosen on the same trades the headline
+    figures describe, so `by_year` shows how the bar did in each calendar year, and `time_split` repeats the
+    whole selection on the first half of the window (to cal_end) and measures that bar on the second half,
+    which it never saw. Both are stored so the dashboard and the journal can show them."""
+    post = all_tr[all_tr["signal_date"] >= split]
+    fallback = {"aplus_score": 70, "aplus_pwin": 0.66, "min_week": min_week, "note": "fallback cut-offs"}
+    best = _select_cutoffs(post, min_week)
+    if best is None:
+        return fallback
+    wr, avg, sc, pw, per_week, n, cover = best
+    t = post[post["ret"].notna() & post["filled"]]
+    # realised win rate by score band: what the alert's Win % shows
     table = []
     for lo, hi in ((40, 54), (54, 62), (62, 66), (66, 70), (70, 74), (74, 78), (78, 82), (82, 86), (86, 90), (90, 101)):
         b = t[(t["score"] >= lo) & (t["score"] < hi) & (t["p"] >= pw)]
@@ -208,15 +250,39 @@ def calibrate_grades(all_tr: pd.DataFrame, split, min_week=3) -> dict:
             table.append({"lo": lo, "hi": hi, "win": round(float((b["ret"] > 0).mean()), 4),
                           "avg": round(float(b["ret"].mean()), 5), "n": int(len(b))})
     table = _isotonic(table)
-    return {"aplus_score": sc, "aplus_pwin": pw, "min_week": min_week,
-            "oos_aplus_win_rate": round(wr, 4), "oos_aplus_avg_ret": round(float(avg), 5),
-            "oos_aplus_trades": int(n), "oos_aplus_signals_per_week": round(float(per_week), 1),
-            "oos_weeks_with_min_setups": round(cover, 3), "score_win_table": table,
-            "topup_floor": max(40, sc - 8)}
+    ap = t[(t["score"] >= sc) & (t["p"] >= pw)]
+    by_year = [{"year": int(y), "trades": int(len(g)), "win": round(float((g["ret"] > 0).mean()), 4),
+                "avg": round(float(g["ret"].mean()), 5)} for y, g in ap.groupby(ap["signal_date"].dt.year)]
+    out = {"aplus_score": sc, "aplus_pwin": pw, "min_week": min_week,
+           "oos_aplus_win_rate": round(wr, 4), "oos_aplus_avg_ret": round(float(avg), 5),
+           "oos_aplus_trades": int(n), "oos_aplus_signals_per_week": round(float(per_week), 1),
+           "oos_weeks_with_min_setups": round(cover, 3), "score_win_table": table,
+           "topup_floor": max(40, sc - 8), "by_year": by_year,
+           "oos_window": [str(post["signal_date"].min().date()), str(post["signal_date"].max().date())]}
+    if cal_end is not None:
+        cal_end = pd.Timestamp(cal_end)
+        early, late = post[post["signal_date"] < cal_end], post[post["signal_date"] >= cal_end]
+        if len(late[late["filled"] & late["ret"].notna()]) >= 200 and len(early) and len(late):
+            ts = {"chosen_bar_late": _aplus_window(late, sc, pw, min_week),
+                  "chosen_bar_early": _aplus_window(early, sc, pw, min_week)}
+            e_best = _select_cutoffs(early, min_week)
+            if e_best is None:
+                ts["early_selection"] = None
+                ts["note"] = (f"Choosing the bar on {early['signal_date'].min().date()} to {cal_end.date()} alone found no cut-off "
+                              "that cleared the +0.6% average-trade floor: setups earned little in that stretch.")
+            else:
+                e_wr, e_avg, e_sc, e_pw, _, e_n, _ = e_best
+                ts["early_selection"] = {"aplus_score": e_sc, "aplus_pwin": e_pw, "trades": int(e_n), "win_rate": round(e_wr, 4),
+                                         "avg_ret": round(float(e_avg), 5)}
+                ts["early_bar_on_late"] = _aplus_window(late, e_sc, e_pw, min_week)
+            out["time_split"] = ts
+    return out
 
 
-def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=print, merge_state=None) -> dict:
+def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=print, merge_state=None,
+                 cal_end=CAL_END) -> dict:
     t0 = time.time()
+    cal_end = pd.Timestamp(cal_end) if cal_end else None
     out = pathlib.Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     split = pd.Timestamp(split)
@@ -243,6 +309,7 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
         except Exception as ex:
             log(f"learning/portfolio unavailable: {ex!r}")
     report = {"generated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "split": str(split.date()),
+              "calibration_end": str(cal_end.date()) if cal_end is not None else None,
               "period": [str(w["close"].index.min().date()), str(w["close"].index.max().date())],
               "tickers": int(w["close"].shape[1]), "strategies": {}}
     pooled = []
@@ -341,14 +408,14 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
             pm_ = None
             # pooled robust-factor model: fit on pre-split trades, win odds recalibrated out of sample
             try:
-                pm_ = M.fit_pooled(en_, names, split)
+                pm_ = M.fit_pooled(en_, names, split, cal_end)
                 p_, e_, ep_ = M.predict_pooled(pm_, en_[S.FEATURES], en_["strategy"].values)
                 en_["p"], en_["e"], en_["e_pct"] = p_, e_, ep_
                 en_["score"] = M.score_pooled(p_, ep_)
             except Exception as ex:  # keep the per-strategy scores if the pooled fit fails
                 log(f"pooled model failed: {ex!r}")
                 pm_ = None
-            return en_, pm_, calibrate_grades(en_, split)
+            return en_, pm_, calibrate_grades(en_, split, cal_end=cal_end)
 
         en, pm, G = fit_and_grade(enabled_names)
         # research strategies must earn their place inside the A+ set, not just pass on their own
@@ -410,7 +477,10 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
                                            for k, r in sb.iterrows()]
         # portfolio simulation, A+ only, $5k, 5 slots
         aplus = en[(en["score"] >= G["aplus_score"]) & (en["p"] >= G["aplus_pwin"])]
-        for label, sub in (("all_years", aplus), ("oos", aplus[aplus["signal_date"] >= split])):
+        for label, sub in (("all_years", aplus), ("oos", aplus[aplus["signal_date"] >= split]),
+                           ("late", aplus[aplus["signal_date"] >= cal_end] if cal_end is not None else aplus.iloc[0:0])):
+            if sub.empty:
+                continue
             pf = B.portfolio(sub, 5000, P["risk"]["max_open"], P["risk"]["risk_pct"], P["risk"]["max_position_pct"])
             cv = pf.pop("curve", None)
             report.setdefault("portfolio", {})[label] = pf
@@ -500,15 +570,28 @@ def shadow_outcome(a: dict, ind: dict) -> dict:
     entry, stop, tgt = float(a["entry"]), float(a["stop"]), float(a["target"])
     hold = int(a.get("hold_max_days") or 7)
     dyn = a.get("dyn_exit") or "none"
-    if not (L[d0] <= entry):
-        res["status"] = "unfilled"
+    at_close = str(a.get("order", "")).lower().startswith("buy near the close")
+    valid = max(1, int(a.get("valid_days") or 1))
+    # fill: a buy-near-the-close alert fills at that day's close; a limit fills on the first session
+    # (within its validity) whose low trades through the limit (a touch is not a fill, as in the backtest),
+    # at the better of the open and the limit
+    fill_i, fill = -1, float("nan")
+    if at_close:
+        fill_i, fill = d0, float(C[d0])
+    else:
+        for d in range(d0, min(d0 + valid, len(idx))):
+            if np.isfinite(L[d]) and L[d] < entry:
+                fill_i, fill = d, float(min(O[d], entry))
+                break
+    if fill_i < 0:
+        res["status"] = "unfilled" if d0 + valid - 1 <= len(idx) - 1 else "pending"
         return res
-    fill = min(O[d0], entry)
-    sma5 = ind["sma5"].values[:, j]
+    sma5, rsi2, max7 = ind["sma5"].values[:, j], ind["rsi2"].values[:, j], ind["max7c"].values[:, j]
     held = 0
-    for d in range(d0, len(idx)):
+    start = fill_i + 1 if at_close else fill_i
+    for d in range(start, len(idx)):
         held += 1
-        if d == d0:
+        if d == fill_i:
             if L[d] <= stop:
                 return {**res, "status": "closed", "fill": fill, "exit": stop, "reason": "stop", "held": held}
         else:
@@ -520,7 +603,9 @@ def shadow_outcome(a: dict, ind: dict) -> dict:
                 return {**res, "status": "closed", "fill": fill, "exit": stop, "reason": "stop", "held": held}
             if H[d] >= tgt:
                 return {**res, "status": "closed", "fill": fill, "exit": tgt, "reason": "target", "held": held}
-        if (dyn == "sma5" and C[d] > sma5[d]) or (dyn == "prev_high" and C[d] > H[d - 1]):
+        sig = ((dyn == "sma5" and C[d] > sma5[d]) or (dyn == "prev_high" and d > 0 and C[d] > H[d - 1])
+               or (dyn == "high7" and C[d] >= max7[d]) or (dyn == "rsi2_70" and rsi2[d] > 70))
+        if sig:
             return {**res, "status": "closed", "fill": fill, "exit": C[d], "reason": "signal", "held": held}
         if held >= hold:
             return {**res, "status": "closed", "fill": fill, "exit": C[d], "reason": "time", "held": held}
@@ -656,9 +741,11 @@ def main():
     ap.add_argument("--split", default="2022-01-01")
     ap.add_argument("--only", default=None, help="comma list of strategies")
     ap.add_argument("--merge-state", default=None, help="dashboard state export to keep live adjustments from")
+    ap.add_argument("--cal-end", default=CAL_END, help="start of the holdout window (cut-offs are chosen before it)")
     a = ap.parse_args()
     if a.cmd == "backtest":
-        rep = run_backtest(a.data, a.out, a.split, a.only.split(",") if a.only else None, merge_state=a.merge_state)
+        rep = run_backtest(a.data, a.out, a.split, a.only.split(",") if a.only else None, merge_state=a.merge_state,
+                           cal_end=a.cal_end or None)
         print(json.dumps({k: v for k, v in rep.items() if k != "strategies"}, indent=1, default=str))
     else:
         print(json.dumps(run_learning(a.data, a.state, a.out), indent=1, default=str))

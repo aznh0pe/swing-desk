@@ -160,7 +160,11 @@ def pooled_frame(feats: pd.DataFrame, strategies, strat_names) -> pd.DataFrame:
     return X
 
 
-def fit_pooled(trades: pd.DataFrame, strat_names: list[str], split) -> dict:
+def fit_pooled(trades: pd.DataFrame, strat_names: list[str], split, cal_end=None) -> dict:
+    """Factor weights are fit before `split`; the win-odds recalibration (Platt) and the expected-return
+    percentile cuts use every trade after it. When `cal_end` is given, validation is also reported for the
+    two halves of the post-split window (before and from cal_end), so a change in how well the ranking
+    holds up over time is visible."""
     from sklearn.linear_model import LogisticRegression, Ridge
     from sklearn.metrics import roc_auc_score
 
@@ -178,19 +182,36 @@ def fit_pooled(trades: pd.DataFrame, strat_names: list[str], split) -> dict:
     z_te = lr.decision_function(Z[te])
     cal = LogisticRegression(C=1e6, max_iter=1000).fit(z_te.reshape(-1, 1), y[te])
     a, b = float(cal.intercept_[0]), float(cal.coef_[0][0])
-    p_te = 1 / (1 + np.exp(-(a + b * z_te)))
     e_te = rg.predict(Z[te])
     m = {"kind": "pooled", "features": list(X.columns), "strategies": strat_names,
          "mean": {k: float(v) for k, v in mu.items()}, "std": {k: float(v) for k, v in sd.items()},
          "logit_coef": [float(v) for v in lr.coef_[0]], "logit_b0": float(lr.intercept_[0]),
          "calib_a": a, "calib_b": b, "ridge_coef": [float(v) for v in rg.coef_], "ridge_b0": float(rg.intercept_),
-         "e_pct_cuts": [float(v) for v in np.quantile(e_te, np.linspace(0, 1, 101))],
-         "validation": {"oos_trades": int(te.sum()), "oos_auc": round(float(roc_auc_score(y[te], p_te)), 3),
-                        "oos_ret_corr": round(float(np.corrcoef(e_te, t["ret"].values[te])[0, 1]), 3)}}
-    dec = pd.qcut(e_te, 10, labels=False, duplicates="drop")
-    tb = pd.DataFrame({"dec": dec, "win": y[te], "ret": t["ret"].values[te]}).groupby("dec").agg(
-        win=("win", "mean"), avg=("ret", "mean"), n=("ret", "size"))
-    m["validation"]["oos_by_expected_return_decile"] = tb.round(4).reset_index().to_dict("records")
+         "e_pct_cuts": [float(v) for v in np.quantile(e_te, np.linspace(0, 1, 101))]}
+
+    def _val(mask):
+        z = lr.decision_function(Z[mask])
+        p = 1 / (1 + np.exp(-(a + b * z)))
+        e = rg.predict(Z[mask])
+        v = {"trades": int(mask.sum()), "auc": round(float(roc_auc_score(y[mask], p)), 3),
+             "ret_corr": round(float(np.corrcoef(e, t["ret"].values[mask])[0, 1]), 3),
+             "calibration_gap": round(float(np.mean(p) - np.mean(y[mask])), 4)}
+        dec = pd.qcut(e, 10, labels=False, duplicates="drop")
+        tb = pd.DataFrame({"dec": dec, "win": y[mask], "ret": t["ret"].values[mask]}).groupby("dec").agg(
+            win=("win", "mean"), avg=("ret", "mean"), n=("ret", "size"))
+        v["by_expected_return_decile"] = tb.round(4).reset_index().to_dict("records")
+        return v
+
+    v_all = _val(te)
+    m["validation"] = {"oos_trades": v_all["trades"], "oos_auc": v_all["auc"], "oos_ret_corr": v_all["ret_corr"],
+                       "oos_by_expected_return_decile": v_all["by_expected_return_decile"]}
+    if cal_end is not None:
+        early = te & (t["signal_date"] < cal_end).values
+        late = te & ~early
+        for name, mask in (("early", early), ("late", late)):
+            if mask.sum() >= 200 and len(set(y[mask])) == 2:
+                m["validation"][name] = {**_val(mask), "window": [str(t.loc[mask, "signal_date"].min().date()),
+                                                                   str(t.loc[mask, "signal_date"].max().date())]}
     return m
 
 

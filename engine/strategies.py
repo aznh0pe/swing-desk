@@ -68,6 +68,10 @@ DEFAULT_PARAMS = {
              "max_open": 5, "min_position_usd": 150.0, "slippage_pct": 0.05},
     "filters": {"min_price": 10.0, "min_dv_stock": 30e6, "min_dv_etf": 20e6,
                 "earnings_buffer_days": 1, "allow_leveraged": True},
+    # position management the scans apply live, replayed in every backtest so the two never drift apart:
+    # the stop moves to entry + 1 ATR once a close is 2 ATR above the fill; a limit order only counts as
+    # filled when the session's low trades through it (a touch is not a fill)
+    "manage": {"lock_atr": 2.0, "lock_to": 1.0, "be_atr": 0, "fill": "through"},
     "grading": {"aplus_score": 80, "aplus_pwin": 0.70, "min_week": 3},
     "strategies": {
         "MR_STRETCH": {"enabled": True, "universe": "all", "rsi2_max": 10, "k_atr": 0.5,

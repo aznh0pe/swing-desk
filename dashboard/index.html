@@ -960,7 +960,20 @@ function viewScans() {
 function viewLab() {
   const bt = S.backtest; const P = S.params?.params || S.params; const G = P?.grading || bt?.grading || {};
   let html = `<section class="section"><div class="section-head"><h2>Strategy playbook</h2><span class="meta">${bt ? `Backtest ${esc(bt.period?.[0])} to ${esc(bt.period?.[1])} · ${esc(bt.tickers)} stocks & ETFs · out-of-sample from ${esc(bt.split)}` : "Backtest results load after the first calibration"}</span></div>`;
-  if (G.aplus_score) html += `<div class="banner info">A+ means score ≥ ${esc(G.aplus_score)} and estimated win rate ≥ ${pct(100 * G.aplus_pwin, 0)}.${G.oos_aplus_win_rate ? ` On out-of-sample data, setups at that bar won ${pct(100 * G.oos_aplus_win_rate)} of ${esc(G.oos_aplus_trades)} trades (avg ${spct(100 * G.oos_aplus_avg_ret, 2)}), about ${esc(G.oos_aplus_signals_per_week)} per week.` : ""}</div>`;
+  if (G.aplus_score) {
+    html += `<div class="banner info">A+ means score ≥ ${esc(G.aplus_score)} and estimated win rate ≥ ${pct(100 * G.aplus_pwin, 0)}.${G.oos_aplus_win_rate ? ` On out-of-sample data${G.oos_window ? ` (${esc(G.oos_window[0])} to ${esc(G.oos_window[1])})` : ""}, setups at that bar won ${pct(100 * G.oos_aplus_win_rate)} of ${esc(G.oos_aplus_trades)} trades (avg ${spct(100 * G.oos_aplus_avg_ret, 2)}), about ${esc(G.oos_aplus_signals_per_week)} per week.` : ""}</div>`;
+    if (Array.isArray(G.by_year) && G.by_year.length) {
+      const ts = G.time_split || {};
+      const yrs = G.by_year.map((r) => `<span class="pill ${r.win >= 0.75 ? "good" : r.win >= 0.68 ? "neutral" : "warn"}" title="${esc(r.trades)} trades, avg ${spct(100 * r.avg, 2)}">${esc(r.year)}: ${pct(100 * r.win, 0)} (${esc(r.trades)})</span>`).join(" ");
+      let split = "";
+      if (ts.chosen_bar_early && ts.chosen_bar_late) {
+        split = ` The bar was chosen on these same trades, so here is the check that matters: on ${esc(ts.chosen_bar_early.window?.[0])}–${esc(ts.chosen_bar_early.window?.[1])} it won ${pct(100 * ts.chosen_bar_early.win_rate)} (${esc(ts.chosen_bar_early.trades)} trades), on ${esc(ts.chosen_bar_late.window?.[0])}–${esc(ts.chosen_bar_late.window?.[1])} ${pct(100 * ts.chosen_bar_late.win_rate)} (${esc(ts.chosen_bar_late.trades)}).`;
+        split += ts.early_selection ? ` Choosing the bar on the first half alone (score ${esc(ts.early_selection.aplus_score)} / ${pct(100 * ts.early_selection.aplus_pwin, 0)}) would have won ${pct(100 * (ts.early_bar_on_late?.win_rate || 0))} on the second half it never saw.`
+          : ts.note ? ` ${esc(ts.note)}` : "";
+      }
+      html += `<div class="banner warn"><b>Honesty check, year by year.</b> A+ results cluster in market selloffs and vary a lot by year: ${yrs}.${split} Expect bear-market stretches where A+ setups win closer to two in three and earn little.</div>`;
+    }
+  }
   html += `<div class="banner info"><b>Why some strategies are Active and others Off.</b> A strategy trades live only while it clears five checks on 18 years of data: at least 58% winners and a profit factor of 1.30 or better on 2008–2021, an average trade above +0.20%, a profit factor of at least 1.05 on unseen 2022–now data, and a win rate that drops no more than 8 points on that unseen data. The daily review also pauses any strategy whose live record falls below 50% wins. Every Saturday all of them are re-tested on fresh data and switch on or off by themselves; each card says exactly which check decided it.</div>`;
   const strat = bt?.strategies || {};
   const names = Object.keys(strat).sort((a, b) => (strat[b].enabled ? 1 : 0) - (strat[a].enabled ? 1 : 0) || (strat[b].custom ? 0 : 1) - (strat[a].custom ? 0 : 1));

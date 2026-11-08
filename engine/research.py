@@ -18,6 +18,7 @@ import argparse
 import datetime as dt
 import json
 import pathlib
+import re
 import time
 
 import numpy as np
@@ -33,6 +34,7 @@ from .portfolio import load_collection, load_state
 
 QUALITY = {"oos_win": 0.62, "oos_pf": 1.15, "oos_trades": 80, "max_overlap": 0.70}
 SEED_FILE = pathlib.Path(__file__).resolve().parent / "research_seed.json"
+SEED_FILES = sorted(pathlib.Path(__file__).resolve().parent.glob("research_seed*.json"))  # the curated backlog
 STAT_KEYS = ("trades", "win_rate", "avg_ret", "profit_factor", "avg_hold", "trades_per_year", "worst_loss",
              "max_consec_losses", "exit_mix", "fill_rate", "avg_win", "avg_loss")
 
@@ -99,10 +101,15 @@ def _finish(out: pathlib.Path, writes: list, result: dict):
     print(json.dumps(result, indent=1, default=str))
 
 
-def idea_doc(spec: dict, by: str, now) -> dict:
-    return {"id": spec["id"], "label": spec["label"], "family": spec["family"], "about": spec["about"],
-            "source": spec.get("source"), "spec": spec, "rules": R.describe(spec), "signature": R.signature(spec),
-            "created_at": now.isoformat(timespec="seconds"), "created_by": by}
+def idea_doc(spec: dict, by: str, now, ideas: dict | None = None) -> dict:
+    doc = {"id": spec["id"], "label": spec["label"], "family": spec["family"], "about": spec["about"],
+           "source": spec.get("source"), "spec": spec, "rules": R.describe(spec), "signature": R.signature(spec),
+           "created_at": now.isoformat(timespec="seconds"), "created_by": by}
+    if ideas:
+        sim = similar_ideas(spec, ideas)
+        if sim:
+            doc["variant_of"] = sim[:3]
+    return doc
 
 
 def check_new(spec: dict, ideas: dict) -> list[str]:
@@ -116,6 +123,46 @@ def check_new(spec: dict, ideas: dict) -> list[str]:
         if d.get("signature") == sig or (d.get("spec") and R.signature(d["spec"]) == sig):
             return [f"same rules as {iid} ({d.get('label')})"]
     return []
+
+
+def _cond_set(spec: dict) -> set:
+    """Rule shapes with the numbers blanked out, so 'rsi2 < 10' and 'rsi2 < 20' count as the same rule."""
+    pr = (R.combos(spec) or [{}])[0]
+    return {re.sub(r"(?<![A-Za-z_])\d+(\.\d+)?", "#", re.sub(r"\s+", "", str(R.subst(c, pr)))) for c in spec.get("conditions") or []}
+
+
+def similar_ideas(spec: dict, ideas: dict, min_jaccard: float = 0.6) -> list[dict]:
+    """Ideas in the log whose rules mostly overlap this one (same universe, most conditions shared).
+    Not a refusal: a variant is welcome, but it is recorded as one so the log shows what it builds on."""
+    mine = _cond_set(spec)
+    out = []
+    for iid, d in ideas.items():
+        sp = d.get("spec") or {}
+        if not sp or iid == spec.get("id"):
+            continue
+        theirs = _cond_set(sp)
+        if not mine or not theirs:
+            continue
+        j = len(mine & theirs) / len(mine | theirs)
+        if j >= min_jaccard:
+            out.append({"id": iid, "label": d.get("label"), "shared_rules": round(j, 2)})
+    return sorted(out, key=lambda x: -x["shared_rules"])
+
+
+def seed_backlog(ideas: dict) -> list[dict]:
+    """Curated ideas (engine/research_seed*.json) not yet in the research log, in file order."""
+    out, seen = [], set()
+    for f in SEED_FILES:
+        try:
+            specs = json.loads(f.read_text())
+        except Exception:
+            continue
+        for sp in specs:
+            if sp.get("id") in ideas or sp.get("id") in seen or check_new(sp, ideas):
+                continue
+            seen.add(sp["id"])
+            out.append(sp)
+    return out
 
 
 # ----------------------------------------------------------------------------- testing
@@ -245,8 +292,9 @@ def run_tests(specs: list[dict], data_dir, state_dir, out_dir, split="2022-01-01
     log(f"history + indicators ready in {time.time() - t0:.0f}s ({w['close'].shape[0]} days x {w['close'].shape[1]} tickers)")
     P = S.params_with_defaults(None)
     P_live = load_params(load_state(state_dir), None)
+    known = load_ideas(state_dir)
     for spec in ideas_to_add or []:
-        _write(out, writes, "research", spec["id"], idea_doc(spec, by, now))
+        _write(out, writes, "research", spec["id"], idea_doc(spec, by, now, known))
     for spec in specs:
         log(f"testing {spec.get('id')} ...")
         try:
@@ -267,13 +315,25 @@ def run_tests(specs: list[dict], data_dir, state_dir, out_dir, split="2022-01-01
 
 # ----------------------------------------------------------------------------- CLI
 def cmd_next(state_dir, out_dir):
+    """What to test next: a queued idea from the log; otherwise the next untested idea from the curated
+    backlog (engine/research_seed*.json), written to <out>/seed_spec.json so `test --spec` can take it.
+    Only when both are empty does the daily run have to research a brand-new idea on the web."""
     ideas, latest = load_ideas(state_dir), latest_results(load_results(state_dir))
     queued = sorted([d for i, d in ideas.items() if i not in latest], key=lambda d: str(d.get("created_at", "")))
     known = [{"id": i, "label": d.get("label"), "family": d.get("family"),
               "verdict": (latest.get(i) or {}).get("verdict", "queued")} for i, d in sorted(ideas.items())]
-    res = {"next": queued[0]["id"] if queued else None, "queued": [d["id"] for d in queued], "known": known}
     out = pathlib.Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    res = {"next": queued[0]["id"] if queued else None, "queued": [d["id"] for d in queued], "known": known}
+    backlog = seed_backlog(ideas)
+    res["backlog"] = [sp["id"] for sp in backlog]
+    if not queued and backlog:
+        sp = backlog[0]
+        (out / "seed_spec.json").write_text(json.dumps(sp, indent=1))
+        res.update(next=sp["id"], from_backlog=True, spec_file=str((out / "seed_spec.json").resolve()),
+                   similar=similar_ideas(sp, ideas))
+    families = sorted({str(d.get("family", "")).split("/")[0].strip() for d in ideas.values()} - {""})
+    res["families_covered"] = families
     (out / "next.json").write_text(json.dumps(res, indent=1))
     print(json.dumps(res, indent=1))
 
