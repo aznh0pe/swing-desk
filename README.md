@@ -37,6 +37,23 @@ factor >= 1.05 with a win rate no more than 8 points below in-sample. The weekly
 recalibration re-tests all of them; the daily review pauses one whose live record drops
 below 50%. The reasons are written into the backtest report and shown in the Strategy lab.
 
+What the backtest assumes (`engine/backtest.py`): a limit order fills only when the session's
+low trades through it (a touch is not a fill); stops and time exits pay 0.05% slippage (or your
+measured stop slippage once there are 10 fills); and the position-management rules the scans
+apply live are replayed in every backtest so the two cannot drift apart. Those rules were
+measured in Nov 2026 before being adopted: a breakeven stop after +1 ATR cost about a point of
+A+ win rate and was dropped; moving the stop to entry + 1 ATR once a close is 2 ATR above the
+fill changed nothing measurable and is kept; a close below the 50-day average ends only the
+trend-following setups (on the dip-buying Leader Pullback it cut the win rate 68.5% -> 64.5%).
+The grid search also has a fill-rate floor (45%), so a limit can't be tuned so deep that it
+looks great per fill but rarely fills.
+
+The A+ bar (score and win-odds cut-offs) is chosen on the 2022-now trades, and the backtest
+report says so: `grading.by_year` gives the A+ win rate in each calendar year and
+`grading.time_split` repeats the selection on 2022-2023 alone and measures it on 2024-now.
+A+ results cluster in selloffs and vary a lot by year (about 66% winners and little profit in
+the 2022 bear market, 85-90% in 2024-2026); the dashboard shows this next to the headline figure.
+
 ## Strategy research
 
 New ideas are plain JSON rule specs (`engine/rules.py` documents the format and the fields
@@ -51,10 +68,12 @@ python -m engine.research test --queued 3 --data data --state state --out rs
 `test` tunes the idea's small grid on 2008-2021 only, then reports unseen 2022-now results,
 the live-trading checks and how many of its signals the live strategies already take.
 Verdicts: candidate (>= 62% wins and PF >= 1.15 on unseen data, mostly new trades), watch,
-redundant, rejected. The daily learning task tests one or two ideas (a queued one, or a new
-one it researched that day); `engine/research_seed.json` is the starter backlog. Saturday's
-recalibration evaluates the candidates with the live strategies and keeps one on only if it
-passes the live checks and keeps or raises the A+ win rate and average trade.
+redundant, rejected. The daily learning task tests one or two ideas every trading day: a queued
+one, else the next untested idea from the curated backlog (`engine/research_seed*.json`, which
+`research next` hands over as `seed_spec.json`), else a new one it researches on the web that day.
+Each new idea records which earlier ideas it is a variant of (`variant_of`, from shared rules).
+Saturday's recalibration evaluates the candidates with the live strategies and keeps one on only
+if it passes the live checks and keeps or raises the A+ win rate and average trade.
 
 ## Dashboard refresh and Scan now
 
