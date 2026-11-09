@@ -363,6 +363,17 @@ def why_text(cd) -> list[str]:
     return w
 
 
+def current_overlay(state) -> dict:
+    """Each alert's latest scan-side update, newest scan wins: the same view the dashboard shows."""
+    scans = sorted((v["doc"] for v in (state.get("scans") or {}).values()), key=lambda d: str(d.get("started_at") or ""))
+    ov: dict = {}
+    for sc in scans:
+        for aid, u in (sc.get("alert_updates") or {}).items():
+            if isinstance(u, dict):
+                ov[aid] = {**u, "_scan": sc.get("id"), "_at": sc.get("started_at")}
+    return ov
+
+
 def overlay_ctx(state, mode, session_day, today, now) -> dict:
     """What a later step needs to refresh alerts that already exist on the dashboard."""
     existing = [aid for aid, v in state["alerts"].items() if v["doc"].get("type") == "entry"]
@@ -421,9 +432,13 @@ def headline(scan_doc: dict) -> str:
         bits.append(f"{c['fills_to_confirm']} fill{'s' if c['fills_to_confirm'] != 1 else ''} to confirm")
     if c.get("positions_to_check"):
         bits.append(f"{c['positions_to_check']} position{'s' if c['positions_to_check'] != 1 else ''} to check")
-    cancels = sum(1 for x in scan_doc.get("premarket_checks") or [] if x.get("verdict") == "cancel")
+    pmc = scan_doc.get("premarket_checks") or []
+    cancels = sum(1 for x in pmc if x.get("verdict") == "cancel" or (x.get("verdict") == "withdrawn" and x.get("placed")))
     if cancels:
         bits.append(f"{cancels} order{'s' if cancels != 1 else ''} to cancel")
+    dont = sum(1 for x in pmc if x.get("verdict") == "withdrawn" and not x.get("placed"))
+    if dont:
+        bits.append(f"{dont} withdrawn setup{'s' if dont != 1 else ''} not to place")
     wd = sum(1 for v in (scan_doc.get("alert_updates") or {}).values() if v.get("withdrawn"))
     if wd:
         bits.append(f"{wd} withdrawn")
@@ -550,18 +565,37 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
     # pending entry alerts: expire / premarket re-check
     expire, pm_checks = [], []
     today = now.date()
+    prev_ov = current_overlay(state) if mode == "premarket" else {}
     for aid, v in state["alerts"].items():
         a = v["doc"]
-        if a.get("type") != "entry" or a.get("status") not in ("new", None):
+        # orders you marked as placed are checked before the open too: they are the ones that can fill
+        if a.get("type") != "entry" or a.get("status") not in ("new", "placed", None):
             continue
         try:
             vf = cal._d(a.get("valid_for"))
         except Exception:
             continue
         if vf < today or (vf == today and mode == "postclose" and cal.market_phase(now) in ("postclose", "closed_day")):
-            expire.append((aid, v.get("version")))
+            if a.get("status") in ("new", None):  # a placed order stays until you mark it filled or skipped
+                expire.append((aid, v.get("version")))
         elif mode == "premarket" and vf == today:
-            pm_checks.append(premarket_check(a, premarket, earnings, today))
+            prev = prev_ov.get(aid) or {}
+            if prev.get("withdrawn"):
+                # a later scan already dropped it: say so instead of "keep", so a withdrawn order is never placed
+                when = ""
+                try:
+                    when = dt.datetime.fromisoformat(str(prev.get("_at"))).strftime(" %a %-I:%M %p")
+                except Exception:
+                    pass
+                placed = a.get("status") == "placed"
+                pm_checks.append({"alert_id": aid, "ticker": a.get("ticker"), "verdict": "withdrawn", "placed": placed,
+                                  "text": f"Withdrawn by the{when} scan: {prev.get('withdrawn_reason') or 'it no longer qualifies.'} "
+                                  + ("You marked it placed: CANCEL it before the open." if placed else "Don't place it; cancel it if you did.")})
+            else:
+                c = premarket_check(a, premarket, earnings, today)
+                c["placed"] = a.get("status") == "placed"
+                pm_checks.append(c)
+    pm_checks.sort(key=lambda c: ({"cancel": 0, "withdrawn": 1, "caution": 2}.get(c.get("verdict"), 3), str(c.get("ticker"))))
     # writes: create-only. A document that already exists (a re-run of the same scan
     # window, or one you've already acted on) is never overwritten; this scan's view of it
     # travels in the scan document's alert_updates instead.
@@ -754,8 +788,11 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
     for n in scan.get("notes") or []:
         lines.append(f"Note: {n}")
 
+    # before the open, today's session is the next hold day (the dashboard counts it the same way)
+    day_add = 1 if scan["mode"] == "premarket" else 0
+
     def pos_line(p):
-        return f"[last ${p['last']}, P&L ${p['unrealized']} ({p.get('unrealized_pct')}%), day {p['days_held']} of {p['max_hold']}]"
+        return f"[last ${p['last']}, P&L ${p['unrealized']} ({p.get('unrealized_pct')}%), day {p['days_held'] + day_add} of {p['max_hold']}]"
 
     sigs = sorted(((p, sg) for p in positions for sg in p.get("signals", [])), key=lambda x: SIGNAL_ORDER.get(x[1]["code"], 99))
     exits = [(p, sg) for p, sg in sigs if sg["code"] in EXIT_CODES]
@@ -763,8 +800,14 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
     raises = [(p, sg) for p, sg in sigs if sg["code"] in RAISE_CODES]
     checks = [(p, sg) for p, sg in sigs if sg["code"] in CHECK_CODES]
     notices = [(p, sg) for p, sg in sigs if sg["code"] in NOTICE_CODES]
+    step = [0]
+
+    def numbered(title):  # action sections are numbered in the order they appear
+        step[0] += 1
+        return f"=== {step[0]}. {title} ==="
+
     if exits or checks:
-        lines += ["", "=== 1. EXIT NOW / ACT ON THESE POSITIONS ==="]
+        lines += ["", numbered("EXIT NOW / ACT ON THESE POSITIONS")]
         for p, sg in exits + checks:
             lines.append(f"- {p['ticker']}: {sg['action']} ({sg['urgency']}). {sg['text']} {pos_line(p)}")
     if fills:
@@ -772,13 +815,14 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
         for p, sg in fills:
             lines.append(f"- {p['ticker']}: {sg['action']}. {sg['text']} {pos_line(p)}")
     if raises:
-        lines += ["", "=== 2. STOPS TO RAISE ==="]
+        lines += ["", numbered("STOPS TO RAISE")]
         for p, sg in raises:
             lines.append(f"- {p['ticker']}: {sg['action']} (from ${p.get('stop')}). {sg['text']} {pos_line(p)}")
     if pm_checks:
-        lines += ["", "=== 3. PRE-MARKET CHECK OF TODAY'S ORDERS ==="]
+        lines += ["", numbered("PRE-MARKET CHECK OF TODAY'S ORDERS")]
         for c in pm_checks:
-            lines.append(f"- {c['ticker']}: {c['verdict'].upper()}. {c['text']}")
+            verdict = {"withdrawn": "WITHDRAWN, CANCEL IT" if c.get("placed") else "WITHDRAWN, DON'T PLACE"}.get(c["verdict"], c["verdict"].upper())
+            lines.append(f"- {c['ticker']}{' (marked placed)' if c.get('placed') else ''}: {verdict}. {c['text']}")
     wd = [(k, v) for k, v in (scan.get("alert_updates") or {}).items() if v.get("withdrawn")]
     if wd:
         lines += ["", "=== WITHDRAWN SETUPS (cancel these orders if you placed them) ==="]
@@ -801,7 +845,8 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
             sh = p.get("shares")
             sh = int(sh) if isinstance(sh, (int, float)) and float(sh).is_integer() else sh
             lines.append(f"- {p['ticker']} | {label} | entered {_day(p.get('entry_date'))} at ${p.get('entry')} x {sh} | "
-                         f"last ${p['last']} ({_pct(p['last'], p.get('entry'))}) | P&L ${p['unrealized']} | day {p['days_held']} of {p['max_hold']}"
+                         f"last ${p['last']} ({_pct(p['last'], p.get('entry'))}) | P&L ${p['unrealized']} | day {min(p['days_held'] + day_add, p['max_hold'])} of {p['max_hold']}"
+                         f"{' (today)' if day_add else ''}"
                          f"{f', time stop at the close of {_day(end)}' if end else ''} | stop ${p.get('stop')} | target ${p.get('target')} | {status}")
             dyn = p.get("dyn_exit")
             if dyn and dyn != "none":

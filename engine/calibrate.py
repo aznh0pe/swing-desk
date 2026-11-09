@@ -627,11 +627,12 @@ def run_learning(data_dir, state_dir, out_dir, now=None) -> dict:
     if not sh.empty:
         sh["ret"] = sh["exit"] / sh["fill"] - 1
     trades = [v["doc"] for v in state["trades"].values()]
-    closed = pd.DataFrame([t for t in trades if t.get("status") == "closed" and t.get("exit_price")])
+    from .portfolio import merged_closed_trades
+    closed_list = merged_closed_trades(trades)  # a position sold in parts counts once
+    closed = pd.DataFrame(closed_list)
     if not closed.empty:
         closed["ret"] = closed["exit_price"].astype(float) / closed["entry_price"].astype(float) - 1
     from . import learnlog as LL
-    closed_list = [t for t in trades if t.get("status") == "closed" and t.get("exit_price")]
     prev_stats = ((state.get("learning") or {}).get("stats") or {}).get("doc")
     stats = LL.stats_doc(prev_stats, alerts, shadow, closed_list, len(state["alerts"]) < 1000, now)
     by = {}

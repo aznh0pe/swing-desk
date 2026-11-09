@@ -198,3 +198,48 @@ def test_risk_governor_steps_down_and_restores():
     # the user's own setting below the floor is respected as is
     low = dict(base); low["settings"] = {"risk_pct": 1.0}
     assert risk_governor(low, 5000, low["settings"])["risk_pct"] == 1.0
+
+
+def test_a_position_sold_in_parts_counts_once():
+    from engine.portfolio import merged_closed_trades, risk_governor
+    parent = {"id": "t_1", "ticker": "CRM", "status": "closed", "entry_price": 200.0, "shares": 1, "exit_price": 190.0,
+              "exit_date": "2026-11-12", "exit_reason": "Stop filled", "pnl": -10.0, "r_mult": -0.5, "strategy": "FAIR_VALUE", "days_held": 4}
+    part = {"id": "t_1_sabc", "parent_id": "t_1", "ticker": "CRM", "status": "closed", "entry_price": 200.0, "shares": 1, "exit_price": 230.0,
+            "exit_date": "2026-11-10", "exit_reason": "Target filled", "pnl": 30.0, "r_mult": 1.5, "strategy": "FAIR_VALUE", "days_held": 2}
+    other = {"id": "t_2", "status": "closed", "entry_price": 50.0, "shares": 2, "exit_price": 49.0, "exit_date": "2026-11-11", "pnl": -2.0}
+    still_open = {"id": "t_3", "status": "open", "entry_price": 10.0, "shares": 5}
+    m = {t["id"]: t for t in merged_closed_trades([parent, part, other, still_open])}
+    assert set(m) == {"t_1", "t_2"}
+    crm = m["t_1"]
+    assert crm["shares"] == 2 and abs(crm["exit_price"] - 210.0) < 1e-9 and crm["pnl"] == 20.0 and crm["parts"] == 2
+    assert crm["exit_date"] == "2026-11-12" and crm["r_mult"] == 0.5 and "parent_id" not in crm
+    # a part sold while the rest is still open counts with the parts sold so far
+    only_part = merged_closed_trades([part, {**parent, "status": "open"}])
+    assert len(only_part) == 1 and only_part[0]["pnl"] == 30.0
+    # the governor's trailing win rate sees one trade per position
+    tr = {f"t{i}": {"doc": {"id": f"t{i}", "status": "closed", "entry_price": 100, "exit_price": 101 if i < 12 else 99,
+                            "exit_date": f"2026-12-{i+1:02d}"}} for i in range(20)}
+    tr.update({f"p{i}": {"doc": {"id": f"p{i}", "parent_id": "t0", "status": "closed", "entry_price": 100, "exit_price": 101,
+                                 "exit_date": "2026-12-01"}} for i in range(5)})
+    st = {"settings": {"risk_pct": 2.0}, "trades": tr, "learning": {},
+          "ledger": {"i": {"doc": {"type": "initial", "amount": 5000, "date": "2026-11-05"}}}}
+    g = risk_governor(st, 5000, st["settings"])
+    assert g["trailing_win"] == 0.6  # 20 positions, 12 winners: the five parts of t0 don't add wins
+
+
+def test_premarket_check_never_says_keep_for_a_withdrawn_order(tmp_path):
+    """Nov 9: the pre-market email listed CRWD and NUE as KEEP although later scans had withdrawn them."""
+    from engine import scan as SC
+    state = {"scans": {
+        "a": {"doc": {"id": "20261107-1243-postclose", "started_at": "2026-11-07T12:43:00-08:00",
+                      "alert_updates": {"e_2026-11-09_CRWD_MR_STRETCH": {"withdrawn": True, "withdrawn_reason": "No longer qualifies."}}}},
+        "b": {"doc": {"id": "20261107-0917-postclose", "started_at": "2026-11-07T09:17:00-08:00",
+                      "alert_updates": {"e_2026-11-09_CRWD_MR_STRETCH": {"withdrawn": False}}}}}}
+    ov = SC.current_overlay(state)
+    assert ov["e_2026-11-09_CRWD_MR_STRETCH"]["withdrawn"] is True  # newest scan wins, whatever the export order
+    doc = {"premarket_checks": [{"ticker": "CRWD", "verdict": "withdrawn", "placed": False},
+                                {"ticker": "NUE", "verdict": "withdrawn", "placed": True},
+                                {"ticker": "TWLO", "verdict": "keep"}],
+           "counts": {"aplus": 0}, "alert_updates": {}, "data": {"status": "ok"}}
+    h = SC.headline(doc)
+    assert "1 order to cancel" in h and "1 withdrawn setup not to place" in h

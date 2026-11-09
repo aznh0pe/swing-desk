@@ -135,7 +135,8 @@ def portfolio_stats(alerts: list, shadow: list, trades: list, ledger: list, toda
 
     entry_gap = [float(a["actual_price"]) / float(a["entry"]) - 1 for a in filled
                  if a.get("actual_price") and a.get("entry")]
-    closed = [t for t in trades if t.get("status") == "closed" and t.get("exit_price") and t.get("entry_price")]
+    from .portfolio import merged_closed_trades
+    closed = merged_closed_trades(trades)  # a position sold in parts counts once
     stop_exits = [float(t["exit_price"]) / float(t["stop"]) - 1 for t in closed
                   if str(t.get("exit_reason", "")).lower().startswith("stop") and t.get("stop")]
     live_rets = [float(t["exit_price"]) / float(t["entry_price"]) - 1 for t in closed]

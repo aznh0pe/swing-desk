@@ -147,6 +147,40 @@ td .t { font-family: var(--f-display); font-stretch: 85%; font-weight: 700; font
 .act .btns { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
 @media (max-width: 600px) { .act { grid-template-columns: minmax(0, 1fr); } .act .btns { justify-content: flex-start; } }
 
+/* open positions + record a sale */
+.g-pos { grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); align-items: start; }
+@media (max-width: 420px) { .g-pos { grid-template-columns: minmax(0, 1fr); } }
+.pos-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); display: flex; flex-direction: column; min-width: 0; }
+.pc-head { display: flex; gap: 12px; padding: 12px 14px 10px; align-items: flex-start; border-bottom: 1px dashed var(--line-2); }
+.pc-title { min-width: 0; flex: 1; }
+.pc-title .tk { font-family: var(--f-display); font-weight: 800; font-stretch: 78%; font-size: 24px; letter-spacing: .02em; line-height: 1.05; }
+.pc-title .nm { color: var(--ink-2); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pc-title .st { margin-top: 3px; font-size: 12.5px; color: var(--ink-2); }
+.pc-pnl { text-align: right; flex: none; }
+.pc-pnl .big { font-family: var(--f-mono); font-variant-numeric: tabular-nums; font-size: 19px; font-weight: 600; }
+.pc-pnl .lbl { font-size: 11.5px; color: var(--ink-3); }
+.pc-levels { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid var(--line); }
+.pc-levels > div { padding: 8px 10px; border-right: 1px solid var(--line); min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.pc-levels > div:last-child { border-right: 0; }
+.pc-levels .k { font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-3); }
+.pc-levels .v { font-family: var(--f-mono); font-variant-numeric: tabular-nums; font-weight: 600; font-size: 14px; white-space: nowrap; }
+.pc-levels .s { font-size: 12px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pc-signals { padding: 9px 14px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--ink-2); }
+.pc-signals .sigline { max-width: none; min-width: 0; }
+.pc-signals b { color: var(--ink); font-weight: 600; }
+.pc-sell { padding: 11px 14px 12px; display: grid; gap: 9px; background: var(--surface-2); border-top: 1px solid var(--line); }
+.pc-sell .row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+.pc-sell-h { font-size: 13px; color: var(--ink-2); } .pc-sell-h b { color: var(--ink); }
+.pc-quick { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.chip { border: 1px solid var(--line-2); background: var(--surface); color: var(--ink); border-radius: 999px; padding: 4px 11px; font-size: 12px; font-family: var(--f-mono); font-variant-numeric: tabular-nums; cursor: pointer; min-height: 30px; }
+.chip:hover { border-color: var(--accent); }
+.pc-foot { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.pc-foot > span.small { color: var(--ink-2); }
+.pc-warn { background: var(--warn-bg); color: var(--warn); border-radius: var(--r-sm); padding: 7px 10px; font-size: 12.5px; }
+.pc-actions { display: flex; gap: 6px; padding: 8px 14px 10px; border-top: 1px solid var(--line); }
+@media (max-width: 480px) { .pc-levels { grid-template-columns: repeat(2, minmax(0, 1fr)); } .pc-levels > div:nth-child(2) { border-right: 0; } .pc-levels > div:nth-child(-n+2) { border-bottom: 1px solid var(--line); } }
+@media (max-width: 600px) { .pc-sell input, .pc-sell select { font-size: 16px; } }
+
 .empty { border: 1px dashed var(--line-2); border-radius: var(--r); padding: 18px; color: var(--ink-2); background: var(--surface); }
 .empty b { color: var(--ink); }
 .banner { border-radius: var(--r); padding: 10px 13px; font-size: 13px; }
@@ -364,7 +398,21 @@ function latestMarks() {
   return out;
 }
 function closedTrades() { return S.trades.filter((t) => t.status === "closed" && num(t.exit_price) !== null).sort((a, b) => String(a.exit_date).localeCompare(String(b.exit_date))); }
+// A position sold in parts is one trade: its closed parts (parent_id) merge into one record for every statistic.
+function asPositions(list) {
+  const by = new Map();
+  for (const t of list) {
+    const k = t.parent_id || t.id; const cost = (num(t.entry_price) || 0) * (num(t.shares) || 0); const g = by.get(k);
+    if (!g) { by.set(k, { ...t, _cost: cost }); continue; }
+    g.pnl = (num(g.pnl) || 0) + (num(t.pnl) || 0); g.income_amount = (num(g.income_amount) || 0) + (num(t.income_amount) || 0);
+    g._cost += cost; if (g._cost) g.pnl_pct = (100 * g.pnl) / g._cost;
+    g.days_held = Math.max(num(g.days_held) || 0, num(t.days_held) || 0);
+    if (String(t.exit_date) > String(g.exit_date)) g.exit_date = t.exit_date;
+  }
+  return [...by.values()];
+}
 function statsOf(list) {
+  list = asPositions(list);
   const n = list.length; if (!n) return { n: 0 };
   const pnl = list.reduce((s, t) => s + (num(t.pnl) || 0), 0);
   const wins = list.filter((t) => num(t.pnl) > 0), losses = list.filter((t) => num(t.pnl) <= 0);
@@ -610,9 +658,15 @@ function modeLabel(m) { return { premarket: "Pre-market", preclose: "Pre-close",
 function render() {
   renderTabs(); renderChips(); renderRunbar();
   const m = $("#main");
+  // live data re-renders the page: keep what you've typed into a sale form, and where the cursor was
+  const kept = {}; m.querySelectorAll("[data-keep][id]").forEach((el) => { kept[el.id] = el.value; });
+  const focusId = document.activeElement && m.contains(document.activeElement) ? document.activeElement.id : "";
   const banner = S.dbError ? `<div class="banner crit">${esc(S.dbError)}</div>` : "";
   const v = { overview: viewOverview, alerts: viewAlerts, log: viewLog, funds: viewFunds, scans: viewScans, lab: viewLab }[S.tab]();
   m.innerHTML = banner + v + `<p class="disclaimer">Signals come from rules-based models tested on historical data. They are not personalized financial advice, and win percentages are estimates that can be wrong. You place and manage every order yourself.</p>`;
+  for (const [id, val] of Object.entries(kept)) { const el = document.getElementById(id); if (el && el.hasAttribute("data-keep") && el.value !== val) el.value = val; }
+  m.querySelectorAll("form[data-sell]").forEach((f) => { if (f.querySelector("input[id^='sp-']")?.value) sellPreview(f); });
+  if (focusId) document.getElementById(focusId)?.focus({ preventScroll: true });
   postRender();
 }
 let postRenderHooks = [];
@@ -638,6 +692,7 @@ function viewOverview() {
     ${kpi("Profit factor", hist.pf ? hist.pf.toFixed(2) : (hist.n ? "∞" : "–"), "Gross wins ÷ gross losses")}
     ${kpi("Open P&L", smoney(f.unreal), last ? `Marked at ${dtShort(last.started_at)}` : "Marks arrive with the first scan")}
   </div></section>`;
+  html += positionsSection("overview");
   html += `<section class="section"><div class="section-head"><h2>Performance</h2>
     <div class="seg" role="group" aria-label="Period">${[["month", "Monthly"], ["qtd", "QTD"], ["all", "Historical"]].map(([k, l]) => `<button type="button" data-perf="${k}" aria-pressed="${S.perf === k}">${l}</button>`).join("")}</div>
     <span class="meta">${selLabel}</span></div>
@@ -792,7 +847,7 @@ function viewAlerts() {
     ${extra.map((a) => `<tr><td><span class="t">${esc(a.ticker)}</span></td><td class="small">${esc(a.strategy_label)}</td><td class="n">${esc(a.score)}</td><td class="n">${pct(a.win_pct, 0)}</td><td class="n">${px(a.entry)}</td><td class="n">${px(a.stop)}</td><td class="n">${px(a.target)}</td><td class="n">${esc(a.shares)}${a.fractional ? "*" : ""}</td><td class="n">${money(a.total_cost)}</td><td class="small muted">${esc(String(a.capacity_note || "").replace(/^Also qualified \(|\)\..*$/g, ""))}</td>
       <td class="n" style="white-space:nowrap"><button class="btn small" type="button" data-act="fill" data-id="${esc(a.id)}">Filled</button> <button class="btn ghost small" type="button" data-act="skip" data-id="${esc(a.id)}">Skip</button></td></tr>`).join("")}
     </tbody></table></div></details>`;
-  html += `</section><section class="section"><div class="section-head"><h2>Open positions</h2><span class="meta">Filled orders being managed · hold days count trading sessions</span></div>${openTable()}</section>`;
+  html += `</section>` + positionsSection("alerts");
   const recent = S.alerts.filter((a) => a.type === "entry" && !entryLive(a)).slice(0, 15);
   if (recent.length) html += `<section class="section"><details><summary>Recently handled setups (${recent.length})</summary><div class="tbl-wrap" style="margin-top:8px"><table><thead><tr><th>Signal</th><th>Ticker</th><th>Strategy</th><th class="n">Score</th><th class="n">Win %</th><th class="n">Entry</th><th>Status</th></tr></thead><tbody>
     ${recent.map((a) => `<tr><td>${dShort(a.signal_date)}</td><td><span class="t">${esc(a.ticker)}</span></td><td>${esc(a.strategy_label)}</td><td class="n">${esc(a.score)}</td><td class="n">${pct(a.win_pct)}</td><td class="n">${px(a.entry)}</td><td>${statusPill(a.status === "new" ? (a.withdrawn ? "withdrawn" : "expired") : a.status)}${a.withdrawn && a.status === "new" ? `<div class="small muted">${hiCaution(a.withdrawn_reason || "")}</div>` : ""}</td></tr>`).join("")}
@@ -857,18 +912,110 @@ function actionCard(a) {
     <div class="why">${esc(a.text)}</div><div class="small muted">${dtShort(a.created_at)} · last ${px(a.last)} · P&L ${smoney(a.unrealized)} · day ${esc(a.days_held)}${a.days_left != null ? `, ${esc(Math.max(0, a.days_left))} left` : ""}</div></div>
     <div class="btns">${btns}</div></div>`;
 }
-function openTable() {
-  const open = S.trades.filter((t) => t.status === "open").sort((a, b) => String(a.entry_date).localeCompare(String(b.entry_date)));
-  if (!open.length) return `<div class="empty">No open positions. When a limit order fills, press <b>Mark done (filled)</b> on its ticket and enter your actual price; the position then shows here with its stop, target and hold clock.</div>`;
+// ---------------------------------------------------------------- open positions: status, exit plan and recording a sale
+const SELL_REASONS = ["Target filled", "Stop filled", "Exit signal (sold at close)", "Time stop", "Before earnings", "Trend break", "Manual"];
+const CODE_REASON = { TARGET_HIT: "Target filled", GAP_ABOVE_TARGET: "Target filled", STOP_HIT: "Stop filled", GAP_BELOW_STOP: "Stop filled",
+  EXIT_RULE: "Exit signal (sold at close)", TIME_STOP: "Time stop", EARNINGS: "Before earnings", TREND_BREAK: "Trend break" };
+const DYN_EXIT_TEXT = { sma5: "the first day it closes above its 5-day average", prev_high: "the first day it closes above the prior day's high",
+  high7: "the first day it closes at a 7-day closing high", rsi2_70: "the first day its RSI(2) closes above 70" };
+const mdShort = (d) => { const t = new Date(String(d).slice(0, 10) + "T12:00:00"); return isNaN(t) ? "" : t.toLocaleDateString("en-US", { month: "short", day: "numeric" }); };
+const kid = (id) => String(id).replace(/[^A-Za-z0-9_-]/g, "_");
+function shareStr(n) { const v = num(n); return v === null ? "–" : Number.isInteger(v) ? String(v) : String(+v.toFixed(3)); }
+function holdLastDay(t) {
+  let d = String(t.entry_date || "").slice(0, 10); if (!d) return null;
+  while (!isTradingDay(d)) d = addDays(d, 1);
+  for (let i = 1; i < Math.max(1, num(t.max_hold) || 7); i++) { d = addDays(d, 1); while (!isTradingDay(d)) d = addDays(d, 1); }
+  return d;
+}
+function openPositions() { return S.trades.filter((t) => t.status === "open").sort((a, b) => String(a.entry_date).localeCompare(String(b.entry_date))); }
+function positionsSection(where) {
+  const open = openPositions();
+  const meta = where === "overview" ? "Sold one, or part of one? Enter the actual sell price on its card" : "Filled orders being managed · hold days count trading sessions";
+  const head = `<div class="section-head"><h2>Open positions${open.length ? ` (${open.length})` : ""}</h2><span class="meta">${meta}</span></div>`;
+  if (!open.length) return `<section class="section">${head}<div class="empty">No open positions. When a limit order fills, press <b>Mark done (filled)</b> on its card in the Alerts tab and enter your actual price; the position then shows here with its stop, target, hold clock and a place to record the sale.</div></section>`;
   const marks = latestMarks();
-  return `<div class="tbl-wrap"><table><thead><tr><th>Ticker</th><th>Strategy</th><th>Entered</th><th class="n">Entry</th><th class="n">Shares</th><th class="n">Cost</th><th class="n">Stop</th><th class="n">Target</th><th class="n">Last</th><th class="n">Open P&L</th><th class="n">Hold left</th><th>Signals</th><th></th></tr></thead><tbody>
-  ${open.map((t) => { const m = marks[t.id] || {}; const held = heldDays(t); const left = (num(t.max_hold) || 7) - held;
-    // what the latest scan says to do with this position, and why (the same reason as its alert card)
-    const sig = (m.signals || []).map((s) => `<div class="sigline"><span class="pill ${s.level === "alert" ? "crit" : s.level === "good" ? "good" : "info"}">${esc(s.action || s.code.replace(/_/g, " ").toLowerCase())}</span> <span class="small">${hiCaution(s.text || "")}</span></div>`).join("")
-      + ((m.signals || []).length && m.scan_at ? `<div class="small muted">from the ${dtShort(m.scan_at)} scan</div>` : "");
-    return `<tr><td><span class="t">${esc(t.ticker)}</span></td><td class="small">${esc(t.strategy_label || t.strategy || "Manual")}</td><td>${dShort(t.entry_date)}</td><td class="n">${px(t.entry_price)}</td><td class="n">${esc(t.shares)}</td><td class="n">${money(num(t.entry_price) * num(t.shares))}</td><td class="n">${px(t.stop)}</td><td class="n">${px(t.target)}</td><td class="n">${px(m.last)}</td><td class="n ${signCls(m.unrealized)}">${m.unrealized != null ? `${smoney(m.unrealized)}<br><span class="muted small">${spct(m.unrealized_pct)}</span>` : "–"}</td><td class="n">${left > 0 ? `${left} of ${esc(t.max_hold || 7)} d` : `<span class="pill crit">time stop</span>`}</td><td>${sig || '<span class="muted small">none</span>'}</td>
-    <td class="n"><button class="btn small" type="button" data-act="close" data-tid="${esc(t.id)}">Close</button> <button class="btn ghost small" type="button" data-act="edit" data-tid="${esc(t.id)}">Edit</button></td></tr>`; }).join("")}
-  </tbody></table></div>`;
+  return `<section class="section">${head}<div class="grid g-pos">${open.map((t) => positionCard(t, marks[t.id] || {})).join("")}</div></section>`;
+}
+function positionCard(t, m) {
+  const id = t.id, k = kid(id), entry = num(t.entry_price), sh = num(t.shares), stop = num(t.stop), tgt = num(t.target);
+  const last = num(m.last), held = heldDays(t), maxH = num(t.max_hold) || 7, end = holdLastDay(t);
+  const pnl = last !== null && entry !== null && sh !== null ? (last - entry) * sh : null;
+  const pnlPct = last !== null && entry ? (100 * (last - entry)) / entry : null;
+  const sigs = m.signals || [];
+  const sigWhy = sigs.map((s) => CODE_REASON[s.code]).find(Boolean) || "";
+  const sigHtml = sigs.length
+    ? sigs.map((s) => `<div class="sigline"><span class="pill ${s.level === "alert" ? "crit" : s.level === "good" ? "good" : "info"}">${esc(s.action || s.code.replace(/_/g, " ").toLowerCase())}</span> <span class="small">${hiCaution(s.text || "")}</span></div>`).join("")
+      + (m.scan_at ? `<div class="small muted">from the ${dtShort(m.scan_at)} scan</div>` : "")
+    : `<div class="small muted">${m.scan_at ? `No exit signal in the ${dtShort(m.scan_at)} scan: hold.` : "The next scan marks this position and checks its exits."}</div>`;
+  const dyn = DYN_EXIT_TEXT[t.dyn_exit];
+  const chip = (label, v, why) => v === null ? "" : `<button type="button" class="chip" data-act="sellfill" data-tid="${esc(id)}" data-px="${v.toFixed(2)}" data-why="${esc(why)}">${label} ${px(v)}</button>`;
+  const lvl = (lbl, v, sub) => `<div><div class="k">${lbl}</div><div class="v">${v}</div><div class="s">${sub || "&nbsp;"}</div></div>`;
+  const today = todayPT(), entryDay = String(t.entry_date || "").slice(0, 10);
+  return `<article class="pos-card" aria-label="${esc(t.ticker)} position">
+    <div class="pc-head"><div class="pc-title"><div class="tk">${esc(t.ticker)}</div>${t.name ? `<div class="nm" title="${esc(t.name)}">${esc(t.name)}</div>` : ""}
+      <div class="st">${esc(t.strategy_label || t.strategy || "Manual")} · entered ${dShort(t.entry_date)}${num(t.sold_shares) ? ` · ${shareStr(t.sold_shares)} sh sold so far` : ""}</div></div>
+      <div class="pc-pnl"><div class="lbl">Open P&L</div><div class="big">${pnl !== null ? `<span class="${signCls(pnl)}">${smoney(pnl)}</span>` : "–"}</div><div class="lbl">${pnlPct !== null ? `${spct(pnlPct)} · last ${px(last)}` : "no mark yet"}</div></div></div>
+    <div class="pc-levels">
+      ${lvl("Entry", px(entry), `${shareStr(sh)} sh`)}
+      ${lvl("Stop", px(stop), entry && stop ? spct((100 * (stop - entry)) / entry) : "")}
+      ${lvl("Target", px(tgt), entry && tgt ? spct((100 * (tgt - entry)) / entry) : "")}
+      ${lvl("Hold day", `${Math.min(Math.max(1, held), maxH)} of ${maxH}`, end ? `ends ${mdShort(end)}` : "")}
+    </div>
+    <div class="pc-signals"><div class="small"><b>Exit plan:</b> the target and stop sit in your bracket${dyn ? `; sell at the close ${esc(dyn)}` : ""}; sell by the close of ${end ? dShort(end) : "the last hold day"} at the latest (time stop). The scans tell you when.</div>${sigHtml}</div>
+    <form class="pc-sell" data-sell="${esc(id)}" data-hold novalidate>
+      <div class="pc-sell-h"><b>Sold it?</b> Record the actual sale here (all of it or part).</div>
+      <div class="row">
+        <label class="f" for="sp-${k}">Actual sell price<input id="sp-${k}" data-keep type="number" inputmode="decimal" step="0.01" min="0" placeholder="${last !== null ? last.toFixed(2) : "0.00"}" autocomplete="off"></label>
+        <label class="f" for="ss-${k}">Shares sold<input id="ss-${k}" data-keep type="number" inputmode="decimal" step="any" min="0" value="${esc(shareStr(sh))}"></label>
+        <label class="f" for="sd-${k}">Sell date<input id="sd-${k}" data-keep type="date" value="${today}" max="${today}"${entryDay ? ` min="${esc(entryDay)}"` : ""}></label>
+        <label class="f" for="sr-${k}">Reason<select id="sr-${k}" data-keep>${SELL_REASONS.map((r) => `<option ${r === (sigWhy || "Manual") ? "selected" : ""}>${esc(r)}</option>`).join("")}</select></label>
+      </div>
+      <div class="pc-quick"><span class="small muted">Quick fill:</span>${chip("Target", tgt, "Target filled")}${chip("Stop", stop, "Stop filled")}${chip("Last", last, sigWhy || "Manual")}</div>
+      <div class="pc-foot"><span class="small" id="sv-${k}" aria-live="polite">Enter the price your brokerage filled.</span><button class="btn primary small" type="submit">Record sale</button></div>
+      <div class="pc-warn" id="sw-${k}" role="alert" hidden></div>
+    </form>
+    <div class="pc-actions"><button class="btn ghost small" type="button" data-act="edit" data-tid="${esc(id)}">Edit position</button></div>
+  </article>`;
+}
+function sellPreview(form) {
+  const t = tradeById(form.dataset.sell); if (!t) return;
+  const k = kid(t.id), out = $("#sv-" + k), warn = $("#sw-" + k); if (!out) return;
+  if (warn) warn.hidden = true; delete form.dataset.confirm;
+  const ex = Number($("#sp-" + k).value), sold = Number($("#ss-" + k).value), entry = num(t.entry_price), held = num(t.shares), st = settings();
+  if (!(ex > 0) || !entry) { out.textContent = "Enter the price your brokerage filled."; return; }
+  const q = sold > 0 && sold <= held ? sold : held;
+  const pnl = (ex - entry) * q, stop = num(t.stop);
+  const r = stop && entry > stop ? (ex - entry) / (entry - stop) : null;
+  const inc = pnl > 0 ? (pnl * (Number(st.income_default_pct) || 0)) / 100 : 0;
+  out.innerHTML = `P&L <b class="${signCls(pnl)}">${smoney(pnl)}</b> (${spct((100 * (ex - entry)) / entry, 2)}${r !== null ? `, ${r >= 0 ? "+" : "−"}${Math.abs(r).toFixed(2)} R` : ""})`
+    + (inc > 0 ? ` · ${money(inc)} set aside as income (${esc(st.income_default_pct)}%)` : "")
+    + (q < held - 1e-9 ? ` · ${shareStr(held - q)} sh stay open` : "");
+}
+function invalid(message) { return { code: "invalid_argument", message }; }
+async function submitSale(form) {
+  const t = tradeById(form.dataset.sell);
+  if (!t || t.status !== "open") { toast("That position is already closed."); return; }
+  const k = kid(t.id), btn = form.querySelector("button[type=submit]");
+  const ex = need($("#sp-" + k).value, "Sell price");
+  const held = num(t.shares), sold = Number($("#ss-" + k).value);
+  if (!(sold > 0)) throw invalid("Shares sold must be more than 0.");
+  if (sold > held + 1e-9) throw invalid(`You hold ${shareStr(held)} share${held === 1 ? "" : "s"} of ${t.ticker}; shares sold can't be more than that.`);
+  const date = $("#sd-" + k).value || todayPT(), entryDay = String(t.entry_date || "").slice(0, 10);
+  if (date > todayPT()) throw invalid("The sell date can't be in the future.");
+  if (entryDay && date < entryDay) throw invalid(`The sell date is before the entry date (${dShort(entryDay)}).`);
+  // typo guard: a price far from the last mark needs a second press
+  const mk = num((latestMarks()[t.id] || {}).last), ref = mk ?? num(t.entry_price), dev = ref ? ex / ref - 1 : 0;
+  if (Math.abs(dev) > 0.25 && form.dataset.confirm !== String(ex)) {
+    const w = $("#sw-" + k);
+    w.textContent = `${px(ex)} is ${Math.abs(100 * dev).toFixed(0)}% ${dev < 0 ? "below" : "above"} the ${mk !== null ? "last price" : "entry price"} ${px(ref)}. Check it for a typo, then press Record sale again to save it.`;
+    w.hidden = false; form.dataset.confirm = String(ex); return;
+  }
+  btn.disabled = true;
+  try {
+    await closeTrade(t, ex, date, $("#sr-" + k).value || "Manual", Number(settings().income_default_pct) || 0, null, sold);
+    form.querySelectorAll("[data-keep]").forEach((el) => el.removeAttribute("data-keep"));  // a recorded sale doesn't carry into the next render
+    document.activeElement?.blur?.();
+  } finally { btn.disabled = false; flushRender(); }
 }
 
 // ---------------------------------------------------------------- trade log
@@ -1163,30 +1310,48 @@ function closeModal(t, pre = {}) {
   const defPx = pre.price ?? m.last ?? t.target;
   modal(`Close ${t.ticker}`, `<p class="small muted" style="margin:0">Entered ${dShort(t.entry_date)} at ${px(t.entry_price)} × ${esc(t.shares)} shares.</p>
     <div class="form"><div class="row"><label class="f" for="cPx">Actual sell price<input id="cPx" type="number" step="0.01" min="0" value="${esc(defPx != null ? Number(defPx).toFixed(2) : "")}" required></label>
-    <label class="f" for="cDt">Sell date<input id="cDt" type="date" value="${todayPT()}" required></label>
+    <label class="f" for="cSh">Shares sold<input id="cSh" type="number" step="any" min="0" value="${esc(shareStr(t.shares))}" required></label>
+    <label class="f" for="cDt">Sell date<input id="cDt" type="date" value="${todayPT()}" max="${todayPT()}" required></label>
     <label class="f" for="cWhy">Reason<select id="cWhy">${["Target filled", "Stop filled", "Exit signal (sold at close)", "Time stop", "Before earnings", "Trend break", "Manual"].map((r) => `<option ${r === pre.reason ? "selected" : ""}>${r}</option>`).join("")}</select></label></div>
     <label class="f" for="cInc">Income to take if profitable (% of profit)<input id="cInc" type="number" min="0" max="100" step="1" value="${esc(st.income_default_pct)}"></label>
     <div class="small muted" id="cPrev"></div></div>`, "Close trade", async () => {
-      const ex = need($("#cPx").value, "Sell price"); const d = $("#cDt").value; const incPct = Math.min(100, Math.max(0, Number($("#cInc").value) || 0));
-      await closeTrade(t, ex, d, $("#cWhy").value, incPct, pre.alertId);
+      const ex = need($("#cPx").value, "Sell price"); const d = $("#cDt").value || todayPT(); const incPct = Math.min(100, Math.max(0, Number($("#cInc").value) || 0));
+      const sold = Number($("#cSh").value);
+      if (!(sold > 0) || sold > num(t.shares) + 1e-9) throw invalid(`Shares sold must be between 0 and ${shareStr(t.shares)}.`);
+      if (d > todayPT() || (t.entry_date && d < String(t.entry_date).slice(0, 10))) throw invalid("The sell date must be between the entry date and today.");
+      await closeTrade(t, ex, d, $("#cWhy").value, incPct, pre.alertId, sold);
     });
-  const prev = () => { const ex = Number($("#cPx").value); if (!ex) return; const pnl = (ex - num(t.entry_price)) * num(t.shares); $("#cPrev").textContent = `P&L ${smoney(pnl)} (${spct((100 * (ex - t.entry_price)) / t.entry_price, 2)})` + (pnl > 0 ? ` · income ${money((pnl * (Number($("#cInc").value) || 0)) / 100)}` : ""); };
-  $("#cPx").addEventListener("input", prev); $("#cInc").addEventListener("input", prev); prev();
+  const prev = () => { const ex = Number($("#cPx").value); if (!ex) return; const q = Math.min(num(t.shares), Number($("#cSh").value) || num(t.shares)); const pnl = (ex - num(t.entry_price)) * q; $("#cPrev").textContent = `P&L ${smoney(pnl)} (${spct((100 * (ex - t.entry_price)) / t.entry_price, 2)})` + (pnl > 0 ? ` · income ${money((pnl * (Number($("#cInc").value) || 0)) / 100)}` : "") + (q < num(t.shares) ? ` · ${shareStr(num(t.shares) - q)} sh stay open` : ""); };
+  $("#cPx").addEventListener("input", prev); $("#cInc").addEventListener("input", prev); $("#cSh").addEventListener("input", prev); prev();
 }
-async function closeTrade(t, ex, date, reason, incPct, alertId) {
-  const entry = num(t.entry_price), sh = num(t.shares);
+async function closeTrade(t, ex, date, reason, incPct, alertId, sold) {
+  const entry = num(t.entry_price), held = num(t.shares);
+  // part of an open position: the sold shares become their own closed trade (parent_id links them; every
+  // statistic counts the position once) and the rest stays open with its stop, target and hold clock
+  const partial = t.status === "open" && sold != null && sold > 0 && sold < held - 1e-9;
+  const sh = partial ? +(+sold).toFixed(6) : held;
+  const id = partial ? `${t.id}_s${Date.now().toString(36)}` : t.id;
   const pnl = +((ex - entry) * sh).toFixed(2); const pnlPct = +((100 * (ex - entry)) / entry).toFixed(3);
   const risk = num(t.stop) && entry > num(t.stop) ? (entry - num(t.stop)) : null;
-  const held = tradingDaysBetween(t.entry_date, date) + (isTradingDay(t.entry_date) ? 1 : 0);
+  const daysHeld = tradingDaysBetween(t.entry_date, date) + (isTradingDay(t.entry_date) ? 1 : 0);
   const income = pnl > 0 ? +((pnl * incPct) / 100).toFixed(2) : 0;
-  await updDoc("trades/" + t.id, { status: "closed", exit_price: ex, exit_date: date, exit_reason: reason, pnl, pnl_pct: pnlPct, r_mult: risk ? +((ex - entry) / risk).toFixed(2) : null,
-    days_held: held, income_pct: pnl > 0 ? incPct : 0, income_amount: income, closed_at: nowIso() });
-  await setDoc("ledger/pnl_" + t.id, { id: "pnl_" + t.id, type: "pnl", amount: pnl, date, ticker: t.ticker, trade_id: t.id, created_at: nowIso() });
-  if (income > 0) await setDoc("ledger/inc_" + t.id, { id: "inc_" + t.id, type: "income", amount: -income, date, ticker: t.ticker, trade_id: t.id, pct: incPct, created_at: nowIso() });
-  else if (S.ledger.some((l) => l.id === "inc_" + t.id)) await S.db.doc("ledger/inc_" + t.id).delete();
+  const fields = { status: "closed", exit_price: ex, exit_date: date, exit_reason: reason, pnl, pnl_pct: pnlPct, r_mult: risk ? +((ex - entry) / risk).toFixed(2) : null,
+    days_held: daysHeld, income_pct: pnl > 0 ? incPct : 0, income_amount: income, closed_at: nowIso() };
+  if (partial) {
+    const { sold_shares, ...base } = t;
+    await setDoc("trades/" + id, { ...base, id, shares: sh, parent_id: t.id, ...fields });
+    try { await updDoc("trades/" + t.id, { shares: +(held - sh).toFixed(6), sold_shares: +((num(sold_shares) || 0) + sh).toFixed(6) }); }
+    catch (err) { try { await S.db.doc("trades/" + id).delete(); } catch {} throw err; }
+  } else {
+    await updDoc("trades/" + t.id, fields);
+  }
+  await setDoc("ledger/pnl_" + id, { id: "pnl_" + id, type: "pnl", amount: pnl, date, ticker: t.ticker, trade_id: id, created_at: nowIso() });
+  if (income > 0) await setDoc("ledger/inc_" + id, { id: "inc_" + id, type: "income", amount: -income, date, ticker: t.ticker, trade_id: id, pct: incPct, created_at: nowIso() });
+  else if (S.ledger.some((l) => l.id === "inc_" + id)) await S.db.doc("ledger/inc_" + id).delete();
   const open = S.alerts.filter((a) => a.trade_id === t.id && a.status === "new" && a.type !== "entry");
-  for (const a of open) await updDoc("alerts/" + a.id, { status: a.id === alertId ? "done" : "dismissed", done_at: nowIso() });
-  toast(`${t.ticker} closed: ${smoney(pnl)}${income ? `, ${money(income)} set aside as income` : ""}.`);
+  for (const a of open) if (!partial || a.id === alertId) await updDoc("alerts/" + a.id, { status: a.id === alertId ? "done" : "dismissed", done_at: nowIso() });
+  toast(partial ? `Sold ${shareStr(sh)} of ${shareStr(held)} ${t.ticker} at ${px(ex)}: ${smoney(pnl)}. ${shareStr(held - sh)} share${held - sh === 1 ? "" : "s"} stay open.`
+    : `${t.ticker} closed at ${px(ex)}: ${smoney(pnl)}${income ? `, ${money(income)} set aside as income` : ""}.`, 6000);
 }
 function editModal(t) {
   const closed = t.status === "closed";
@@ -1200,6 +1365,8 @@ function editModal(t) {
     ${closed ? `<div class="row"><label class="f" for="eEx">Exit price<input id="eEx" type="number" step="0.01" value="${esc(t.exit_price)}"></label><label class="f" for="eEd">Exit date<input id="eEd" type="date" value="${esc(t.exit_date)}"></label></div>` : ""}
     <label class="f" for="eDel"><span><input id="eDel" type="checkbox"> Delete this trade (removes its P&L and income entries)</span></label></div>`, "Save", async () => {
       if ($("#eDel").checked) {
+        const parent = t.parent_id ? tradeById(t.parent_id) : null;
+        if (parent && parent.status === "open") await updDoc("trades/" + parent.id, { shares: +(num(parent.shares) + num(t.shares)).toFixed(6), sold_shares: Math.max(0, +((num(parent.sold_shares) || 0) - num(t.shares)).toFixed(6)) });
         await S.db.doc("trades/" + t.id).delete();
         for (const p of ["pnl_", "inc_"]) if (S.ledger.some((l) => l.id === p + t.id)) await S.db.doc("ledger/" + p + t.id).delete();
         if (t.alert_id && alertById(t.alert_id)) await updDoc("alerts/" + t.alert_id, { status: "new", trade_id: null });
@@ -1290,12 +1457,17 @@ document.addEventListener("click", async (e) => {
     else if (act === "exitdone" && a) { const tr = tradeById(a.trade_id); if (tr) closeModal(tr, { price: a.code === "TARGET_HIT" ? tr.target : a.code === "STOP_HIT" ? tr.stop : a.last, alertId: a.id,
       reason: { TARGET_HIT: "Target filled", GAP_ABOVE_TARGET: "Target filled", STOP_HIT: "Stop filled", GAP_BELOW_STOP: "Stop filled", EXIT_RULE: "Exit signal (sold at close)", TIME_STOP: "Time stop", EARNINGS: "Before earnings", TREND_BREAK: "Trend break" }[a.code] || "Manual" }); }
     else if (act === "close" && t) closeModal(t);
+    else if (act === "sellfill") { const k = kid(btn.dataset.tid); const inp = $("#sp-" + k); if (inp) { inp.value = btn.dataset.px; const sel = $("#sr-" + k); if (sel && btn.dataset.why) sel.value = btn.dataset.why; sellPreview(inp.closest("form")); inp.focus({ preventScroll: true }); } }
     else if (act === "edit" && t) editModal(t);
     else if (act === "income" && t) await applyIncome(t);
     else if (act === "runnow") await runNow(btn.dataset.run);
   } catch (err) { console.error(err); toast(writeErr(err)); }
 });
+document.addEventListener("input", (e) => { const f = e.target.closest?.("form[data-sell]"); if (f) sellPreview(f); });
 document.addEventListener("submit", async (e) => {
+  if (e.target.matches?.("form[data-sell]")) { e.preventDefault();
+    try { await submitSale(e.target); } catch (err) { console.error(err); toast(err?.code === "invalid_argument" && err.message ? err.message : writeErr(err), 6000); }
+    return; }
   if (e.target.id === "fundsForm") { e.preventDefault();
     try { const amt = need($("#fAmt").value, "Amount"); const typ = $("#fType").value; const id = (typ === "deposit" ? "dep_" : "wd_") + Date.now().toString(36);
       await setDoc("ledger/" + id, { id, type: typ, amount: typ === "deposit" ? amt : -amt, date: $("#fDate").value || todayPT(), note: $("#fNote").value.slice(0, 120), created_at: nowIso() });
@@ -1315,10 +1487,16 @@ try { const t = localStorage.getItem("tab"); if (t && TABS.some(([k]) => k === t
 render();
 const loadTimer = setTimeout(() => { if (!S.loaded.alerts) { S.dbError = "The dashboard database hasn't answered yet. Data may be out of date; it refreshes automatically."; render(); } }, 10000);
 // live updates re-render the page, but never while you are typing in one of its forms
-let rq = 0, pending = false;
-const typing = () => { const el = document.activeElement; return el && $("#main").contains(el) && /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName); };
-const rerender = () => { if (typing()) { pending = true; return; } cancelAnimationFrame(rq); rq = requestAnimationFrame(render); };
-document.addEventListener("focusout", () => setTimeout(() => { if (pending && !typing()) { pending = false; render(); } }, 0));
+let rq = 0, pending = false, ptrDown = false;
+const typing = () => { const el = document.activeElement; return !!el && $("#main").contains(el) && (/^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName) || !!el.closest("form[data-hold]")); };
+const busy = () => typing() || ptrDown;
+const rerender = () => { if (busy()) { pending = true; return; } cancelAnimationFrame(rq); rq = requestAnimationFrame(render); };
+function flushRender() { setTimeout(() => { if (pending && !busy()) { pending = false; render(); } }, 0); }
+document.addEventListener("focusout", flushRender);
+// never swap the page out from under a tap: wait until the press (and its click) is over
+document.addEventListener("pointerdown", () => { ptrDown = true; }, true);
+const ptrUp = () => setTimeout(() => { ptrDown = false; flushRender(); }, 150);
+document.addEventListener("pointerup", ptrUp, true); document.addEventListener("pointercancel", ptrUp, true);
 (async () => {
   const [db, user, mcp] = await Promise.all([claude.use("db"), claude.use("user"), claude.use("mcp")]);
   S.db = db; S.user = user; S.mcp = mcp;

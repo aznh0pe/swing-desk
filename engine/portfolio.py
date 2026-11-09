@@ -23,6 +23,38 @@ GOVERNOR = {"floor_pct": 1.25, "dd_step_down": 0.08, "dd_restore": 0.04, "window
             "win_step_down": 0.60, "win_restore": 0.65}
 
 
+def merged_closed_trades(trades: list) -> list:
+    """Closed trades as positions. A position sold in parts is saved as one closed trade per sale, each pointing
+    at the position with `parent_id`; here they merge back into one record (share-weighted exit price, summed
+    P&L) so win rates, the learning record and the risk governor count the position once. A position whose
+    remainder is still open counts with the parts sold so far."""
+    closed = [t for t in trades if t.get("status") == "closed" and t.get("exit_price") and t.get("entry_price")]
+    groups: dict = {}
+    for i, t in enumerate(closed):
+        groups.setdefault(t.get("parent_id") or t.get("id") or f"_row{i}", []).append(t)
+    out = []
+    for key, parts in groups.items():
+        if len(parts) == 1:
+            out.append(parts[0])
+            continue
+        parts.sort(key=lambda t: str(t.get("exit_date") or ""))
+        sh = [float(t.get("shares") or 0) or 1.0 for t in parts]  # a part without a share count weighs as one
+        tot = sum(sh)
+        m = dict(next((t for t in parts if t.get("id") == key), parts[0]))
+        m.update({"id": key, "shares": round(tot, 6),
+                  "entry_price": sum(float(t["entry_price"]) * s for t, s in zip(parts, sh)) / tot,
+                  "exit_price": sum(float(t["exit_price"]) * s for t, s in zip(parts, sh)) / tot,
+                  "exit_date": parts[-1].get("exit_date"), "exit_reason": parts[-1].get("exit_reason"),
+                  "pnl": round(sum(float(t.get("pnl") or 0) for t in parts), 2),
+                  "income_amount": round(sum(float(t.get("income_amount") or 0) for t in parts), 2),
+                  "days_held": max(int(t.get("days_held") or 0) for t in parts), "parts": len(parts)})
+        rs = [(float(t["r_mult"]), s) for t, s in zip(parts, sh) if t.get("r_mult") is not None]
+        m["r_mult"] = round(sum(r * s for r, s in rs) / sum(s for _, s in rs), 2) if rs and sum(s for _, s in rs) else None
+        m.pop("parent_id", None)
+        out.append(m)
+    return out
+
+
 def risk_governor(state: dict, capital: float, settings: dict) -> dict:
     """Effective risk per trade for this scan, with the reason, from the account's own record."""
     full = float(settings.get("risk_pct", DEFAULT_SETTINGS["risk_pct"]))
@@ -38,8 +70,7 @@ def risk_governor(state: dict, capital: float, settings: dict) -> dict:
     if not led:
         eq = peak = capital
     dd = (peak - eq) / peak if peak > 0 else 0.0
-    closed = [v["doc"] for v in state["trades"].values()
-              if v["doc"].get("status") == "closed" and v["doc"].get("exit_price") and v["doc"].get("entry_price")]
+    closed = merged_closed_trades([v["doc"] for v in state["trades"].values()])
     closed.sort(key=lambda t: str(t.get("exit_date") or t.get("closed_at") or ""))
     recent = closed[-int(g["window"]):]
     wr = (sum(1 for t in recent if float(t["exit_price"]) > float(t["entry_price"])) / len(recent)) if len(recent) >= int(g["window"]) else None
