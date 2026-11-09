@@ -273,3 +273,26 @@ def test_every_open_position_gets_one_plain_instruction():
     # the email marks open P&L the way the dashboard colours it
     assert SC.pnl_mark(4.456).startswith("🟢 +$4.46") and SC.pnl_mark(-0.63).startswith("🔴 -$0.63")
     assert SC.pnl_mark(0.004).startswith("⚪ $0.00") and SC.pnl_mark(-0.004).startswith("⚪ $0.00")
+
+
+def test_a_reached_target_with_an_exit_signal_reads_as_one_plan():
+    """Target reached and exit rule met in the same scan: record the sale; sell only if the bracket didn't fill."""
+    import datetime as _dt
+    from engine import scan as SC
+    hit = {"code": "TARGET_HIT", "level": "good", "action": "CONFIRM TARGET FILL", "urgency": "now",
+           "text": "High $326.66 reached your target $324.96. Confirm the fill and log the exit price."}
+    ex = {"code": "EXIT_RULE", "level": "alert", "action": "SELL AT CLOSE", "urgency": "today",
+          "text": "Exit rule met: the close is above its 5-day average (price is $325.69)."}
+    st = MON.position_status([hit, ex], "preclose", stop=276.74, target=324.96, dyn="sma5", day_now=2, max_hold=8,
+                             last_day_str="Tue Nov 17")
+    assert st["label"] == "TARGET REACHED: RECORD THE SALE" and st["tone"] == "good"
+    assert st["detail"].endswith("If it didn't fill, sell it now, before the close: its exit rule is met too.")
+    pos = [{"trade_id": "t", "ticker": "NDSN", "strategy": "", "last": 325.69, "unrealized": 15.2, "unrealized_pct": 4.9,
+            "days_held": 2, "max_hold": 8, "entry": 310.49, "stop": 276.74, "target": 324.96, "shares": 1,
+            "entry_date": "2026-11-06", "signals": [hit, ex], "status": st, "day_now": 2}]
+    scan = {"mode": "preclose", "market": {"label": "Bull", "spy": 755.17, "spy_vs_200d_pct": 3.7, "spy_5d_pct": 0.4,
+            "breadth_above_50d_pct": 68.0, "vix": 19.8}, "funds": {"capital": 5000, "cash": 4442.47, "open_count": 2},
+            "data": {"status": "ok", "notes": []}, "alert_updates": {}}
+    txt = SC.make_digest(scan, [], pos, [], [], 0, S.params_with_defaults(None), _dt.datetime(2026, 11, 9, 12, 31))
+    assert "NDSN: ONLY IF STILL OPEN, SELL AT CLOSE (today). Its target was reached" in txt
+    assert "NDSN: 🟢 TARGET REACHED: RECORD THE SALE." in txt and "P&L 🟢 +$15.20" in txt

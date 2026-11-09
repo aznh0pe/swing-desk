@@ -47,6 +47,8 @@ def position_status(sigs: list, mode: str, *, stop, target, dyn, day_now: int, m
     pre = mode == "preclose"
     sell = f"SELL AT TODAY'S CLOSE (before {close_label})" if pre else "SELL AT THE OPEN"
     sell_when = "close" if pre else "open"
+    asap = "sell it now, before the close" if pre else "sell it at the open"
+    also_exit = any(c in by for c in ("EARNINGS", "EXIT_RULE", "TREND_BREAK", "TIME_STOP"))
     rule = DYN_TEXT.get(dyn)
     plan = ((f"It sells at the close once {rule}{f' ({trigger})' if trigger else ''}, or" if rule else "It sells")
             + f" at the close of {last_day_str} (time stop) at the latest; your bracket handles the target ${target:.2f} and stop ${stop:.2f}.")
@@ -57,13 +59,15 @@ def position_status(sigs: list, mode: str, *, stop, target, dyn, day_now: int, m
     if "STOP_HIT" in by and "TARGET_HIT" in by:
         return st("CONFIRM", "STOP AND TARGET BOTH REACHED: CHECK WHICH FILLED", "act", "now",
                   "The day's range touched both your stop and your target. Check your brokerage for which order filled, "
-                  "then record the sale on its dashboard card.")
+                  f"then record the sale on its dashboard card. If neither filled, {asap}.")
     if "STOP_HIT" in by:
         return st("STOP_HIT", "STOP REACHED: RECORD THE SALE", "sell", "now",
-                  by["STOP_HIT"]["text"].replace("log the exit price", "record the sale on its dashboard card"))
+                  by["STOP_HIT"]["text"].replace("log the exit price", "record the sale on its dashboard card")
+                  + f" If it didn't fill, {asap}: the stop is the plan's exit.")
     if "TARGET_HIT" in by:
         return st("TARGET_HIT", "TARGET REACHED: RECORD THE SALE", "good", "now",
-                  by["TARGET_HIT"]["text"].replace("log the exit price", "record the sale on its dashboard card"))
+                  by["TARGET_HIT"]["text"].replace("log the exit price", "record the sale on its dashboard card")
+                  + f" If it didn't fill, {asap}: {'its exit rule is met too' if also_exit else 'the target was the plan'}.")
     if "GAP_BELOW_STOP" in by:
         return st("GAP_BELOW_STOP", "SELL AT THE OPEN", "sell", "open", by["GAP_BELOW_STOP"]["text"])
     if "GAP_ABOVE_TARGET" in by:
@@ -133,11 +137,11 @@ def check_trade(tr: dict, ind: dict, mode: str, earnings: dict, premarket, P: di
         if stop and L[T] <= stop:
             sigs.append({"code": "STOP_HIT", "level": "info", "action": "CONFIRM STOP FILL",
                          "urgency": "now", "text": f"Low ${L[T]:.2f} reached your stop ${stop:.2f}. "
-                         "Confirm the fill in your brokerage and log the exit price."})
+                         "Confirm the fill in your brokerage and record the sale on its dashboard card."})
         if target and H[T] >= target:
             sigs.append({"code": "TARGET_HIT", "level": "good", "action": "CONFIRM TARGET FILL",
                          "urgency": "now", "text": f"High ${H[T]:.2f} reached your target ${target:.2f}. "
-                         "Confirm the fill and log the exit price."})
+                         "Confirm the fill and record the sale on its dashboard card."})
     if mode == "premarket" and math.isfinite(pm_last):
         if stop and pm_last <= stop:
             sigs.append({"code": "GAP_BELOW_STOP", "level": "alert", "action": "SELL AT OPEN",

@@ -826,6 +826,11 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
     if exits or checks:
         lines += ["", numbered("EXIT NOW / ACT ON THESE POSITIONS")]
         for p, sg in exits + checks:
+            hit = sorted({"target" if f["code"] == "TARGET_HIT" else "stop" for p2, f in fills if p2 is p}, reverse=True)
+            if hit and sg["code"] in EXIT_CODES:  # the bracket has probably sold it already
+                lines.append(f"- {p['ticker']}: ONLY IF STILL OPEN, {sg['action']} ({sg['urgency']}). Its {' and '.join(hit)} was reached, "
+                             f"so your bracket has probably sold it: check your brokerage first. {sg['text']} {pos_line(p)}")
+                continue
             lines.append(f"- {p['ticker']}: {sg['action']} ({sg['urgency']}). {sg['text']} {pos_line(p)}")
     if fills:
         lines += ["", "=== FILLS TO CONFIRM (your bracket order probably already handled these) ==="]
