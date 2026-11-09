@@ -19,14 +19,85 @@ def _f(x, nd=2):
     return None if x is None or (isinstance(x, float) and not math.isfinite(x)) else round(float(x), nd)
 
 
+def _day(d) -> str:
+    try:
+        return cal._d(d).strftime("%a %b %d").replace(" 0", " ")
+    except Exception:
+        return str(d)
+
+
+def hold_last_day(entry_day, max_hold: int):
+    """The last session of the hold window: the time stop sells at its close."""
+    d = cal._d(entry_day)
+    if not cal.is_trading_day(d):
+        d = cal.next_trading_day(d)
+    return cal.next_trading_day(d, max(0, int(max_hold) - 1)) if int(max_hold) > 1 else d
+
+
+def _st(code, label, tone, when, detail) -> dict:
+    return {"code": code, "label": label, "tone": tone, "when": when, "detail": detail}
+
+
+def position_status(sigs: list, mode: str, *, stop, target, dyn, day_now: int, max_hold: int, last_day_str: str,
+                    close_label: str = "1:00 PM PT", trigger: str = "") -> dict:
+    """One plain instruction per open position, from its signals: what to do now and why.
+    tone: sell (act by selling), good (a target filled or is filling), act (something to do but keep the trade), hold.
+    when: when the instruction applies (now, open, close, next or none), so the dashboard can say when it has passed."""
+    by = {s_["code"]: s_ for s_ in sigs}
+    pre = mode == "preclose"
+    sell = f"SELL AT TODAY'S CLOSE (before {close_label})" if pre else "SELL AT THE OPEN"
+    sell_when = "close" if pre else "open"
+    rule = DYN_TEXT.get(dyn)
+    plan = ((f"It sells at the close once {rule}{f' ({trigger})' if trigger else ''}, or" if rule else "It sells")
+            + f" at the close of {last_day_str} (time stop) at the latest; your bracket handles the target ${target:.2f} and stop ${stop:.2f}.")
+    st = _st
+
+    if "NO_DATA" in by:
+        return st("CHECK", "CHECK IT MANUALLY", "act", "now", by["NO_DATA"]["text"])
+    if "STOP_HIT" in by and "TARGET_HIT" in by:
+        return st("CONFIRM", "STOP AND TARGET BOTH REACHED: CHECK WHICH FILLED", "act", "now",
+                  "The day's range touched both your stop and your target. Check your brokerage for which order filled, "
+                  "then record the sale on its dashboard card.")
+    if "STOP_HIT" in by:
+        return st("STOP_HIT", "STOP REACHED: RECORD THE SALE", "sell", "now",
+                  by["STOP_HIT"]["text"].replace("log the exit price", "record the sale on its dashboard card"))
+    if "TARGET_HIT" in by:
+        return st("TARGET_HIT", "TARGET REACHED: RECORD THE SALE", "good", "now",
+                  by["TARGET_HIT"]["text"].replace("log the exit price", "record the sale on its dashboard card"))
+    if "GAP_BELOW_STOP" in by:
+        return st("GAP_BELOW_STOP", "SELL AT THE OPEN", "sell", "open", by["GAP_BELOW_STOP"]["text"])
+    if "GAP_ABOVE_TARGET" in by:
+        return st("GAP_ABOVE_TARGET", "TARGET FILLS AT THE OPEN", "good", "open",
+                  by["GAP_ABOVE_TARGET"]["text"] + " Record the sale once it fills.")
+    if "EARNINGS" in by:
+        return st("EARNINGS", f"SELL BEFORE EARNINGS: {sell}", "sell", sell_when, by["EARNINGS"]["text"])
+    if "EXIT_RULE" in by:
+        return st("EXIT_RULE", f"{sell}: EXIT RULE MET", "sell", sell_when, by["EXIT_RULE"]["text"])
+    if "TREND_BREAK" in by:
+        return st("TREND_BREAK", f"{sell}: TREND BROKE", "sell", sell_when, by["TREND_BREAK"]["text"])
+    if "TIME_STOP" in by:
+        return st("TIME_STOP", f"TIME STOP: {sell}", "sell", sell_when, by["TIME_STOP"]["text"])
+    if "RAISE_STOP" in by:
+        new = by["RAISE_STOP"].get("new_stop")
+        return st("RAISE_STOP", f"KEEP HOLDING · RAISE THE STOP TO ${new:.2f}" if new else "KEEP HOLDING · RAISE THE STOP", "act", "next",
+                  by["RAISE_STOP"]["text"] + " Do it before the next open, then press Stop moved on the dashboard. " + plan)
+    if "TIME_STOP_NEXT" in by:
+        return st("TIME_STOP_NEXT", "KEEP HOLDING · LAST DAY TOMORROW", "act", "next",
+                  by["TIME_STOP_NEXT"]["text"])
+    if "MARKET_STRESS" in by:
+        return st("HOLD", "KEEP HOLDING", "hold", "none", by["MARKET_STRESS"]["text"] + " Otherwise nothing to do. " + plan)
+    return st("HOLD", "KEEP HOLDING", "hold", "none", "Nothing to do today. " + plan)
+
+
 def check_trade(tr: dict, ind: dict, mode: str, earnings: dict, premarket, P: dict,
                 partial_bar: bool, close_label: str = "1:00 PM PT") -> dict | None:
     tk = tr.get("ticker")
     c = ind["close"]
     if tk not in c.columns:
-        return {"trade_id": tr.get("id"), "ticker": tk, "signals": [{
-            "code": "NO_DATA", "level": "warn", "action": "CHECK MANUALLY",
-            "urgency": "today", "text": f"No price data for {tk} in the feed; check it manually."}]}
+        sig = {"code": "NO_DATA", "level": "warn", "action": "CHECK MANUALLY",
+               "urgency": "today", "text": f"No price data for {tk} in the feed; check it in your brokerage."}
+        return {"trade_id": tr.get("id"), "ticker": tk, "signals": [sig],
+                "status": _st("CHECK", "CHECK IT MANUALLY", "act", "now", sig["text"])}
     j = c.columns.get_loc(tk)
     T = len(c) - 1
     last_day = c.index[T].date()
@@ -150,7 +221,30 @@ def check_trade(tr: dict, ind: dict, mode: str, earnings: dict, premarket, P: di
         sigs.append({"code": "MARKET_STRESS", "level": "warn", "action": "REVIEW",
                      "urgency": "today", "text": f"Market stress (SPY {spy_r1:+.1%} today, VIX {vixr:.2f}x its "
                      "20-day average). Keep the stop in place; do not average down."})
-    return {"trade_id": tr.get("id"), "ticker": tk, "strategy": strategy,
+    # before the open, today's session is the next hold day (the dashboard counts it the same way)
+    day_now = min(days_held + (1 if mode == "premarket" else 0), max_hold)
+    try:
+        end = hold_last_day(entry_day, max_hold)
+    except Exception:
+        end = None
+    # the level the exit rule compares against at the next close
+    trigger = ""
+    try:
+        if dyn == "sma5" and math.isfinite(sma5):
+            trigger = f"now ${sma5:.2f}"
+        elif dyn == "prev_high":
+            ref_high = float(H[T - 1] if (mode == "preclose" and partial_bar) else H[T])
+            trigger = f"${ref_high:.2f}"
+        elif dyn == "high7":
+            trigger = f"now ${float(np.nanmax(C[max(0, T - 6):T + 1])):.2f}"
+        elif dyn == "rsi2_70":
+            trigger = f"now {float(ind['rsi2'].values[T, j]):.0f}"
+    except Exception:
+        trigger = ""
+    status = position_status(sigs, mode, stop=stop, target=target, dyn=dyn, day_now=day_now, max_hold=max_hold,
+                             last_day_str=_day(end) if end else "the last hold day", close_label=close_label, trigger=trigger)
+    return {"trade_id": tr.get("id"), "ticker": tk, "strategy": strategy, "status": status,
+            "day_now": int(day_now), "time_stop_day": str(end) if end else None,
             "entry": _f(entry), "stop": _f(stop), "target": _f(target), "shares": shares,
             "entry_date": str(entry_day), "dyn_exit": dyn,
             "last": _f(last), "asof": str(last_day), "partial_bar": bool(partial_bar),

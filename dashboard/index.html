@@ -33,7 +33,7 @@
   --info: #9dbcf5; --info-bg: #1a2638; color-scheme: dark; }
 
 * { box-sizing: border-box; }
-body { background: var(--bg); color: var(--ink); font-family: var(--f-body); font-size: 14px; line-height: 1.45; }
+body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--f-body); font-size: 14px; line-height: 1.45; }
 body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--surface); }
 .num, .mono, td.n, .tnum { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
 h1, h2, h3 { font-family: var(--f-display); font-stretch: 82%; text-wrap: balance; margin: 0; letter-spacing: .005em; }
@@ -178,6 +178,18 @@ td .t { font-family: var(--f-display); font-stretch: 85%; font-weight: 700; font
 .pc-foot > span.small { color: var(--ink-2); }
 .pc-warn { background: var(--warn-bg); color: var(--warn); border-radius: var(--r-sm); padding: 7px 10px; font-size: 12.5px; }
 .pc-actions { display: flex; gap: 6px; padding: 8px 14px 10px; border-top: 1px solid var(--line); }
+/* open P&L: green gain, red loss, grey breakeven (the sign stays in the text for colour-blind readers) */
+.pnl-up { color: var(--good); } .pnl-dn { color: var(--crit); } .pnl-flat { color: var(--ink-2); }
+/* what to do now, per position */
+.pc-status { display: grid; gap: 3px; padding: 10px 14px 11px; border-bottom: 1px solid var(--line); border-left: 4px solid var(--info); background: var(--info-bg); }
+.pc-status .k { font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); }
+.pc-status .lbl { font-family: var(--f-display); font-weight: 800; font-stretch: 85%; letter-spacing: .03em; font-size: 16px; line-height: 1.2; color: var(--info); }
+.pc-status .det { font-size: 13px; color: var(--ink-2); line-height: 1.4; }
+.pc-status .note { font-size: 13px; font-weight: 600; color: var(--ink); }
+.pc-status.st-sell { background: var(--crit-bg); border-left-color: var(--crit); } .pc-status.st-sell .lbl { color: var(--crit); }
+.pc-status.st-good { background: var(--good-bg); border-left-color: var(--good); } .pc-status.st-good .lbl { color: var(--good); }
+.pc-status.st-act { background: var(--warn-bg); border-left-color: var(--warn); } .pc-status.st-act .lbl { color: var(--warn); }
+.pc-st-act { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 5px; }
 @media (max-width: 480px) { .pc-levels { grid-template-columns: repeat(2, minmax(0, 1fr)); } .pc-levels > div:nth-child(2) { border-right: 0; } .pc-levels > div:nth-child(-n+2) { border-bottom: 1px solid var(--line); } }
 @media (max-width: 600px) { .pc-sell input, .pc-sell select { font-size: 16px; } }
 
@@ -389,8 +401,13 @@ function funds() {
   const open = S.trades.filter((t) => t.status === "open");
   const openCost = open.reduce((s, t) => s + (num(t.entry_price) || 0) * (num(t.shares) || 0), 0);
   const marks = latestMarks();
-  const unreal = open.reduce((s, t) => s + (num(marks[t.id]?.unrealized) || 0), 0);
+  const unreal = open.reduce((s, t) => s + (posPnl(t, marks[t.id]) || 0), 0);
   return { ...parts, capital, openCost, cash: capital - openCost, unreal, equity: capital + unreal, open };
+}
+// open P&L at the latest mark, on the shares you hold now (a part sale since the scan is already out of it)
+function posPnl(t, m) {
+  const last = num(m?.last), entry = num(t.entry_price), sh = num(t.shares);
+  return last !== null && entry !== null && sh !== null ? (last - entry) * sh : num(m?.unrealized);
 }
 function latestMarks() {
   const out = {};
@@ -659,7 +676,9 @@ function render() {
   renderTabs(); renderChips(); renderRunbar();
   const m = $("#main");
   // live data re-renders the page: keep what you've typed into a sale form, and where the cursor was
-  const kept = {}; m.querySelectorAll("[data-keep][id]").forEach((el) => { kept[el.id] = el.value; });
+  // (only fields you changed: untouched ones take the new defaults, e.g. the reason a new exit signal suggests)
+  const changed = (el) => el.tagName === "SELECT" ? [...el.options].some((o) => o.selected !== o.defaultSelected) : el.value !== el.defaultValue;
+  const kept = {}; m.querySelectorAll("[data-keep][id]").forEach((el) => { if (changed(el)) kept[el.id] = el.value; });
   const focusId = document.activeElement && m.contains(document.activeElement) ? document.activeElement.id : "";
   const banner = S.dbError ? `<div class="banner crit">${esc(S.dbError)}</div>` : "";
   const v = { overview: viewOverview, alerts: viewAlerts, log: viewLog, funds: viewFunds, scans: viewScans, lab: viewLab }[S.tab]();
@@ -690,7 +709,7 @@ function viewOverview() {
     ${kpi("Net trading result", smoney(ret), `Realized ${smoney(f.pnl)} · income taken ${money(-f.income)}`)}
     ${kpi("Win rate (all time)", hist.n ? pct(hist.winRate) : "–", hist.n ? `${hist.wins} of ${hist.n} closed trades` : "No closed trades yet")}
     ${kpi("Profit factor", hist.pf ? hist.pf.toFixed(2) : (hist.n ? "∞" : "–"), "Gross wins ÷ gross losses")}
-    ${kpi("Open P&L", smoney(f.unreal), last ? `Marked at ${dtShort(last.started_at)}` : "Marks arrive with the first scan")}
+    ${kpi("Open P&L", pnlHtml(f.unreal), last ? `Marked at ${dtShort(last.started_at)}` : "Marks arrive with the first scan")}
   </div></section>`;
   html += positionsSection("overview");
   html += `<section class="section"><div class="section-head"><h2>Performance</h2>
@@ -909,7 +928,7 @@ function actionCard(a) {
     : `<button class="btn primary small" type="button" data-act="exitdone" data-id="${esc(a.id)}">Mark done (sold)</button><button class="btn ghost small" type="button" data-act="dismiss" data-id="${esc(a.id)}">Dismiss</button>`;
   const urg = { now: "Now", today: "Before today's close", next: "Next session", open: "At the open" }[a.urgency] || a.urgency || "";
   return `<div class="act ${lvl}"><div class="tk">${esc(a.ticker)}</div><div><div class="what">${esc(a.action)} <span class="pill ${lvl === "alert" ? "crit" : lvl === "good" ? "good" : "info"}">${esc(urg)}</span></div>
-    <div class="why">${esc(a.text)}</div><div class="small muted">${dtShort(a.created_at)} · last ${px(a.last)} · P&L ${smoney(a.unrealized)} · day ${esc(a.days_held)}${a.days_left != null ? `, ${esc(Math.max(0, a.days_left))} left` : ""}</div></div>
+    <div class="why">${esc(a.text)}</div><div class="small muted">${dtShort(a.created_at)} · last ${px(a.last)} · P&L ${pnlHtml(a.unrealized)} · day ${esc(a.days_held)}${a.days_left != null ? `, ${esc(Math.max(0, a.days_left))} left` : ""}</div></div>
     <div class="btns">${btns}</div></div>`;
 }
 // ---------------------------------------------------------------- open positions: status, exit plan and recording a sale
@@ -920,6 +939,53 @@ const DYN_EXIT_TEXT = { sma5: "the first day it closes above its 5-day average",
   high7: "the first day it closes at a 7-day closing high", rsi2_70: "the first day its RSI(2) closes above 70" };
 const mdShort = (d) => { const t = new Date(String(d).slice(0, 10) + "T12:00:00"); return isNaN(t) ? "" : t.toLocaleDateString("en-US", { month: "short", day: "numeric" }); };
 const kid = (id) => String(id).replace(/[^A-Za-z0-9_-]/g, "_");
+// open P&L colour: green above $0.00, red below, grey at breakeven (judged on the cents shown)
+const cents = (v) => { const n = num(v); return n === null ? null : Math.round(n * 100) / 100 || 0; };
+const pnlCls = (v) => { const r = cents(v); return r === null ? "" : r > 0 ? "pnl-up" : r < 0 ? "pnl-dn" : "pnl-flat"; };
+const pnlHtml = (v) => `<span class="${pnlCls(v)}">${smoney(cents(v))}</span>`;
+const pnlPctHtml = (v, p) => { const c = pnlCls(v); return `<span class="${c}">${c === "pnl-flat" ? "0.00%" : spct(p, 2)}</span>`; };
+// The scans write one instruction per position (status); older scans only carry signals, so derive it from them.
+const STATUS_PRIORITY = ["NO_DATA", "STOP_HIT", "TARGET_HIT", "GAP_BELOW_STOP", "GAP_ABOVE_TARGET", "EARNINGS", "EXIT_RULE", "TREND_BREAK", "TIME_STOP", "RAISE_STOP", "TIME_STOP_NEXT"];
+const STATUS_COVERS = { CONFIRM: ["STOP_HIT", "TARGET_HIT"], CHECK: ["NO_DATA"], HOLD: ["MARKET_STRESS"] };
+function planText(t) {
+  const dyn = DYN_EXIT_TEXT[t.dyn_exit], end = holdLastDay(t);
+  return `${dyn ? `It sells at the close on ${dyn}, or` : "It sells"} at the close of ${end ? dShort(end) : "the last hold day"} (time stop) at the latest; your bracket handles the target ${px(t.target)} and stop ${px(t.stop)}.`;
+}
+function positionStatus(t, m) {
+  let st = m.status ? { ...m.status } : null;
+  if (!st) {
+    const sigs = m.signals || [];
+    const s = STATUS_PRIORITY.map((c) => sigs.find((x) => x.code === c)).find(Boolean);
+    if (s) {
+      const keep = s.code === "RAISE_STOP" || s.code === "TIME_STOP_NEXT";
+      const tone = s.code === "TARGET_HIT" || s.code === "GAP_ABOVE_TARGET" ? "good" : keep || s.code === "NO_DATA" ? "act" : "sell";
+      const when = s.urgency === "today" ? "close" : s.urgency === "open" ? "open" : s.urgency === "now" ? "now" : keep ? "next" : "open";
+      st = { code: s.code, label: (keep ? "KEEP HOLDING · " : "") + (s.action || s.code.replace(/_/g, " ")), tone, when, detail: s.text || "" };
+    } else {
+      st = { code: "HOLD", label: "KEEP HOLDING", tone: "hold", when: "none",
+        detail: (m.scan_at ? "Nothing to do today. " : "The next scan marks this position and checks its exits. ") + planText(t) };
+    }
+  }
+  // a stop you already raised (Stop moved) needs nothing more until the next scan
+  if (st.code === "RAISE_STOP") {
+    const ns = num((m.signals || []).find((x) => x.code === "RAISE_STOP")?.new_stop);
+    if (ns !== null && num(t.stop) !== null && num(t.stop) >= ns - 0.005)
+      st = { code: "HOLD", label: "KEEP HOLDING", tone: "hold", when: "none", detail: `Stop raised to ${px(t.stop)}: done. Nothing else to do. ` + planText(t) };
+    else if (ns !== null) st.new_stop = ns;
+  }
+  // the clock: an instruction for the open, or for a close, may already be past
+  const sp = m.scan_at ? ptParts(m.scan_at) : null, today = todayPT(), hm = nowHM();
+  const closeHM = EARLY_CLOSES.has(today) ? "10:00" : "13:00";
+  const live = isTradingDay(today) && hm >= "06:30" && hm < closeHM;
+  const sellNext = live ? "sell it now" : "sell it at the next open";
+  if (sp && st.when === "open" && isTradingDay(today) && hm >= "06:30" && (sp.day < today || sp.hm < "06:30"))
+    st.note = `The open has passed. If you haven't sold yet, ${sellNext}, then record the sale below.`;
+  else if (sp && st.when === "close" && sp.day === today && hm >= closeHM)
+    st.note = "Today's close has passed. If you sold, record the sale below; if not, the 2:05 PM scan says what to do next.";
+  else if (sp && st.when === "close" && sp.day < today)
+    st.note = `That was for the close of ${dShort(sp.day)}. If you still hold it, ${sellNext}, then record the sale below.`;
+  return st;
+}
 function shareStr(n) { const v = num(n); return v === null ? "–" : Number.isInteger(v) ? String(v) : String(+v.toFixed(3)); }
 function holdLastDay(t) {
   let d = String(t.entry_date || "").slice(0, 10); if (!d) return null;
@@ -939,29 +1005,33 @@ function positionsSection(where) {
 function positionCard(t, m) {
   const id = t.id, k = kid(id), entry = num(t.entry_price), sh = num(t.shares), stop = num(t.stop), tgt = num(t.target);
   const last = num(m.last), held = heldDays(t), maxH = num(t.max_hold) || 7, end = holdLastDay(t);
-  const pnl = last !== null && entry !== null && sh !== null ? (last - entry) * sh : null;
+  const pnl = posPnl(t, m);
   const pnlPct = last !== null && entry ? (100 * (last - entry)) / entry : null;
   const sigs = m.signals || [];
   const sigWhy = sigs.map((s) => CODE_REASON[s.code]).find(Boolean) || "";
-  const sigHtml = sigs.length
-    ? sigs.map((s) => `<div class="sigline"><span class="pill ${s.level === "alert" ? "crit" : s.level === "good" ? "good" : "info"}">${esc(s.action || s.code.replace(/_/g, " ").toLowerCase())}</span> <span class="small">${hiCaution(s.text || "")}</span></div>`).join("")
-      + (m.scan_at ? `<div class="small muted">from the ${dtShort(m.scan_at)} scan</div>` : "")
-    : `<div class="small muted">${m.scan_at ? `No exit signal in the ${dtShort(m.scan_at)} scan: hold.` : "The next scan marks this position and checks its exits."}</div>`;
-  const dyn = DYN_EXIT_TEXT[t.dyn_exit];
+  const st = positionStatus(t, m);
+  const covered = new Set([st.code, ...(m.status ? STATUS_COVERS[st.code] || [] : [])]);
+  const others = sigs.filter((s) => !covered.has(s.code));
+  const sigHtml = others.map((s) => `<div class="sigline"><span class="pill ${s.level === "alert" ? "crit" : s.level === "good" ? "good" : "info"}">${esc(s.action || s.code.replace(/_/g, " ").toLowerCase())}</span> <span class="small">${hiCaution(s.text || "")}</span></div>`).join("")
+    + `<div class="small muted">${m.scan_at ? `Status from the ${dtShort(m.scan_at)} scan; the next scan updates it.` : "No scan has marked this position yet."}</div>`;
+  const stBtn = st.code === "RAISE_STOP" && st.new_stop
+    ? `<div class="pc-st-act"><button class="btn primary small" type="button" data-act="cardstop" data-tid="${esc(id)}" data-px="${st.new_stop.toFixed(2)}">Stop moved to ${px(st.new_stop)}</button><span class="small muted">Press after you change it in your brokerage.</span></div>` : "";
+  const statusHtml = `<div class="pc-status st-${esc(st.tone || "hold")}" role="status"><div class="k">Status · what to do now</div><div class="lbl">${esc(st.label)}</div>${st.detail ? `<div class="det">${hiCaution(st.detail)}</div>` : ""}${st.note ? `<div class="note">${esc(st.note)}</div>` : ""}${stBtn}</div>`;
   const chip = (label, v, why) => v === null ? "" : `<button type="button" class="chip" data-act="sellfill" data-tid="${esc(id)}" data-px="${v.toFixed(2)}" data-why="${esc(why)}">${label} ${px(v)}</button>`;
   const lvl = (lbl, v, sub) => `<div><div class="k">${lbl}</div><div class="v">${v}</div><div class="s">${sub || "&nbsp;"}</div></div>`;
   const today = todayPT(), entryDay = String(t.entry_date || "").slice(0, 10);
   return `<article class="pos-card" aria-label="${esc(t.ticker)} position">
     <div class="pc-head"><div class="pc-title"><div class="tk">${esc(t.ticker)}</div>${t.name ? `<div class="nm" title="${esc(t.name)}">${esc(t.name)}</div>` : ""}
       <div class="st">${esc(t.strategy_label || t.strategy || "Manual")} · entered ${dShort(t.entry_date)}${num(t.sold_shares) ? ` · ${shareStr(t.sold_shares)} sh sold so far` : ""}</div></div>
-      <div class="pc-pnl"><div class="lbl">Open P&L</div><div class="big">${pnl !== null ? `<span class="${signCls(pnl)}">${smoney(pnl)}</span>` : "–"}</div><div class="lbl">${pnlPct !== null ? `${spct(pnlPct)} · last ${px(last)}` : "no mark yet"}</div></div></div>
+      <div class="pc-pnl"><div class="lbl">Open P&L</div><div class="big">${pnl !== null ? pnlHtml(pnl) : "–"}</div><div class="lbl">${pnlPct !== null ? `${pnlPctHtml(pnl, pnlPct)} · last ${px(last)}` : "no mark yet"}</div></div></div>
+    ${statusHtml}
     <div class="pc-levels">
       ${lvl("Entry", px(entry), `${shareStr(sh)} sh`)}
       ${lvl("Stop", px(stop), entry && stop ? spct((100 * (stop - entry)) / entry) : "")}
       ${lvl("Target", px(tgt), entry && tgt ? spct((100 * (tgt - entry)) / entry) : "")}
       ${lvl("Hold day", `${Math.min(Math.max(1, held), maxH)} of ${maxH}`, end ? `ends ${mdShort(end)}` : "")}
     </div>
-    <div class="pc-signals"><div class="small"><b>Exit plan:</b> the target and stop sit in your bracket${dyn ? `; sell at the close ${esc(dyn)}` : ""}; sell by the close of ${end ? dShort(end) : "the last hold day"} at the latest (time stop). The scans tell you when.</div>${sigHtml}</div>
+    <div class="pc-signals">${sigHtml}</div>
     <form class="pc-sell" data-sell="${esc(id)}" data-hold novalidate>
       <div class="pc-sell-h"><b>Sold it?</b> Record the actual sale here (all of it or part).</div>
       <div class="row">
@@ -1440,6 +1510,22 @@ async function runNow(key) {
   } catch (e) { toast(fireErr(e), 8000); }
 }
 
+// ---------------------------------------------------------------- phones: pin only the tab bar
+// The full header is a third of a phone screen; on narrow screens it scrolls away and only the tabs
+// (and the scan progress bar under them) stay pinned, so position cards get the room.
+(() => {
+  const bar = document.querySelector(".deskbar"), tabs = document.getElementById("tabs");
+  if (!bar || !tabs) return;
+  const mq = window.matchMedia ? matchMedia("(max-width: 720px)") : null;
+  const pin = () => {
+    const off = mq && mq.matches ? Math.max(0, Math.round(tabs.getBoundingClientRect().top - bar.getBoundingClientRect().top)) : 0;
+    bar.style.top = off ? `calc(env(safe-area-inset-top, 0px) - ${off}px)` : "";
+  };
+  try { new ResizeObserver(pin).observe(bar); } catch {}
+  try { mq.addEventListener("change", pin); } catch {}
+  addEventListener("resize", pin); pin();
+})();
+
 // ---------------------------------------------------------------- events
 document.addEventListener("click", async (e) => {
   const tab = e.target.closest("[data-tab]"); if (tab) { S.tab = tab.dataset.tab; try { localStorage.setItem("tab", S.tab); } catch {} render(); window.scrollTo(0, 0); return; }
@@ -1453,6 +1539,12 @@ document.addEventListener("click", async (e) => {
     else if (act === "skip" && a) { await updDoc("alerts/" + a.id, { status: "skipped", skipped_at: nowIso() }); toast(`${a.ticker} skipped. The learning loop still grades it.`); }
     else if (act === "copy" && a) copyOrder(a);
     else if (act === "dismiss" && a) { await updDoc("alerts/" + a.id, { status: "dismissed", done_at: nowIso() }); }
+    else if (act === "cardstop" && t) {
+      const ns = num(btn.dataset.px); if (!ns) return;
+      await updDoc("trades/" + t.id, { stop: ns });
+      for (const x of S.alerts.filter((x) => x.trade_id === t.id && x.code === "RAISE_STOP" && x.status === "new")) await updDoc("alerts/" + x.id, { status: "done", done_at: nowIso() });
+      toast(`${t.ticker} stop updated to ${px(ns)}.`);
+    }
     else if (act === "applystop" && a) { const tr = tradeById(a.trade_id); if (tr && a.new_stop) await updDoc("trades/" + tr.id, { stop: num(a.new_stop) }); await updDoc("alerts/" + a.id, { status: "done", done_at: nowIso() }); toast(`${a.ticker} stop updated to ${px(a.new_stop)}.`); }
     else if (act === "exitdone" && a) { const tr = tradeById(a.trade_id); if (tr) closeModal(tr, { price: a.code === "TARGET_HIT" ? tr.target : a.code === "STOP_HIT" ? tr.stop : a.last, alertId: a.id,
       reason: { TARGET_HIT: "Target filled", GAP_ABOVE_TARGET: "Target filled", STOP_HIT: "Stop filled", GAP_BELOW_STOP: "Stop filled", EXIT_RULE: "Exit signal (sold at close)", TIME_STOP: "Time stop", EARNINGS: "Before earnings", TREND_BREAK: "Trend break" }[a.code] || "Manual" }); }

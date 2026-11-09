@@ -758,6 +758,23 @@ def _pct(a, b) -> str:
         return ""
 
 
+# Plain-text email: a coloured dot stands in for green / red / neutral text
+TONE_MARK = {"sell": "🔴 ", "good": "🟢 ", "act": "🟠 ", "hold": "⚪ "}
+
+
+def pnl_mark(x) -> str:
+    """Open P&L for the email: 🟢 +$4.46 (gain), 🔴 -$0.63 (loss), ⚪ $0.00 (breakeven)."""
+    try:
+        v = round(float(x), 2)
+    except Exception:
+        return "–"
+    if v > 0:
+        return f"🟢 +${v:,.2f}"
+    if v < 0:
+        return f"🔴 -${abs(v):,.2f}"
+    return "⚪ $0.00"
+
+
 def _money(x) -> str:
     try:
         return f"${float(x):,.2f}"
@@ -792,7 +809,7 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
     day_add = 1 if scan["mode"] == "premarket" else 0
 
     def pos_line(p):
-        return f"[last ${p['last']}, P&L ${p['unrealized']} ({p.get('unrealized_pct')}%), day {p['days_held'] + day_add} of {p['max_hold']}]"
+        return f"[last ${p['last']}, P&L {pnl_mark(p.get('unrealized'))} ({p.get('unrealized_pct')}%), day {p['days_held'] + day_add} of {p['max_hold']}]"
 
     sigs = sorted(((p, sg) for p in positions for sg in p.get("signals", [])), key=lambda x: SIGNAL_ORDER.get(x[1]["code"], 99))
     exits = [(p, sg) for p, sg in sigs if sg["code"] in EXIT_CODES]
@@ -835,24 +852,23 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
         for x in pn:
             lines.append(f"- REVIEW {x['ticker']} position ({x['verdict']}): {x['reason']}")
     if positions:
-        lines += ["", f"=== OPEN POSITIONS ({len(positions)}) ==="]
+        lines += ["", f"=== OPEN POSITIONS ({len(positions)}): STATUS AND WHAT TO DO ==="]
         for p in positions:
             label = S.meta(p.get("strategy") or "", P)["label"] if p.get("strategy") else "manual"
-            codes = [sg["code"] for sg in p.get("signals", [])]
+            st_ = p.get("status") or {}
             end = _hold_end(p.get("entry_date"), p.get("max_hold") or 0)
-            status = ("action above" if any(c in EXIT_CODES or c in FILL_CODES or c in RAISE_CODES or c in CHECK_CODES for c in codes)
-                      else "hold; nothing to do")
             sh = p.get("shares")
             sh = int(sh) if isinstance(sh, (int, float)) and float(sh).is_integer() else sh
-            lines.append(f"- {p['ticker']} | {label} | entered {_day(p.get('entry_date'))} at ${p.get('entry')} x {sh} | "
-                         f"last ${p['last']} ({_pct(p['last'], p.get('entry'))}) | P&L ${p['unrealized']} | day {min(p['days_held'] + day_add, p['max_hold'])} of {p['max_hold']}"
-                         f"{' (today)' if day_add else ''}"
-                         f"{f', time stop at the close of {_day(end)}' if end else ''} | stop ${p.get('stop')} | target ${p.get('target')} | {status}")
-            dyn = p.get("dyn_exit")
-            if dyn and dyn != "none":
-                lines.append(f"    Exit rule: sell at the close once {DYN_TEXT.get(dyn, dyn)} (5-day avg now ${p.get('sma5')}).")
-            for p2, sg in notices:
-                if p2 is p:
+            lines.append(f"- {p['ticker']}: {TONE_MARK.get(st_.get('tone'), '')}{st_.get('label', 'KEEP HOLDING')}. {st_.get('detail', '')}".rstrip())
+            if p.get("last") is None:
+                continue
+            lines.append(f"    {label} | entered {_day(p.get('entry_date'))} at ${p.get('entry')} x {sh} | last ${p['last']} "
+                         f"| P&L {pnl_mark(p.get('unrealized'))} ({_pct(p['last'], p.get('entry'))}) "
+                         f"| day {p.get('day_now') or min(p['days_held'] + day_add, p['max_hold'])} of {p['max_hold']}"
+                         f"{f', time stop at the close of {_day(end)}' if end else ''} | stop ${p.get('stop')} | target ${p.get('target')}")
+            primary = st_.get("code")
+            for p2, sg in notices:  # other notices that aren't already the status line
+                if p2 is p and sg["code"] != primary and not (sg["code"] == "MARKET_STRESS" and primary == "HOLD"):
                     lines.append(f"    Note: {sg['text']}")
     featured = [e for e in entries if not e.get("also_qualified")]
     extra = [e for e in entries if e.get("also_qualified")]

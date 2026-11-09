@@ -243,3 +243,33 @@ def test_premarket_check_never_says_keep_for_a_withdrawn_order(tmp_path):
            "counts": {"aplus": 0}, "alert_updates": {}, "data": {"status": "ok"}}
     h = SC.headline(doc)
     assert "1 order to cancel" in h and "1 withdrawn setup not to place" in h
+
+
+def test_every_open_position_gets_one_plain_instruction():
+    """Each open position carries one status line: keep holding, sell (when), raise the stop, record a fill ..."""
+    from engine import scan as SC
+    P = S.params_with_defaults(None)
+    st = MON.check_trade(_trade(), _frames([100, 100.5, 100.2]), "postclose", {}, None, P, False)["status"]
+    assert st["label"] == "KEEP HOLDING" and st["tone"] == "hold" and "(time stop)" in st["detail"]
+    st = MON.check_trade(_trade(), _frames([100, 104.5, 104.5]), "postclose", {}, None, P, False)["status"]
+    assert st["code"] == "RAISE_STOP" and st["label"] == "KEEP HOLDING · RAISE THE STOP TO $102.00" and st["tone"] == "act"
+    # the day the hold window ends: pre-close says sell at today's close, the scans after it say sell at the open
+    ind8 = _frames([100] * 8, start="2026-01-02")
+    pre = MON.check_trade(_trade(max_hold=8), ind8, "preclose", {}, None, P, True)
+    post = MON.check_trade(_trade(max_hold=8), ind8, "postclose", {}, None, P, False)
+    assert pre["status"]["label"].startswith("TIME STOP: SELL AT TODAY'S CLOSE") and pre["status"]["when"] == "close"
+    assert post["status"]["label"] == "TIME STOP: SELL AT THE OPEN" and post["status"]["when"] == "open"
+    assert post["day_now"] == 8 and post["time_stop_day"] == "2026-01-13"
+    # every code the monitor raises maps to a clear instruction in every scan
+    for code in sorted(SC.EXIT_CODES | SC.FILL_CODES | SC.RAISE_CODES | SC.NOTICE_CODES | SC.CHECK_CODES):
+        for mode in ("premarket", "preclose", "postclose"):
+            st = MON.position_status([{"code": code, "text": "t.", "new_stop": 1.5}], mode, stop=1.0, target=2.0, dyn="sma5",
+                                     day_now=1, max_hold=5, last_day_str="Fri Jan 9")
+            assert st["label"] and st["tone"] in SC.TONE_MARK and st["when"] in {"now", "open", "close", "next", "none"}, (code, st)
+            if code in {"EXIT_RULE", "TIME_STOP", "TREND_BREAK", "EARNINGS", "GAP_BELOW_STOP"}:
+                assert st["tone"] == "sell" and "SELL" in st["label"], (code, mode, st)
+            if code in SC.RAISE_CODES | SC.NOTICE_CODES:
+                assert st["label"].startswith("KEEP HOLDING"), (code, st)
+    # the email marks open P&L the way the dashboard colours it
+    assert SC.pnl_mark(4.456).startswith("🟢 +$4.46") and SC.pnl_mark(-0.63).startswith("🔴 -$0.63")
+    assert SC.pnl_mark(0.004).startswith("⚪ $0.00") and SC.pnl_mark(-0.004).startswith("⚪ $0.00")
