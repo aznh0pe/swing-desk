@@ -103,7 +103,9 @@ MODES = {
                            "at the top of the digest."),
         "NEWS_STEP": NEWS_ENTRIES, "PROGRESS_BLOCK": "", "SCAN_ARGS": ""},
     "weekend": {
-        "MODE": "auto", "MODE_LABEL": "weekend refresh of the next session's setups (runs after Saturday's recalibration, so they are scored by this week's strategies)",
+        "MODE": "auto", "MODE_LABEL": ("weekend refresh of the next session's setups (runs Sunday afternoon: after Saturday's recalibration "
+                                  "and its Sunday-morning backup, so the setups are scored by this week's strategies, and late enough "
+                                  "that the news check covers the whole weekend)"),
         "FRESHNESS_RULE": "Use the newest data; there is nothing to wait for on a weekend.",
         "NEWS_STEP": NEWS_ENTRIES, "PROGRESS_BLOCK": "", "SCAN_ARGS": ""},
     "manual": {
@@ -162,13 +164,13 @@ BACKUPS = {
         "CHECK_RULE": 'It ran if one of those documents has an id ending in "-weekly" and a date of yesterday or today.',
         "OK_LINE": "this week's recalibration ran (journal <its id>).", "URGENCY": ""},
     "backup_weekend": {
-        "TARGET_ID": "trig_01XGcnEVgDkEYRGBoFe9xijx", "TARGET": "weekend", "TARGET_LABEL": "this Saturday's weekend refresh",
-        "DUE": "Saturday 12:41 PM PT", "CHECK_COLLECTION": "scans", "CHECK_ORDER": "started_at",
-        "CLOSED_RULE": ("This check runs on Saturday; there is no closed-day rule (the refresh scores the next session's setups "
+        "TARGET_ID": "trig_01XGcnEVgDkEYRGBoFe9xijx", "TARGET": "weekend", "TARGET_LABEL": "this Sunday's weekend refresh",
+        "DUE": "Sunday 4:17 PM PT", "CHECK_COLLECTION": "scans", "CHECK_ORDER": "started_at",
+        "CLOSED_RULE": ("This check runs on Sunday; there is no closed-day rule (the refresh scores the next session's setups "
                         "even when Monday is a market holiday)."),
-        "CHECK_RULE": ('It ran if one of those scans has mode "postclose", a started_at today at or after 12:30 PM, and status '
-                       '"ok" or "ok_with_warnings" (a Scan now pressed after 12:30 PM today counts too: it is the same refresh).'),
-        "OK_LINE": "this Saturday's weekend refresh ran at <its start time, e.g. 12:44 PM PT>.", "URGENCY": ""},
+        "CHECK_RULE": ('It ran if one of those scans has mode "postclose", a started_at today at or after 4:05 PM, and status '
+                       '"ok" or "ok_with_warnings" (a Scan now pressed after 4:05 PM today counts too: it is the same refresh).'),
+        "OK_LINE": "this Sunday's weekend refresh ran at <its start time, e.g. 4:20 PM PT>.", "URGENCY": ""},
 }
 
 

@@ -6,7 +6,7 @@
   "postclose":  {"id": "trig_01VJiBMjH2dJJnBrAaTr9BcX", "when": "weekdays 2:05 PM", "prompt": "ops/generated/postclose.md", "notify": "email + push"},
   "learning":   {"id": "trig_01V9Hsf7VTMtsod6AoHQnyiP", "when": "weekdays 3:12 PM", "prompt": "ops/generated/learning.md", "notify": "none"},
   "weekly":     {"id": "trig_01QZiuM65EDHm187zYcSY7Kk", "when": "Saturday 10:14 AM", "prompt": "ops/generated/weekly.md", "notify": "none"},
-  "weekend":    {"id": "trig_01XGcnEVgDkEYRGBoFe9xijx", "when": "Saturday 12:41 PM", "prompt": "ops/generated/weekend.md", "notify": "email + push"},
+  "weekend":    {"id": "trig_01XGcnEVgDkEYRGBoFe9xijx", "when": "Sunday 4:17 PM", "prompt": "ops/generated/weekend.md", "notify": "email + push"},
   "manual":     {"id": "trig_01812Le9m7LTp5vm9HhfZSvN", "when": "Scan now button", "prompt": "ops/generated/manual.md", "notify": "email + push"},
   "halfday_2026-11-27": {"id": "trig_01Au1pGF52XisNisf1Y94NTW", "when": "Fri Nov 27 2026 9:20 AM", "prompt": "ops/generated/preclose_halfday.md", "notify": "email + push"},
   "halfday_2026-12-24": {"id": "trig_01KsB1UAjVRRvPmyWFLo6BgE", "when": "Thu Dec 24 2026 9:20 AM", "prompt": "ops/generated/preclose_halfday.md", "notify": "email + push"}
@@ -17,6 +17,6 @@
   "postclose":  {"id": "trig_01PY6eHAikqDnNCUU4QR2q51", "when": "weekdays 2:53 PM", "prompt": "ops/generated/backup_postclose.md", "notify": "email + push"},
   "learning":   {"id": "trig_01GShKJnc3qaLTWHnZzqHg7o", "when": "weekdays 4:23 PM", "prompt": "ops/generated/backup_learning.md", "notify": "none"},
   "weekly":     {"id": "trig_01XCwqgr1TMFQuHDDY1drXFa", "when": "Sunday 10:23 AM", "prompt": "ops/generated/backup_weekly.md", "notify": "none"},
-  "weekend":    {"id": "trig_01TYGCAK2FcGJmaF9wXMKPLE", "when": "Saturday 1:29 PM", "prompt": "ops/generated/backup_weekend.md", "notify": "email + push"}
+  "weekend":    {"id": "trig_01TYGCAK2FcGJmaF9wXMKPLE", "when": "Sunday 5:07 PM", "prompt": "ops/generated/backup_weekend.md", "notify": "email + push"}
  }
 }
