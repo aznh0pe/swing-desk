@@ -4,15 +4,15 @@ Each scheduled task must carry the matching file in ops/generated/. Done = updat
 - [x] premarket  trig_01BC6UyGsrA3mesQsU6pFbRP
 - [x] preclose   trig_015vu682N2v147NyT2kAdSLJ
 - [x] weekend    trig_01XGcnEVgDkEYRGBoFe9xijx
-- [ ] manual     trig_01812Le9m7LTp5vm9HhfZSvN
+- [x] manual     trig_01812Le9m7LTp5vm9HhfZSvN
 - [x] learning   trig_01V9Hsf7VTMtsod6AoHQnyiP
 - [x] weekly     trig_01QZiuM65EDHm187zYcSY7Kk
-- [ ] halfday Nov 27  trig_01Au1pGF52XisNisf1Y94NTW (preclose_halfday.md)
-- [ ] halfday Dec 24  trig_01KsB1UAjVRRvPmyWFLo6BgE (preclose_halfday.md)
-- [ ] backup premarket trig_01WA17hiGscrK1sLsnnpwjEW
-- [ ] backup preclose  trig_01G67H8Efdaw2V1wPGevQH4X
-- [ ] backup postclose trig_01PY6eHAikqDnNCUU4QR2q51
-- [ ] backup learning  trig_01GShKJnc3qaLTWHnZzqHg7o
-- [ ] backup weekly    trig_01XCwqgr1TMFQuHDDY1drXFa
+- [x] halfday Nov 27  trig_01Au1pGF52XisNisf1Y94NTW (preclose_halfday.md)
+- [x] halfday Dec 24  trig_01KsB1UAjVRRvPmyWFLo6BgE (preclose_halfday.md)
+- [x] backup premarket trig_01WA17hiGscrK1sLsnnpwjEW
+- [x] backup preclose  trig_01G67H8Efdaw2V1wPGevQH4X
+- [x] backup postclose trig_01PY6eHAikqDnNCUU4QR2q51
+- [x] backup learning  trig_01GShKJnc3qaLTWHnZzqHg7o
+- [x] backup weekly    trig_01XCwqgr1TMFQuHDDY1drXFa
 - [x] backup weekend   trig_01TYGCAK2FcGJmaF9wXMKPLE
-Tasks not yet updated still work: they try the repo first and fall back to the dashboard's engine copy.
+All 15 scheduled tasks carry the Nov 11 prompts (finished Nov 11, 7:53 AM PT).
