@@ -16,3 +16,13 @@ Each scheduled task must carry the matching file in ops/generated/. Done = updat
 - [x] backup weekly    trig_01XCwqgr1TMFQuHDDY1drXFa
 - [x] backup weekend   trig_01TYGCAK2FcGJmaF9wXMKPLE
 All 15 scheduled tasks carry the Nov 11 prompts (finished Nov 11, 7:53 AM PT).
+
+## Nov 11 midday: two grades (A+ and weekly top-ups) tracked, tested and tuned separately
+Only these four prompts changed (daily review exports scans for watchlist grading and follows the research "focus";
+the recalibration journals the top-ups on their own): all updated 10:35 AM PT.
+- [x] learning        trig_01V9Hsf7VTMtsod6AoHQnyiP
+- [x] backup learning trig_01GShKJnc3qaLTWHnZzqHg7o
+- [x] weekly          trig_01QZiuM65EDHm187zYcSY7Kk
+- [x] backup weekly   trig_01XCwqgr1TMFQuHDDY1drXFa
+Scan prompts are unchanged (the scanner itself carries the new top-up rule). Live params re-tuned with
+`python3 -m engine.calibrate topups` (strategy/params v5); learning/stats rewritten with the per-grade record (v4).
