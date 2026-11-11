@@ -1336,6 +1336,14 @@ function viewLearning() {
   const label = (n) => S.backtest?.strategies?.[n]?.label || P?.custom?.[n]?.label || n;
   let html = `<section class="section"><div class="section-head"><h2>What the desk has learned</h2><span class="meta">${st?.updated_at ? "Updated " + dtShort(st.updated_at) : "Updated after every close"}</span></div>
     <div class="banner info">Every alert is graded against what the market actually did, whether you took it or not, and your real trades count double. The record is kept month by month, permanently, in this dashboard's database; each day's review is also in the journal below and in the Learning Journal doc in your project. Every scan uses it: a strategy's win estimate moves toward its real record, with recent months weighing more (6-month half-life).</div>`;
+  const gs = st?.grade_summary, G = P?.grading || {};
+  if (gs && ((gs.aplus?.n || 0) + (gs.topup?.n || 0) + (gs.aplus?.live_n || 0) + (gs.topup?.live_n || 0))) {
+    const row = (name, r) => `<tr><td>${name}</td><td class="n">${rate(r?.wins || 0, r?.n || 0)}</td><td class="n">${r?.n ? pct(100 * (r.avg_ret || 0), 2) : "–"}</td><td class="n">${rate(r?.live_wins || 0, r?.live_n || 0)}</td></tr>`;
+    const rule = G.topups_off ? "Top-ups are switched off: their record fell below the 62% floor." : G.topup_mode === "tight" ? "Top-ups now need the full A+ win estimate: their record trailed A+ by 10 points or more." : `Top-ups need score ${esc(G.topup_floor ?? 72)}+ and a win estimate within 3 points of the A+ bar. After 12 graded top-ups the rule follows their record: under 62% they stop; 10 points behind A+ they need the full A+ bar.`;
+    html += `<div class="panel" style="margin-top:12px"><div class="section-head"><h3>A+ setups vs weekly top-ups</h3><span class="meta">graded separately</span></div>
+      <div class="tbl-wrap"><table><thead><tr><th>Grade</th><th class="n">Graded setups, win rate</th><th class="n">Average result</th><th class="n">Your trades</th></tr></thead><tbody>${row("A+", gs.aplus)}${row("A (weekly top-up)", gs.topup)}</tbody></table></div>
+      <div class="small muted" style="margin-top:6px">${rule}</div></div>`;
+  }
   const sum = st?.summary || {};
   const names = Object.keys(sum).sort((a, b) => (sum[b].all_n || 0) - (sum[a].all_n || 0));
   if (!names.length) {

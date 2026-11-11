@@ -386,3 +386,35 @@ def test_weekly_minimum_is_five_and_quiet_scans_still_report():
     assert "no new A+ setups tonight" in SC.email_headline({**quiet, "mode": "postclose"})
     busy = SC.email_headline({**quiet, "counts": {"open_positions": 2, "exit_alerts": 1}})
     assert busy.startswith("1 exit alert") and "done:" not in busy
+
+
+def test_topups_are_graded_apart_and_their_record_sets_the_rule():
+    import datetime as dt
+    from engine import learnlog as LL
+    now = dt.datetime(2026, 11, 20, 15, 0)
+    alerts, shadow = [], []
+    for i in range(20):
+        top = i < 14
+        aid = f"e{i}"
+        alerts.append({"id": aid, "valid_for": "2026-11-1%d" % (i % 9), "strategy": "S", "grade": "A" if top else "A+",
+                       **({"topup_note": "Weekly top-up"} if top else {})})
+        win = (i % 2 == 0) if top else True   # top-ups win 7 of 14, A+ 6 of 6
+        shadow.append({"alert_id": aid, "status": "closed", "fill": 100.0, "exit": 102.0 if win else 97.0, "strategy": "S"})
+    trades = [{"alert_id": "e0", "entry_price": 100, "exit_price": 103, "exit_date": "2026-11-12", "strategy": "S"}]
+    st = LL.stats_doc(None, alerts, shadow, trades, True, now)
+    gs = st["grade_summary"]
+    assert gs["topup"]["n"] == 14 and gs["topup"]["wins"] == 7 and gs["aplus"]["n"] == 6 and gs["aplus"]["win_rate"] == 1.0
+    assert gs["topup"]["live_n"] == 1 and gs["aplus"]["live_n"] == 0
+    G = {"aplus_pwin": 0.72, "oos_aplus_win_rate": 0.75}
+    pol = LL.topup_policy(st, G)
+    assert pol["mode"] == "off" and pol["topups_off"] is True and "stopped" in pol["note"]
+    # too few results: the rule stays as designed
+    few = LL.stats_doc(None, alerts[:4], shadow[:4], [], True, now)
+    assert LL.topup_policy(few, G) == {"mode": "keep", "topup_pwin": 0.69, "topups_off": False, "note": ""}
+    # a decent but clearly weaker record: back to the full A+ bar
+    sh2 = [dict(s, exit=102.0 if (i < 9 or i >= 14) else 97.0) for i, s in enumerate(shadow)]   # top-ups 9 of 14 = 64%
+    pol2 = LL.topup_policy(LL.stats_doc(None, alerts, sh2, [], True, now), G)
+    assert pol2["mode"] == "tight" and pol2["topup_pwin"] == 0.72 and pol2["topups_off"] is False
+    # the record survives when old alerts fall out of the export
+    later = LL.stats_doc(st, [dict(alerts[0], valid_for="2026-12-02")], [], [], False, dt.datetime(2026, 12, 5))
+    assert later["grade_months"]["2026-11"]["topup"]["shadow_n"] == 14

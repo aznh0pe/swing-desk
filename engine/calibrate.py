@@ -498,6 +498,15 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
             if d.get("verdict") == "candidate":
                 changes.append(f"Research idea {d.get('label')} became a candidate on this week's data.")
     if merge_state:
+        try:  # the top-up rule follows the live record of top-ups, whatever this week's backtest chose for A+
+            from . import learnlog as LL_
+            st_ = ((load_state(merge_state).get("learning") or {}).get("stats") or {}).get("doc")
+            pol = LL_.topup_policy(st_, P["grading"])
+            P["grading"].update({"topup_mode": pol["mode"], "topup_pwin": pol["topup_pwin"], "topups_off": pol["topups_off"]})
+            if pol["note"]:
+                changes.append(pol["note"])
+        except Exception as ex:
+            log(f"top-up record unavailable: {ex!r}")
         if oldP.get("live_adjust"):
             P["live_adjust"] = oldP["live_adjust"]  # keep what live trading has taught us
         for k in ("risk",):
@@ -672,6 +681,23 @@ def run_learning(data_dir, state_dir, out_dir, now=None) -> dict:
                                                           f"{now.date().isoformat()}.")
                 changes.append(f"Paused {S.meta(name, P)['label']}: {wr:.0%} win rate over {n_eff} trades "
                                "is below the 50% floor. It will be re-tested at the weekly recalibration.")
+    # A+ setups and weekly top-ups are graded apart; the top-up rule follows its own record
+    gs = stats.get("grade_summary") or {}
+    journal_grades = {g: {k: v.get(k) for k in ("n", "wins", "win_rate", "avg_ret", "live_n", "live_wins", "weighted_n",
+                                                "weighted_win_rate")} for g, v in gs.items()}
+    tu, apg = gs.get("topup") or {}, gs.get("aplus") or {}
+    if tu.get("n"):
+        insights.append(f"Weekly top-ups (grade A): {tu['wins']} of {tu['n']} graded won ({tu['win_rate']:.0%}, average "
+                        f"{100 * (tu.get('avg_ret') or 0):+.2f}%)"
+                        + (f" vs A+ {apg['wins']} of {apg['n']} ({apg['win_rate']:.0%}, {100 * (apg.get('avg_ret') or 0):+.2f}%)."
+                           if apg.get("n") else ".")
+                        + (f" The rule changes only after {LL.TOPUP_MIN_N} weighted results." if (tu.get("weighted_n") or 0) < LL.TOPUP_MIN_N else ""))
+    pol = LL.topup_policy(stats, P["grading"], now)
+    G_ = P["grading"]
+    if (pol["mode"] != G_.get("topup_mode", "keep")) or (pol["mode"] != "keep" and abs(float(G_.get("topup_pwin", 0)) - pol["topup_pwin"]) > 1e-9):
+        was = G_.get("topup_mode", "keep")
+        G_["topup_mode"], G_["topup_pwin"], G_["topups_off"] = pol["mode"], pol["topup_pwin"], pol["topups_off"]
+        changes.append(pol["note"] or f"Weekly top-ups back to the normal rule (were '{was}'): their record recovered.")
     # feature diagnostics on recent shadow results
     if not sh.empty and len(sh) >= 12:
         amap = {a.get("id"): a for a in alerts}
@@ -718,7 +744,7 @@ def run_learning(data_dir, state_dir, out_dir, now=None) -> dict:
     day = now.date().isoformat()
     journal = {"id": day, "date": day, "created_at": now.isoformat(timespec="seconds"),
                "shadow": agg(sh), "live": agg(closed), "by_strategy": by, "worked": worked,
-               "didnt_work": didnt, "insights": insights or ["No statistically meaningful drift yet."],
+               "didnt_work": didnt, "by_grade": journal_grades, "insights": insights or ["No statistically meaningful drift yet."],
                "changes": changes or ["No parameter changes today."], "params_version": P.get("version")}
     writes = []
     jid = now.strftime("%Y-%m-%d-%H%M")

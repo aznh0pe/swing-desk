@@ -254,6 +254,8 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
     wmin = week_min(settings)
     pace = min(wmin, asof.weekday() + 1)  # one more each night: 1 by Monday ... 5 by Friday
     need = max(0, pace - week_so_far - n_aplus) if mode == "postclose" else 0
+    if G.get("topups_off"):  # the daily review stops top-ups when their own record falls under the floor
+        need = 0
     floor = float(G.get("topup_floor", G.get("aplus_score", 74) - 8))
     # a top-up may sit up to 3 points under the A+ model bar: in the backtest the score band just under A+
     # won about as often as A+ (smaller average gain), so it is the honest next-best when A+ is scarce

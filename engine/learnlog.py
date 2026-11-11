@@ -249,11 +249,105 @@ def portfolio_stats(alerts: list, shadow: list, trades: list, ledger: list, toda
     return doc
 
 
+TOPUP_MIN_N = 12        # weighted top-ups graded before the record may change the rule
+TOPUP_OFF_WIN = 0.62    # below this the top-ups stop
+TOPUP_GAP = 0.10        # this far under the A+ record (or the backtest's A+ rate) the bar goes back to the A+ bar
+
+
+def _gblank():
+    return {"shadow_n": 0, "shadow_wins": 0, "shadow_ret": 0.0, "live_n": 0, "live_wins": 0, "live_ret": 0.0}
+
+
+def grade_of(alert: dict) -> str:
+    return "topup" if (alert or {}).get("topup_note") or (alert or {}).get("grade") == "A" else "aplus"
+
+
+def grade_tallies(alerts: list, shadow: list, closed_trades: list) -> dict:
+    """Monthly results of A+ setups and weekly top-ups (grade A), kept apart so each is judged on its own."""
+    amap = {a.get("id"): a for a in alerts}
+    out: dict = {}
+    for s in shadow:
+        if s.get("status") != "closed" or not s.get("fill"):
+            continue
+        a = amap.get(s.get("alert_id"))
+        m = str((a or {}).get("valid_for", ""))[:7]
+        if not a or len(m) != 7:
+            continue
+        ret = float(s["exit"]) / float(s["fill"]) - 1
+        c = out.setdefault(m, {}).setdefault(grade_of(a), _gblank())
+        c["shadow_n"] += 1
+        c["shadow_wins"] += int(ret > 0)
+        c["shadow_ret"] += ret
+    for t in closed_trades:
+        a = amap.get(t.get("alert_id"))
+        m = str(t.get("exit_date") or t.get("entry_date") or "")[:7]
+        if not a or len(m) != 7:
+            continue  # a trade whose alert is no longer in the export keeps the month already on record
+        try:
+            ret = float(t["exit_price"]) / float(t["entry_price"]) - 1
+        except Exception:
+            continue
+        c = out.setdefault(m, {}).setdefault(grade_of(a), _gblank())
+        c["live_n"] += 1
+        c["live_wins"] += int(ret > 0)
+        c["live_ret"] += ret
+    for cells in out.values():
+        for c in cells.values():
+            c["shadow_ret"], c["live_ret"] = round(c["shadow_ret"], 5), round(c["live_ret"], 5)
+    return out
+
+
+def grade_summary(grade_months: dict, now) -> dict:
+    out = {}
+    for g in ("aplus", "topup"):
+        n = w = ln = lw = 0
+        ret = lret = wn = ww = 0.0
+        for m, cells in (grade_months or {}).items():
+            c = (cells or {}).get(g)
+            if not c:
+                continue
+            n += c.get("shadow_n", 0); w += c.get("shadow_wins", 0); ret += c.get("shadow_ret", 0.0)
+            ln += c.get("live_n", 0); lw += c.get("live_wins", 0); lret += c.get("live_ret", 0.0)
+            wt = 0.5 ** (_age_months(m, now) / HALF_LIFE_MONTHS)
+            wn += wt * (c.get("shadow_n", 0) + 2 * c.get("live_n", 0))
+            ww += wt * (c.get("shadow_wins", 0) + 2 * c.get("live_wins", 0))
+        out[g] = {"n": n, "wins": w, "win_rate": round(w / n, 3) if n else None, "avg_ret": round(ret / n, 5) if n else None,
+                  "live_n": ln, "live_wins": lw, "live_win_rate": round(lw / ln, 3) if ln else None,
+                  "live_avg_ret": round(lret / ln, 5) if ln else None,
+                  "weighted_n": round(wn, 1), "weighted_win_rate": round(ww / wn, 3) if wn else None}
+    return out
+
+
+def topup_policy(stats: dict | None, grading: dict, now=None) -> dict:
+    """What the record says about weekly top-ups: keep them, hold them to the A+ bar, or stop them.
+    Returns {"mode", "topup_pwin", "topups_off", "note"}; the daily review and the weekly recalibration both apply it."""
+    gs = ((stats or {}).get("grade_summary") or {})
+    t, a = gs.get("topup") or {}, gs.get("aplus") or {}
+    ap = float(grading.get("aplus_pwin", 0.62))
+    base = {"mode": "keep", "topup_pwin": round(ap - 0.03, 3), "topups_off": False, "note": ""}
+    n, wr = float(t.get("weighted_n") or 0), t.get("weighted_win_rate")
+    if n < TOPUP_MIN_N or wr is None:
+        return base
+    ref = a.get("weighted_win_rate") if float(a.get("weighted_n") or 0) >= TOPUP_MIN_N else None
+    ref = ref if ref is not None else float(grading.get("oos_aplus_win_rate") or 0.75)
+    if wr < TOPUP_OFF_WIN:
+        return {"mode": "off", "topup_pwin": round(ap, 3), "topups_off": True,
+                "note": f"Weekly top-ups stopped: they won {wr:.0%} over {n:.0f} weighted results, below the {TOPUP_OFF_WIN:.0%} floor."}
+    if wr < ref - TOPUP_GAP:
+        return {"mode": "tight", "topup_pwin": round(ap, 3), "topups_off": False,
+                "note": (f"Weekly top-ups now need the full A+ win estimate ({ap:.0%}): they won {wr:.0%} over {n:.0f} weighted "
+                         f"results against {ref:.0%} for A+.")}
+    return base
+
+
 def stats_doc(prev_doc: dict | None, alerts: list, shadow: list, closed_trades: list, export_complete: bool, now) -> dict:
     fresh = monthly_tallies(alerts, shadow, closed_trades)
     oldest = min((str(a.get("valid_for", ""))[:7] for a in alerts if a.get("valid_for")), default=None)
     months = merge_months((prev_doc or {}).get("months") or {}, fresh, export_complete, oldest)
+    gm = merge_months((prev_doc or {}).get("grade_months") or {}, grade_tallies(alerts, shadow, closed_trades),
+                      export_complete, oldest)
     return {"updated_at": now.isoformat(timespec="seconds"), "months": months, "summary": summary(months, now),
+            "grade_months": gm, "grade_summary": grade_summary(gm, now),
             "half_life_months": HALF_LIFE_MONTHS,
             "about": ("Monthly tallies of every graded alert (shadow) and real trade (live) per strategy, kept "
                       "permanently; score adjustments use them with live fills counted double and a 6-month half-life.")}
