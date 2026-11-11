@@ -296,3 +296,55 @@ def test_a_reached_target_with_an_exit_signal_reads_as_one_plan():
     txt = SC.make_digest(scan, [], pos, [], [], 0, S.params_with_defaults(None), _dt.datetime(2026, 11, 9, 12, 31))
     assert "NDSN: ONLY IF STILL OPEN, SELL AT CLOSE (today). Its target was reached" in txt
     assert "NDSN: 🟢 TARGET REACHED: RECORD THE SALE." in txt and "P&L 🟢 +$15.20" in txt
+
+
+def test_an_order_that_never_filled_expires_with_its_proof():
+    """Day orders expire at the close: once the session is over, every placed order gets a verdict from that day's
+    prices (strict, like the backtest: the low must trade BELOW the limit), so it never lingers as a live alert."""
+    import datetime as _dt
+    import pandas as pd
+    from engine import scan as SC
+    idx = pd.to_datetime(["2026-11-06", "2026-11-09", "2026-11-10"])
+    ind = {"low": pd.DataFrame({"TWLO": [197.57, 199.32, 203.26], "IEX": [222.60, 228.97, 234.04]}, index=idx),
+           "open": pd.DataFrame({"TWLO": [205.01, 202.20, 204.92], "IEX": [223.82, 230.64, 234.43]}, index=idx)}
+    a = {"id": "e1", "ticker": "TWLO", "status": "placed", "valid_for": "2026-11-09", "entry": 195.28, "stop": 144.73,
+         "target": 220.56, "order": "Buy LIMIT $195.28, day order"}
+    c = SC.order_fill_check(a, ind, _dt.date(2026, 11, 10), "premarket", False)
+    assert c["filled"] is False and c["low"] == 199.32 and c["text"].startswith("Didn't fill") and "expired" in c["text"]
+    touch = SC.order_fill_check({**a, "ticker": "IEX", "valid_for": "2026-11-06", "entry": 222.60}, ind, _dt.date(2026, 11, 9), "premarket", False)
+    assert touch["filled"] is False and touch["touched"] is True and "touched" in touch["text"]
+    hit = SC.order_fill_check({**a, "valid_for": "2026-11-10", "entry": 210.0}, ind, _dt.date(2026, 11, 10), "postclose", False)
+    assert hit["filled"] is True and hit["text"].startswith("Probably FILLED") and "opened at $204.92" in hit["text"]
+    unmarked = SC.order_fill_check({**a, "status": "new", "valid_for": "2026-11-10", "entry": 210.0}, ind, _dt.date(2026, 11, 11), "premarket", False)
+    assert unmarked["text"].startswith("If you placed it, it probably filled")
+    # still working: today's order before the close, or today's order on a partial bar
+    assert SC.order_fill_check({**a, "valid_for": "2026-11-10"}, ind, _dt.date(2026, 11, 10), "preclose", True) is None
+    assert SC.order_fill_check({**a, "valid_for": "2026-11-10"}, ind, _dt.date(2026, 11, 10), "postclose", True) is None
+    # no verdict without that day's bar, and none for a buy-near-the-close order (only the brokerage knows)
+    assert SC.order_fill_check({**a, "valid_for": "2026-11-11"}, ind, _dt.date(2026, 11, 12), "premarket", False)["filled"] is None
+    assert SC.order_fill_check({**a, "order": "Buy near the close today"}, ind, _dt.date(2026, 11, 10), "premarket", False)["filled"] is None
+    # the email: a probable fill is an action, an expired order is information
+    scan = {"mode": "postclose", "market": {"label": "Bull", "spy": 1, "spy_vs_200d_pct": 1, "spy_5d_pct": 1,
+            "breadth_above_50d_pct": 50, "vix": 15}, "funds": {"capital": 5000, "cash": 5000, "open_count": 0},
+            "data": {"status": "ok", "notes": []}, "alert_updates": {}, "fill_checks": [hit, {**c, "last_day": "2026-11-10"}],
+            "counts": {"orders_to_record": 1}}
+    txt = SC.make_digest(scan, [], [], [], [], 0, S.params_with_defaults(None), _dt.datetime(2026, 11, 10, 14, 5))
+    assert "ORDERS TO RECORD" in txt and "ORDERS THAT DIDN'T FILL" in txt
+    assert "1 order probably filled: record" in SC.headline({"counts": {"orders_to_record": 1}, "data": {"status": "ok"}})
+
+
+def test_unfilled_orders_count_as_fill_rate_not_as_skips():
+    from engine import learnlog as LL
+    A = lambda i, st, **k: {"id": i, "type": "entry", "ticker": i.upper(), "strategy": "R_PCTB_3DAY", "valid_for": "2026-11-09",
+                           "status": st, "entry": 100, **k}
+    alerts = [A("f", "filled", trade_id="t1"), A("u", "unfilled"), A("p_unf", "placed"), A("p_hit", "placed"),
+              A("s", "skipped"), A("cw", "cancelled", withdrawn=True), A("cc", "cancelled")]
+    shadow = [{"alert_id": "p_unf", "status": "unfilled"}, {"alert_id": "p_hit", "status": "closed", "fill": 100, "exit": 103},
+              {"alert_id": "s", "status": "closed", "fill": 100, "exit": 104}, {"alert_id": "cc", "status": "closed", "fill": 100, "exit": 98}]
+    doc = LL.portfolio_stats(alerts, shadow, [], [], "2026-11-10", S.params_with_defaults(None), {"R_PCTB_3DAY": 0.455})
+    o = doc["orders"]
+    assert (o["placed"], o["filled"], o["unfilled"], o["cancelled"]) == (4, 1, 2, 2)  # p_unf counts as unfilled; p_hit unresolved
+    assert o["fill_rate"] == 0.25 and o["expected_fill_rate"] == 0.455
+    assert doc["skipped"]["n"] == 2  # your skip and the order you cancelled by choice; never an unfilled order
+    assert o["probably_filled_unrecorded"] == [{"ticker": "P_HIT", "day": "2026-11-09", "limit": 100}]
+    assert any("Probably filled but not recorded" in x for x in doc["lessons"])

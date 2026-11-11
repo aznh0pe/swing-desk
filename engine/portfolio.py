@@ -132,6 +132,7 @@ def load_state(state_dir) -> dict:
     return {"settings": settings, "trades": load_collection(sd, "trades"),
             "ledger": load_collection(sd, "ledger"), "alerts": load_collection(sd, "alerts"),
             "scans": load_collection(sd, "scans"), "learning": load_collection(sd, "learning"), "params_doc": params_doc,
+            "strategy": strat,
             "versions": {"config/settings": cfg.get("settings", {}).get("version"),
                          "strategy/params": strat.get("params", {}).get("version")}}
 

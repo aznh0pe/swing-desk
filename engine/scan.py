@@ -31,7 +31,7 @@ from .monitor import check_trade, DYN_TEXT
 from .portfolio import funds, load_collection, load_state, risk_governor, size_position
 
 USER_FIELDS = {"status", "actual_price", "actual_shares", "done_at", "user_note", "trade_id",
-               "skipped_at"}
+               "skipped_at", "placed_at", "unfilled_at", "cancelled_at", "fill_check"}
 # fields a later scan may refresh on an alert that already exists (sent as an overlay in the scan
 # document, because existing documents are never overwritten); user fields are never touched
 SCAN_OWNED = ("rank", "score", "win_pct", "model_win_pct", "grade", "news_check", "news_note", "capacity_note",
@@ -295,6 +295,7 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
                            f"(place before the 6:30 AM PT open). Attach stop ${cd['stop']:.2f} and "
                            f"limit-sell target ${cd['target']:.2f} once filled (bracket/OCO)."),
             "valid_for": str(session_day if cd["plan"]["entry_kind"] != "close" else asof),
+            "entry_kind": cd["plan"]["entry_kind"],
             "hold_max_days": hold, "valid_days": int(cd["plan"].get("valid_days", 1)),
             "hold_typical_days": int(max(1, round((mdl.get("avg_hold") or min(4, hold)) ))),
             "dyn_exit": cd["plan"]["dyn_exit"],
@@ -430,6 +431,8 @@ def headline(scan_doc: dict) -> str:
         bits.append(f"{c['stop_raises']} stop{'s' if c['stop_raises'] != 1 else ''} to raise")
     if c.get("fills_to_confirm"):
         bits.append(f"{c['fills_to_confirm']} fill{'s' if c['fills_to_confirm'] != 1 else ''} to confirm")
+    if c.get("orders_to_record"):
+        bits.append(f"{c['orders_to_record']} order{'s' if c['orders_to_record'] != 1 else ''} probably filled: record")
     if c.get("positions_to_check"):
         bits.append(f"{c['positions_to_check']} position{'s' if c['positions_to_check'] != 1 else ''} to check")
     pmc = scan_doc.get("premarket_checks") or []
@@ -562,10 +565,11 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
                 positions.append(res)
         except Exception as e:
             errors.append(f"monitor {t.get('ticker')}: {e!r}"[:200])
-    # pending entry alerts: expire / premarket re-check
-    expire, pm_checks = [], []
+    # pending entry alerts: expire / premarket re-check / did a placed order fill?
+    expire, pm_checks, fill_checks = [], [], []
     today = now.date()
-    prev_ov = current_overlay(state) if mode == "premarket" else {}
+    last_session = today if (mode == "postclose" and not partial) else cal.prev_trading_day(today)
+    prev_ov = current_overlay(state)  # the dashboard's view: withdrawn setups, refreshed plans
     for aid, v in state["alerts"].items():
         a = v["doc"]
         # orders you marked as placed are checked before the open too: they are the ones that can fill
@@ -575,8 +579,20 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
             vf = cal._d(a.get("valid_for"))
         except Exception:
             continue
+        try:
+            fc = order_fill_check(a, ind, today, mode, partial)
+        except Exception as e:
+            fc = None
+            errors.append(f"fill check {a.get('ticker')}: {e!r}"[:200])
+        # placed orders always get their verdict; an order you never marked placed only when it would have filled in
+        # the session that just ended (in case you placed it and forgot to mark it), and never a withdrawn setup
+        unmarked_ok = (fc and fc.get("filled") and fc["last_day"] >= str(last_session)
+                       and not (prev_ov.get(aid) or {}).get("withdrawn") and not a.get("withdrawn"))
+        if fc and (a.get("status") == "placed" or unmarked_ok):
+            fc["id"] = fc.get("alert_id") or aid
+            fill_checks.append(fc)
         if vf < today or (vf == today and mode == "postclose" and cal.market_phase(now) in ("postclose", "closed_day")):
-            if a.get("status") in ("new", None):  # a placed order stays until you mark it filled or skipped
+            if a.get("status") in ("new", None):  # a placed order is resolved by its fill check (below and on the dashboard)
                 expire.append((aid, v.get("version")))
         elif mode == "premarket" and vf == today:
             prev = prev_ov.get(aid) or {}
@@ -637,9 +653,11 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
                  "tickers": int(ind["close"].shape[1])},
         "market": regime_summary(ind), "funds": f,
         "counts": {"aplus": len(entries), "near_misses": len(near), **signal_counts(positions),
+                   "orders_to_record": sum(1 for c in fill_checks if c.get("filled")),
+                   "orders_unfilled": sum(1 for c in fill_checks if c.get("filled") is False),
                    "open_positions": len(positions), "expired": len(expire), "week_aplus": week_aplus,
                    "new_docs": len(writes)},
-        "positions": positions, "near_misses": near[:8], "premarket_checks": pm_checks,
+        "positions": positions, "near_misses": near[:8], "premarket_checks": pm_checks, "fill_checks": fill_checks[:30],
         "expired_alert_ids": [a for a, _ in expire][:50],
         "params_version": P.get("version"), "errors": errors[:40], "notes": notes,
         "session_day": str(session_day), "engine": engine_version.info(),
@@ -689,6 +707,60 @@ def closed_run(mode: str, now, out: pathlib.Path, run_token: str | None = None) 
     (out / "writes.json").write_text(json.dumps([writes], indent=1))
     return {"scan_id": scan_id, "mode": mode, "entries": 0, "exits": 0, "writes": len(writes), "chunks": 1,
             "status": "closed", "data_status": "n/a", "errors": [], "headline": email_headline(scan_doc)}
+
+
+def order_fill_check(a: dict, ind: dict, today, mode: str, partial_bar: bool) -> dict | None:
+    """Once an entry order's session is over: did its limit trade through? Same rule as the backtest and the
+    shadow grader: a buy limit fills only when the session's low trades BELOW it (a touch is not a fill).
+    Day orders expire at the close, so an order whose limit never traded through is simply done: it didn't fill.
+    Returns None while the order's session is still running."""
+    try:
+        vf = cal._d(a.get("valid_for"))
+    except Exception:
+        return None
+    vd = max(1, int(a.get("valid_days") or 1))
+    last = cal.next_trading_day(vf, vd - 1) if vd > 1 else vf
+    if not (last < today or (last == today and mode == "postclose" and not partial_bar)):
+        return None
+    tk, lim = a.get("ticker"), a.get("entry")
+    out = {"alert_id": a.get("id"), "ticker": tk, "status": a.get("status") or "new", "valid_for": str(vf),
+           "last_day": str(last), "limit": lim, "stop": a.get("stop"), "target": a.get("target"),
+           "filled": None, "touched": False, "low": None, "open": None}
+    mine = out["status"] == "placed"
+    kind = a.get("entry_kind") or ("close" if str(a.get("order", "")).startswith("Buy near the close") else "limit")
+    if kind == "close" or not lim:
+        out["text"] = (("A" if mine else "If you placed it: a") + " buy-near-the-close order, so only your brokerage "
+                       "knows whether it was bought. If it was, press Mark done (filled) with the price; if not, press Didn't fill.")
+        return out
+    lows, opens = ind["low"], ind["open"]
+    days = [d for d in lows.index if vf <= d.date() <= last]
+    if tk not in lows.columns or not days or days[-1].date() != last:
+        out["text"] = (("T" if mine else "If you placed it: t") + f"he price data doesn't have the {_day(last)} session yet, "
+                       "so check your brokerage: press Mark done (filled) if it filled, Didn't fill if not.")
+        return out
+    vals = lows.loc[days, tk].astype(float)
+    if vals.isna().all():
+        out["text"] = ("N" if mine else "If you placed it: n") + f"o price data for {tk} that day; check your brokerage."
+        return out
+    lim = float(lim)
+    lo, op = float(np.nanmin(vals.values)), float(opens.loc[days[0], tk])
+    filled = lo < lim
+    touched = (not filled) and abs(lo - lim) <= 0.005
+    out.update(filled=bool(filled), touched=bool(touched), low=round(lo, 2), open=round(op, 2) if math.isfinite(op) else None)
+    kind_word = "day order" if vd == 1 else "order"
+    if filled:
+        at_open = f" It opened at ${op:.2f}, under your limit, so the fill was probably near that price." if math.isfinite(op) and op < lim else ""
+        out["text"] = (("Probably FILLED" if mine else "If you placed it, it probably filled") + f": the low ${lo:.2f} traded "
+                       f"below your ${lim:.2f} limit on {_day(last)}.{at_open} "
+                       f"If it filled, set the stop ${a.get('stop')} and target ${a.get('target')} as a bracket and press "
+                       "Mark done (filled) with your fill price, so the scans watch the position. If it didn't, press Didn't fill.")
+    elif touched:
+        out["text"] = (f"Didn't fill: the low ${lo:.2f} touched your ${lim:.2f} limit without trading below it "
+                       f"(a touch rarely fills). The {kind_word} expired at the close; nothing to do.")
+    else:
+        out["text"] = (f"Didn't fill: the low ${lo:.2f} stayed {100 * (lo / lim - 1):.1f}% above your ${lim:.2f} limit. "
+                       f"The {kind_word} expired at the close; nothing to do.")
+    return out
 
 
 def premarket_check(a, premarket, earnings, today) -> dict:
@@ -836,6 +908,20 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
         lines += ["", "=== FILLS TO CONFIRM (your bracket order probably already handled these) ==="]
         for p, sg in fills:
             lines.append(f"- {p['ticker']}: {sg['action']}. {sg['text']} {pos_line(p)}")
+    fcs = scan.get("fill_checks") or []
+    rec = [c for c in fcs if c.get("filled")]
+    ask = [c for c in fcs if c.get("filled") is None and c.get("status") == "placed"]
+    if rec or ask:
+        lines += ["", numbered("ORDERS TO RECORD (did your buy order fill?)")]
+        for c in rec + ask:
+            lines.append(f"- {c['ticker']} (buy limit {_money(c.get('limit'))}, {_day(c['valid_for'])}{', marked placed' if c.get('status') == 'placed' else ''}): {c['text']}")
+    recent_day = str(now.date() if scan["mode"] == "postclose" and not (scan.get("data") or {}).get("partial_bar")
+                     else cal.prev_trading_day(now.date()))
+    gone = [c for c in fcs if c.get("filled") is False and c.get("status") == "placed" and c.get("last_day", "") >= recent_day]
+    if gone:
+        lines += ["", "=== ORDERS THAT DIDN'T FILL (expired at the close; the dashboard records them, nothing to do) ==="]
+        for c in gone:
+            lines.append(f"- {c['ticker']} (buy limit {_money(c.get('limit'))}, {_day(c['valid_for'])}): {c['text']}")
     if raises:
         lines += ["", numbered("STOPS TO RAISE")]
         for p, sg in raises:

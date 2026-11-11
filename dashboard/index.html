@@ -190,6 +190,7 @@ td .t { font-family: var(--f-display); font-stretch: 85%; font-weight: 700; font
 .pc-status.st-good { background: var(--good-bg); border-left-color: var(--good); } .pc-status.st-good .lbl { color: var(--good); }
 .pc-status.st-act { background: var(--warn-bg); border-left-color: var(--warn); } .pc-status.st-act .lbl { color: var(--warn); }
 .pc-st-act { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 5px; }
+.linklike { background: none; border: 0; padding: 0; margin: 0; font: inherit; color: var(--info); text-decoration: underline; cursor: pointer; }
 @media (max-width: 480px) { .pc-levels { grid-template-columns: repeat(2, minmax(0, 1fr)); } .pc-levels > div:nth-child(2) { border-right: 0; } .pc-levels > div:nth-child(-n+2) { border-bottom: 1px solid var(--line); } }
 @media (max-width: 600px) { .pc-sell input, .pc-sell select { font-size: 16px; } }
 
@@ -375,15 +376,48 @@ function mergeAlerts() {
     return { ...a, ...rest };
   });
 }
+// ---- an order's life: a day order works until its session's close; after that it filled or it expired.
+function nextTD(d) { d = addDays(d, 1); while (!isTradingDay(d)) d = addDays(d, 1); return d; }
+function prevTD(d) { d = addDays(d, -1); while (!isTradingDay(d)) d = addDays(d, -1); return d; }
+function lastValidDay(a) { let d = String(a.valid_for || "").slice(0, 10); if (!d) return null; for (let i = 1; i < Math.max(1, num(a.valid_days) || 1); i++) d = nextTD(d); return d; }
+function sessionOver(a) { const last = lastValidDay(a); if (!last) return false; const t = todayPT(); return last < t || (last === t && nowHM() >= (EARLY_CLOSES.has(t) ? "10:00" : "13:00")); }
+// each scan checks every placed order whose session is over against that day's prices (same rule as the backtest:
+// the low must trade below the limit); newest scan wins
+function fillCheckMap() { const m = {}; for (const sc of S.scans) for (const c of sc.fill_checks || []) { const id = c.alert_id || c.id; if (id && !(id in m)) m[id] = { ...c, _at: sc.started_at }; } return m; }
 function entryLive(a) {
   if (a.type !== "entry") return false;
-  if (a.status === "placed") return true;
-  if (a.status !== "new") return false;
-  if (a.withdrawn) return false;
-  const t = todayPT();
-  if (!a.valid_for || a.valid_for > t) return true;
-  if (a.valid_for < t) return false;
-  return fmtHM.format(new Date()) < "13:00";
+  if (a.status === "placed") return !sessionOver(a);  // an order that expired at the close leaves the live list
+  if (a.status !== "new" || a.withdrawn) return false;
+  return !a.valid_for || !sessionOver(a);
+}
+// orders whose session ended without a recorded result: a clear "didn't fill" is recorded on its own
+// (autoExpireOrders); a probable fill, or no price check yet, asks you one question
+function orderResolutions() {
+  const fcm = fillCheckMap(), out = [], recent = prevTD(todayPT());
+  for (const a of S.alerts) {
+    if (a.type !== "entry" || !sessionOver(a)) continue;
+    const fc = fcm[a.id];
+    if (a.status === "placed") { if (fc?.filled === false) continue; out.push({ a, fc, kind: fc?.filled ? "likely" : "ask" }); }
+    else if (a.status === "new" && fc?.filled && !a.withdrawn && (lastValidDay(a) || "") >= recent) out.push({ a, fc, kind: "unmarked" });
+  }
+  return out.sort((x, y) => String(y.a.valid_for).localeCompare(String(x.a.valid_for)));
+}
+const AUTO_DONE = new Set();
+async function autoExpireOrders() {
+  if (!S.db || !S.loaded.alerts || !S.scans.length) return;
+  try { if (S.user && typeof S.user.canEdit === "function" && S.user.canEdit() === false) return; } catch {}
+  const fcm = fillCheckMap(), done = [];
+  for (const a of S.alerts) {
+    if (a.type !== "entry" || a.status !== "placed" || AUTO_DONE.has(a.id) || !sessionOver(a)) continue;
+    const fc = fcm[a.id]; if (!fc || fc.filled !== false) continue;
+    AUTO_DONE.add(a.id);
+    try {
+      await updDoc("alerts/" + a.id, { status: "unfilled", unfilled_at: nowIso(), unfilled_auto: true,
+        fill_check: { day: fc.last_day || a.valid_for, low: fc.low ?? null, limit: fc.limit ?? null, touched: !!fc.touched, text: fc.text || "", scan_at: fc._at || null } });
+      done.push(`${a.ticker} (${dShort(a.valid_for)})`);
+    } catch (e) { console.error("auto-expire", e); AUTO_DONE.delete(a.id); }
+  }
+  if (done.length) toast(`Didn't fill and expired at the close: ${done.join(", ")}. Recorded automatically; nothing to do.`, 7000);
 }
 function uid(prefix) { return prefix + "_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
 function monthKey(d) { return String(d || "").slice(0, 7); }
@@ -442,7 +476,7 @@ function statsOf(list) {
 
 // ---------------------------------------------------------------- render shell
 function renderTabs() {
-  const newEntries = S.alerts.filter((a) => entryLive(a) && a.status === "new").length;
+  const newEntries = S.alerts.filter((a) => entryLive(a) && a.status === "new").length + orderResolutions().length;
   const actions = S.alerts.filter((a) => (a.type === "exit" || a.type === "adjust") && a.status === "new").length;
   $("#tabs").innerHTML = TABS.map(([k, l]) => {
     const c = k === "alerts" && (newEntries + actions) ? `<span class="count">${newEntries + actions}</span>` : "";
@@ -668,8 +702,10 @@ function healthPanel() {
     <div class="small muted" style="margin-top:6px">${feed}${engine}</div></section>`;
 }
 function attentionBanner() {
-  const h = runHealth(); if (!h.bad.length) return "";
-  return `<div class="banner crit" style="margin-bottom:12px"><b>${h.bad.map((i) => esc(i.label)).join(", ")} didn't run today.</b> The backup check couldn't recover ${h.bad.length === 1 ? "it" : "them"} either. <button class="btn small" type="button" data-tab="scans">See today's runs</button></div>`;
+  const h = runHealth(), res = orderResolutions().filter((r) => r.kind !== "ask" || r.fc);
+  let out = h.bad.length ? `<div class="banner crit" style="margin-bottom:12px"><b>${h.bad.map((i) => esc(i.label)).join(", ")} didn't run today.</b> The backup check couldn't recover ${h.bad.length === 1 ? "it" : "them"} either. <button class="btn small" type="button" data-tab="scans">See today's runs</button></div>` : "";
+  if (res.length) out += `<div class="banner info" style="margin-bottom:12px"><b>${res.map((r) => esc(r.a.ticker)).join(", ")}: ${res.length === 1 ? "did this order fill?" : "did these orders fill?"}</b> ${res.some((r) => r.kind !== "ask") ? "The day's low traded below the limit, so it probably filled. " : ""}Record it so the scans watch the position. <button class="btn small" type="button" data-tab="alerts">Answer</button></div>`;
+  return out;
 }
 function modeLabel(m) { return { premarket: "Pre-market", preclose: "Pre-close", postclose: "Post-close", learning: "Learning", weekly: "Recalibration", manual: "Manual" }[m] || m || "Scan"; }
 function render() {
@@ -854,7 +890,10 @@ function viewAlerts() {
   const entries = S.alerts.filter(entryLive)
     .sort((a, b) => (b.valid_for || "").localeCompare(a.valid_for || "") || (num(b.score) || 0) - (num(a.score) || 0));
   const capLeft = Number(st.max_open_positions) - f.open.length;
-  let html = `<section class="section"><div class="section-head"><h2>Action needed on open positions</h2><span class="meta">Exit early, raise a stop, or confirm a fill</span></div>`;
+  const res = orderResolutions();
+  let html = res.length ? `<section class="section"><div class="section-head"><h2>Did these orders fill?</h2><span class="meta">Their sessions are over · one tap records the result</span></div>
+    <div class="grid">${res.map(resolveCard).join("")}</div></section>` : "";
+  html += `<section class="section"><div class="section-head"><h2>Action needed on open positions</h2><span class="meta">Exit early, raise a stop, or confirm a fill</span></div>`;
   html += actions.length ? `<div class="grid">${actions.map(actionCard).join("")}</div>` : `<div class="empty">No exit or stop alerts right now. The pre-close scan (12:25 PM PT) and post-close scan (2:05 PM PT) check every open position.</div>`;
   html += `</section><section class="section"><div class="section-head"><h2>New A+ opportunities</h2>
     <span class="meta">${capLeft > 0 ? `${capLeft} of ${esc(st.max_open_positions)} position slots free · ${money(f.cash)} cash` : `All ${esc(st.max_open_positions)} slots are in use; setups still listed so you can swap into a stronger one`}</span></div>`;
@@ -867,13 +906,14 @@ function viewAlerts() {
       <td class="n" style="white-space:nowrap"><button class="btn small" type="button" data-act="fill" data-id="${esc(a.id)}">Filled</button> <button class="btn ghost small" type="button" data-act="skip" data-id="${esc(a.id)}">Skip</button></td></tr>`).join("")}
     </tbody></table></div></details>`;
   html += `</section>` + positionsSection("alerts");
-  const recent = S.alerts.filter((a) => a.type === "entry" && !entryLive(a)).slice(0, 15);
+  const recent = S.alerts.filter((a) => a.type === "entry" && !entryLive(a))
+    .sort((x, y) => String(y.valid_for || "").localeCompare(String(x.valid_for || "")) || String(y.created_at || "").localeCompare(String(x.created_at || ""))).slice(0, 15);
   if (recent.length) html += `<section class="section"><details><summary>Recently handled setups (${recent.length})</summary><div class="tbl-wrap" style="margin-top:8px"><table><thead><tr><th>Signal</th><th>Ticker</th><th>Strategy</th><th class="n">Score</th><th class="n">Win %</th><th class="n">Entry</th><th>Status</th></tr></thead><tbody>
-    ${recent.map((a) => `<tr><td>${dShort(a.signal_date)}</td><td><span class="t">${esc(a.ticker)}</span></td><td>${esc(a.strategy_label)}</td><td class="n">${esc(a.score)}</td><td class="n">${pct(a.win_pct)}</td><td class="n">${px(a.entry)}</td><td>${statusPill(a.status === "new" ? (a.withdrawn ? "withdrawn" : "expired") : a.status)}${a.withdrawn && a.status === "new" ? `<div class="small muted">${hiCaution(a.withdrawn_reason || "")}</div>` : ""}</td></tr>`).join("")}
+    ${recent.map((a) => `<tr><td>${dShort(a.signal_date)}</td><td><span class="t">${esc(a.ticker)}</span></td><td>${esc(a.strategy_label)}</td><td class="n">${esc(a.score)}</td><td class="n">${pct(a.win_pct)}</td><td class="n">${px(a.entry)}</td><td>${statusPill(a.status === "new" ? (a.withdrawn ? "withdrawn" : "expired") : a.status)}${a.withdrawn && a.status === "new" ? `<div class="small muted">${hiCaution(a.withdrawn_reason || "")}</div>` : ""}${a.status === "unfilled" && a.fill_check?.low != null ? `<div class="small muted">low ${px(a.fill_check.low)} vs limit ${px(a.fill_check.limit ?? a.entry)}${a.unfilled_auto ? " · recorded automatically" : ""} · <button class="linklike" type="button" data-act="fill" data-id="${esc(a.id)}">it filled</button></div>` : ""}</td></tr>`).join("")}
     </tbody></table></div></details></section>`;
   return html;
 }
-function statusPill(s) { return `<span class="pill ${{ filled: "good", placed: "info", skipped: "neutral", expired: "neutral", new: "warn", done: "good", withdrawn: "crit" }[s] || "neutral"}">${esc({ filled: "Filled", placed: "Order placed", skipped: "Skipped", expired: "Expired", new: "New", done: "Done", withdrawn: "Withdrawn" }[s] || s)}</span>`; }
+function statusPill(s) { return `<span class="pill ${{ filled: "good", placed: "info", skipped: "neutral", expired: "neutral", new: "warn", done: "good", withdrawn: "crit", unfilled: "neutral", cancelled: "neutral" }[s] || "neutral"}">${esc({ filled: "Filled", placed: "Order placed", skipped: "Skipped", expired: "Expired", new: "New", done: "Done", withdrawn: "Withdrawn", unfilled: "Didn't fill", cancelled: "Cancelled" }[s] || s)}</span>`; }
 function ladderSvg(a) {
   const e = num(a.entry), s = num(a.stop), t = num(a.target); if (e === null || s === null || t === null) return "";
   const H = 116, top = 8, bot = H - 8; const lo = s, hi = t; const Y = (v) => top + (1 - (v - lo) / Math.max(1e-9, hi - lo)) * (bot - top);
@@ -883,10 +923,20 @@ function ladderSvg(a) {
     <line x1="6" x2="28" y1="${Y(e)}" y2="${Y(e)}" stroke="var(--ink)" stroke-width="2"/>
   </svg>`;
 }
+function resolveCard({ a, fc, kind }) {
+  const day = dShort(lastValidDay(a));
+  const msg = kind === "likely" ? `Probably <b>filled</b>: the low ${px(fc.low)} traded below your ${px(a.entry)} limit on ${day}.${num(fc.open) !== null && num(fc.open) < num(a.entry) ? ` It opened at ${px(fc.open)}, under your limit, so the fill was probably near that price.` : ""} If it filled, set the stop ${px(a.stop)} and target ${px(a.target)} and record the fill so the scans watch it.`
+    : kind === "unmarked" ? `You didn't mark it placed, but if you did, it probably <b>filled</b>: the low ${px(fc.low)} traded below the ${px(a.entry)} limit on ${day}.`
+    : fc?.text ? esc(fc.text) : `The ${day} session is over. The next scan checks the day's prices and records it on its own if it didn't fill; or answer now.`;
+  const lvl = kind === "ask" ? "info" : "good";
+  return `<div class="act ${lvl}"><div class="tk">${esc(a.ticker)}</div><div><div class="what">Buy limit ${px(a.entry)} for ${day} <span class="pill ${kind === "ask" ? "info" : "good"}">${kind === "ask" ? "Did it fill?" : "Probably filled"}</span></div>
+    <div class="small">${msg}</div>
+    <div class="t-actions" style="padding:8px 0 0;border:0"><button class="btn primary small" type="button" data-act="fill" data-id="${esc(a.id)}">Mark done (filled)</button>
+    ${kind === "unmarked" ? `<button class="btn ghost small" type="button" data-act="skip" data-id="${esc(a.id)}">I didn't place it</button>` : `<button class="btn small" type="button" data-act="nofill" data-id="${esc(a.id)}">Didn't fill</button>`}</div></div></div>`;
+}
 function ticket(a, today) {
   const e = num(a.entry), s = num(a.stop), t = num(a.target);
   const riskPct = e ? (100 * (s - e)) / e : null, rewPct = e ? (100 * (t - e)) / e : null;
-  const stale = a.valid_for && a.valid_for < today;
   const grade = a.grade === "A+" ? `<div class="stamp" aria-label="Grade A plus">A+</div>` : `<div class="stamp a">${esc(a.grade || "A")}</div>`;
   const news = a.news_check && a.news_check !== "pending" ? `<div><b>News check:</b> ${hiCaution(a.news_check)}${a.news_note ? " · " + hiCaution(a.news_note) : ""}</div>` : "";
   return `<article class="ticket ${a.capacity_note ? "overcap" : ""}" aria-label="${esc(a.ticker)} setup">
@@ -908,16 +958,16 @@ function ticket(a, today) {
       <div class="small muted">Last checked by the ${dtShort(a._ov_at || a.created_at)} scan</div>
       ${Array.isArray(a.why) && a.why.length ? `<details><summary>Why it qualifies</summary><ul>${a.why.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></details>` : ""}
     </div>
-    ${a.withdrawn ? `<div class="note-strip" style="background:var(--crit-bg);color:var(--crit)"><b>Withdrawn:</b> ${hiCaution(a.withdrawn_reason || "a later scan dropped this setup.")} If you placed the order, cancel it in your brokerage, then press Skip.</div>` : ""}
+    ${a.withdrawn ? `<div class="note-strip" style="background:var(--crit-bg);color:var(--crit)"><b>Withdrawn:</b> ${hiCaution(a.withdrawn_reason || "a later scan dropped this setup.")} ${a.status === "placed" ? "Cancel the order in your brokerage, then press Cancelled." : "Don't place it."}</div>` : ""}
     ${a.topup_note ? `<div class="note-strip">${esc(a.topup_note)}</div>` : ""}
     ${a.size_note ? `<div class="note-strip">${esc(a.size_note)}</div>` : ""}
     ${a.capacity_note ? `<div class="note-strip">${esc(a.capacity_note)}</div>` : ""}
-    ${stale ? `<div class="note-strip">This order was for ${dShort(a.valid_for)}. If it filled, mark it done; otherwise skip it.</div>` : ""}
+    ${a.status === "placed" ? `<div class="note-strip">Order placed ${a.placed_at ? dtShort(a.placed_at) : ""}. It works until the ${dShort(lastValidDay(a))} close; if it hasn't filled by then it expires, and the dashboard records it as Didn't fill on its own.</div>` : ""}
     <div class="t-actions">
       <button class="btn primary small" type="button" data-act="fill" data-id="${esc(a.id)}">Mark done (filled)</button>
-      ${a.status !== "placed" ? `<button class="btn small" type="button" data-act="placed" data-id="${esc(a.id)}">Order placed</button>` : ""}
+      ${a.status !== "placed" ? `<button class="btn small" type="button" data-act="placed" data-id="${esc(a.id)}">Order placed</button>` : `<button class="btn small" type="button" data-act="nofill" data-id="${esc(a.id)}">Didn't fill</button>`}
       <button class="btn ghost small" type="button" data-act="copy" data-id="${esc(a.id)}" title="Copy the order details">Copy</button>
-      <button class="btn ghost small" type="button" data-act="skip" data-id="${esc(a.id)}">Skip</button>
+      ${a.status !== "placed" ? `<button class="btn ghost small" type="button" data-act="skip" data-id="${esc(a.id)}" title="You chose not to place it">Skip</button>` : `<button class="btn ghost small" type="button" data-act="cancelled" data-id="${esc(a.id)}" title="You cancelled the order before it filled">Cancelled</button>`}
     </div></article>`;
 }
 function actionCard(a) {
@@ -1126,7 +1176,12 @@ function activity() {
     ev.push({ at: t.opened_at || t.entry_date, what: `Bought ${t.shares} ${t.ticker} @ ${px(t.entry_price)} (${t.strategy_label || t.strategy || "manual"})`, amt: null });
     if (t.status === "closed") ev.push({ at: t.closed_at || t.exit_date, what: `Sold ${t.shares} ${t.ticker} @ ${px(t.exit_price)} · ${t.exit_reason || "exit"}`, amt: null });
   }
-  for (const a of S.alerts) if (a.type === "entry" && a.status === "skipped") ev.push({ at: a.skipped_at || a.created_at, what: `Skipped setup ${a.ticker} (${a.strategy_label})`, amt: null });
+  for (const a of S.alerts) {
+    if (a.type !== "entry") continue;
+    if (a.status === "skipped") ev.push({ at: a.skipped_at || a.created_at, what: `Skipped setup ${a.ticker} (${a.strategy_label})`, amt: null });
+    else if (a.status === "unfilled") ev.push({ at: a.unfilled_at || a.created_at, what: `Order didn't fill: ${a.ticker} buy limit ${px(a.entry)} for ${dShort(a.valid_for)}${a.fill_check?.low != null ? ` (low ${px(a.fill_check.low)})` : ""}`, amt: null });
+    else if (a.status === "cancelled") ev.push({ at: a.cancelled_at || a.created_at, what: `Cancelled order: ${a.ticker} (${a.strategy_label})`, amt: null });
+  }
   ev.sort((a, b) => String(b.at).localeCompare(String(a.at)));
   if (!ev.length) return `<div class="empty">The log starts with your $5,000 starting balance and records every trade, income withdrawal and fund change.</div>`;
   return `<div class="panel timeline" style="padding:0">${ev.slice(0, 250).map((e) => `<div class="ev"><span class="when muted small">${String(e.at || "").length > 10 ? dtShort(e.at) : dShort(e.at)}</span><span>${esc(e.what)}</span><span class="num ${signCls(e.amt)}">${e.amt != null ? smoney(e.amt) : ""}</span></div>`).join("")}</div>`;
@@ -1286,7 +1341,7 @@ function viewLearning() {
   if (pf) {
     const o = pf.orders || {}, eg = pf.entry_vs_alert || {}, ss = pf.stop_slippage || {}, rz = pf.realized || {}, sk = pf.skipped || {}, by = pf.beyond_slots || {};
     html += `<div class="grid g-kpi" style="margin-top:12px">
-      ${kpi("Orders filled", o.fill_rate != null ? pct(100 * o.fill_rate, 0) : "–", `${o.filled || 0} of ${o.placed || 0} placed`)}
+      ${kpi("Orders filled", o.fill_rate != null ? pct(100 * o.fill_rate, 0) : "–", `${o.filled || 0} of ${o.placed || 0} placed${o.expected_fill_rate != null ? ` · backtest ${pct(100 * o.expected_fill_rate, 0)}` : ""}`)}
       ${kpi("Fill vs alert price", eg.avg_pct != null ? spct(eg.avg_pct, 2) : "–", `${eg.n || 0} fills`)}
       ${kpi("Stop slippage", ss.avg_pct != null ? spct(ss.avg_pct, 2) : "–", `backtest assumes ${spct(ss.assumed_pct ?? -0.05, 2)}`)}
       ${kpi("Your trades won", rz.win_rate != null ? pct(100 * rz.win_rate, 0) : "–", rz.expected_win_rate != null ? `expected ${pct(100 * rz.expected_win_rate, 0)}` : `${rz.n || 0} closed`)}
@@ -1352,7 +1407,9 @@ function modal(title, body, submitLabel, onSubmit) {
   const root = $("#modalRoot");
   root.innerHTML = `<div class="modal-back" id="mb"><form class="modal" id="mf" aria-label="${esc(title)}"><h2>${esc(title)}</h2>${body}
     <div class="foot"><button class="btn" type="button" id="mCancel">Cancel</button><button class="btn primary" type="submit">${esc(submitLabel)}</button></div></form></div>`;
-  const close = () => { root.innerHTML = ""; };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  const close = () => { root.innerHTML = ""; document.removeEventListener("keydown", onKey); };
+  document.addEventListener("keydown", onKey);
   $("#mCancel").onclick = close;
   $("#mb").addEventListener("click", (e) => { if (e.target.id === "mb") close(); });
   $("#mf").addEventListener("submit", async (e) => { e.preventDefault(); const btn = e.submitter || $("#mf button[type=submit]"); btn.disabled = true;
@@ -1553,6 +1610,8 @@ document.addEventListener("click", async (e) => {
     if (act === "fill" && a) fillModal(a);
     else if (act === "placed" && a) { await updDoc("alerts/" + a.id, { status: "placed", placed_at: nowIso() }); toast(`${a.ticker} marked as placed.`); }
     else if (act === "skip" && a) { await updDoc("alerts/" + a.id, { status: "skipped", skipped_at: nowIso() }); toast(`${a.ticker} skipped. The learning loop still grades it.`); }
+    else if (act === "nofill" && a) { await updDoc("alerts/" + a.id, { status: "unfilled", unfilled_at: nowIso() }); toast(`${a.ticker}: recorded as placed but not filled. It counts toward your fill rate, not as a skip.`); }
+    else if (act === "cancelled" && a) { await updDoc("alerts/" + a.id, { status: "cancelled", cancelled_at: nowIso() }); toast(`${a.ticker}: order recorded as cancelled.`); }
     else if (act === "copy" && a) copyOrder(a);
     else if (act === "dismiss" && a) { await updDoc("alerts/" + a.id, { status: "dismissed", done_at: nowIso() }); }
     else if (act === "cardstop" && t) {
@@ -1612,10 +1671,10 @@ document.addEventListener("pointerup", ptrUp, true); document.addEventListener("
   const onErr = (name) => (err) => { console.error(name, err); if (err?.code !== "unavailable") { S.dbError = `Couldn't load ${name} (${err?.code}).`; rerender(); } };
   const list = (snap) => snap.docs.map((d) => ({ id: d.id, ...d.data() }));
   db.doc("config/settings").onSnapshot((d) => { S.settings = d.exists ? d.data() : null; S.loaded.settings = true; rerender(); }, onErr("settings"));
-  db.collection("alerts").orderBy("created_at", "desc").limit(400).onSnapshot((s) => { S.alertsRaw = list(s); mergeAlerts(); S.loaded.alerts = true; if (!s.metadata.fromCache) { clearTimeout(loadTimer); S.dbError = null; } rerender(); }, onErr("alerts"));
+  db.collection("alerts").orderBy("created_at", "desc").limit(400).onSnapshot((s) => { S.alertsRaw = list(s); mergeAlerts(); S.loaded.alerts = true; if (!s.metadata.fromCache) { clearTimeout(loadTimer); S.dbError = null; } rerender(); setTimeout(autoExpireOrders, 0); }, onErr("alerts"));
   db.collection("trades").onSnapshot((s) => { S.trades = list(s); S.loaded.trades = true; rerender(); }, onErr("trades"));
   db.collection("ledger").onSnapshot((s) => { S.ledger = list(s); S.loaded.ledger = true; rerender(); }, onErr("ledger"));
-  db.collection("scans").orderBy("started_at", "desc").limit(60).onSnapshot((s) => { S.scans = list(s).sort((a, b) => (Date.parse(b.started_at) || 0) - (Date.parse(a.started_at) || 0)).slice(0, 40); mergeAlerts(); rerender(); }, onErr("scans"));
+  db.collection("scans").orderBy("started_at", "desc").limit(60).onSnapshot((s) => { S.scans = list(s).sort((a, b) => (Date.parse(b.started_at) || 0) - (Date.parse(a.started_at) || 0)).slice(0, 40); mergeAlerts(); rerender(); setTimeout(autoExpireOrders, 0); }, onErr("scans"));
   db.collection("runs").orderBy("at", "desc").limit(60).onSnapshot((s) => { S.runs = list(s); noteRuns(); renderRunbar(); renderChips(); maybeAutoRetry(); }, onErr("scan progress"));
   setInterval(() => { maybeAutoRetry(); renderRunbar(); renderChips(); }, 30000);
   let healthSig = "";  // re-render when a run's status changes with the clock (due → running → late → backup)

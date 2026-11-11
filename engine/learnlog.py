@@ -118,11 +118,34 @@ def summary(months: dict, now) -> dict:
     return out
 
 
-def portfolio_stats(alerts: list, shadow: list, trades: list, ledger: list, today: str, P: dict) -> dict:
+def portfolio_stats(alerts: list, shadow: list, trades: list, ledger: list, today: str, P: dict,
+                    fill_rates: dict | None = None) -> dict:
+    """Execution and portfolio record. Alert statuses you set on the dashboard:
+    filled (or a trade) = the order filled; placed = order working / not yet resolved;
+    unfilled = you placed it and the limit never filled; cancelled = you placed it and cancelled it
+    (a withdrawn setup, or your choice); skipped = you chose not to place it.
+    Fill rate counts filled / (filled + unfilled + still-placed): a cancelled order never had its full chance.
+    "Skipped" is your choice only (plus orders you cancelled by choice), never an order that didn't fill."""
     smap = {s.get("alert_id"): s for s in shadow}
+    fill_rates = fill_rates or {}
     past = [a for a in alerts if str(a.get("valid_for", "")) <= today and a.get("type") == "entry"]
-    placed = [a for a in past if a.get("status") in ("placed", "filled") or a.get("trade_id")]
-    filled = [a for a in past if a.get("status") == "filled" or a.get("trade_id")]
+
+    def order_state(a):
+        st = a.get("status")
+        if st == "filled" or a.get("trade_id"):
+            return "filled"
+        if st == "placed":  # not resolved on the dashboard: the grader knows whether the limit ever traded through
+            return "unfilled" if (smap.get(a.get("id")) or {}).get("status") == "unfilled" else "placed"
+        return st or "new"
+
+    ostate = {a.get("id"): order_state(a) for a in past}
+    placed = [a for a in past if ostate[a.get("id")] in ("placed", "filled", "unfilled")]
+    filled = [a for a in past if ostate[a.get("id")] == "filled"]
+    unfilled = [a for a in past if ostate[a.get("id")] == "unfilled"]
+    cancelled = [a for a in past if ostate[a.get("id")] == "cancelled"]
+    # still marked placed although the grader says the limit traded through: probably filled, never recorded
+    unrecorded = [a for a in past if ostate[a.get("id")] == "placed"
+                  and (smap.get(a.get("id")) or {}).get("status") in ("closed", "open")]
 
     def sret(a):
         s = smap.get(a.get("id")) or {}
@@ -149,13 +172,30 @@ def portfolio_stats(alerts: list, shadow: list, trades: list, ledger: list, toda
             gaps.append((float(t["exit_price"]) / float(t["entry_price"]) - 1) - (float(s["exit"]) / float(s["fill"]) - 1))
     beyond = [sret(a) for a in past if str(a.get("capacity_note", "")).startswith("Ranked #")]
     within = [sret(a) for a in past if a.get("rank") and not str(a.get("capacity_note", "")).startswith("Ranked #")]
-    skipped = [sret(a) for a in past if a.get("status") == "skipped"]
+    skipped = [sret(a) for a in past if ostate[a.get("id")] == "skipped"
+               or (ostate[a.get("id")] == "cancelled" and not a.get("withdrawn"))]
+    # unfilled orders the grader counts as filled: the low traded through the limit on the order's day,
+    # so a resting day order at the alert price should have filled (an execution gap worth checking)
+    through = [a for a in unfilled if (smap.get(a.get("id")) or {}).get("status") in ("closed", "open")]
+    exp_fill = [float(fill_rates[a.get("strategy")]) for a in placed if fill_rates.get(a.get("strategy")) is not None]
+    by_st = {}
+    for a in placed:
+        r = by_st.setdefault(a.get("strategy") or "?", {"placed": 0, "filled": 0, "expected": fill_rates.get(a.get("strategy"))})
+        r["placed"] += 1
+        r["filled"] += int(ostate[a.get("id")] == "filled")
     taken = [sret(a) for a in filled]
     income = -sum(float(l.get("amount") or 0) for l in ledger if l.get("type") == "income")
     profit = sum(float(l.get("amount") or 0) for l in ledger if l.get("type") == "pnl")
     doc = {
         "orders": {"setups_past": len(past), "placed": len(placed), "filled": len(filled),
-                   "fill_rate": round(len(filled) / len(placed), 3) if placed else None},
+                   "unfilled": len(unfilled), "cancelled": len(cancelled),
+                   "fill_rate": round(len(filled) / len(placed), 3) if placed else None,
+                   "expected_fill_rate": round(float(np.mean(exp_fill)), 3) if exp_fill else None,
+                   "by_strategy": by_st,
+                   "unfilled_through_limit": [{"ticker": a.get("ticker"), "day": a.get("valid_for"), "limit": a.get("entry")}
+                                              for a in through],
+                   "probably_filled_unrecorded": [{"ticker": a.get("ticker"), "day": a.get("valid_for"), "limit": a.get("entry")}
+                                                  for a in unrecorded]},
         "entry_vs_alert": {"n": len(entry_gap), "avg_pct": round(100 * float(np.mean(entry_gap)), 3) if entry_gap else None},
         "stop_slippage": {"n": len(stop_exits), "avg_pct": round(100 * float(np.mean(stop_exits)), 3) if stop_exits else None,
                           "assumed_pct": -float(P.get("risk", {}).get("slippage_pct", 0.05))},
@@ -187,6 +227,21 @@ def portfolio_stats(alerts: list, shadow: list, trades: list, ledger: list, toda
             lessons.append(f"Setups ranked beyond your free slots won {100 * b['win_rate']:.0f}% ({b['n']} setups), as well "
                            f"as the ones within them ({100 * wn['win_rate']:.0f}%): more open positions at a smaller size "
                            "each would have captured them.")
+    o = doc["orders"]
+    if through:
+        names = ", ".join(f"{a.get('ticker')} {a.get('valid_for')}" for a in through)
+        lessons.append(f"{len(through)} order(s) recorded as not filled traded through the limit on their day ({names}): "
+                       "a day limit order at the alert price, placed before the open, should have filled. "
+                       "Check the order's price, time in force and when it went in.")
+    if unrecorded:
+        names = ", ".join(f"{a.get('ticker')} {a.get('valid_for')}" for a in unrecorded)
+        lessons.append(f"Probably filled but not recorded ({names}): the low traded through the limit. If you hold it, "
+                       "press Mark done (filled) on the dashboard so the scans watch its exits.")
+    if o["placed"] >= 10 and o["fill_rate"] is not None and o["expected_fill_rate"] is not None \
+            and o["fill_rate"] < o["expected_fill_rate"] - 0.15:
+        lessons.append(f"Your limit orders filled {100 * o['fill_rate']:.0f}% of the time vs {100 * o['expected_fill_rate']:.0f}% "
+                       f"in the backtest ({o['placed']} orders). Unfilled orders cost trades, not money; if it persists, "
+                       "check the orders go in before the open at the alert's limit.")
     sk = doc["skipped"]
     if sk["n"] >= 10 and sk["win_rate"] is not None and sk["win_rate"] >= 0.7:
         lessons.append(f"Setups you skipped won {100 * sk['win_rate']:.0f}% ({sk['n']} setups); trusting A+ setups pays.")

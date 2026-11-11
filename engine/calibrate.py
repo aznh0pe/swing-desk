@@ -704,7 +704,15 @@ def run_learning(data_dir, state_dir, out_dir, now=None) -> dict:
     else:
         didnt = []
     ledger = [v["doc"] for v in state["ledger"].values()]
-    port = LL.portfolio_stats(alerts, shadow, trades, ledger, now.date().isoformat(), P)
+    # the backtest's fill rate per strategy (how often its limit order fills), to compare your real fills with
+    bt_doc = ((state.get("strategy") or {}).get("backtest") or {}).get("doc") or {}
+    fill_rates = {}
+    for name, rep in (bt_doc.get("strategies") or {}).items():
+        fr = ((rep or {}).get("test_oos") or {}).get("fill_rate")
+        fr = fr if fr is not None else ((rep or {}).get("all") or {}).get("fill_rate")
+        if fr is not None:
+            fill_rates[name] = float(fr)
+    port = LL.portfolio_stats(alerts, shadow, trades, ledger, now.date().isoformat(), P, fill_rates)
     port["updated_at"] = now.isoformat(timespec="seconds")
     insights += [f"Portfolio: {x}" for x in port.get("lessons", [])]
     day = now.date().isoformat()
