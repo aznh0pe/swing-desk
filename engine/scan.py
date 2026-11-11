@@ -433,6 +433,8 @@ def headline(scan_doc: dict) -> str:
         bits.append(f"{c['fills_to_confirm']} fill{'s' if c['fills_to_confirm'] != 1 else ''} to confirm")
     if c.get("orders_to_record"):
         bits.append(f"{c['orders_to_record']} order{'s' if c['orders_to_record'] != 1 else ''} probably filled: record")
+    if c.get("orders_to_check"):
+        bits.append(f"{c['orders_to_check']} order{'s' if c['orders_to_check'] != 1 else ''} to check: filled or not?")
     if c.get("positions_to_check"):
         bits.append(f"{c['positions_to_check']} position{'s' if c['positions_to_check'] != 1 else ''} to check")
     pmc = scan_doc.get("premarket_checks") or []
@@ -654,7 +656,9 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
         "market": regime_summary(ind), "funds": f,
         "counts": {"aplus": len(entries), "near_misses": len(near), **signal_counts(positions),
                    "orders_to_record": sum(1 for c in fill_checks if c.get("filled")),
-                   "orders_unfilled": sum(1 for c in fill_checks if c.get("filled") is False),
+                   "orders_to_check": sum(1 for c in fill_checks if c.get("status") == "placed"
+                                          and (c.get("filled") is None or c.get("touched"))),
+                   "orders_unfilled": sum(1 for c in fill_checks if c.get("filled") is False and not c.get("touched")),
                    "open_positions": len(positions), "expired": len(expire), "week_aplus": week_aplus,
                    "new_docs": len(writes)},
         "positions": positions, "near_misses": near[:8], "premarket_checks": pm_checks, "fill_checks": fill_checks[:30],
@@ -755,8 +759,8 @@ def order_fill_check(a: dict, ind: dict, today, mode: str, partial_bar: bool) ->
                        f"If it filled, set the stop ${a.get('stop')} and target ${a.get('target')} as a bracket and press "
                        "Mark done (filled) with your fill price, so the scans watch the position. If it didn't, press Didn't fill.")
     elif touched:
-        out["text"] = (f"Didn't fill: the low ${lo:.2f} touched your ${lim:.2f} limit without trading below it "
-                       f"(a touch rarely fills). The {kind_word} expired at the close; nothing to do.")
+        out["text"] = (f"Probably didn't fill: the low ${lo:.2f} touched your ${lim:.2f} limit without trading below it. "
+                       "A touch sometimes fills, so check your brokerage: press Mark done (filled) if it did, Didn't fill if not.")
     else:
         out["text"] = (f"Didn't fill: the low ${lo:.2f} stayed {100 * (lo / lim - 1):.1f}% above your ${lim:.2f} limit. "
                        f"The {kind_word} expired at the close; nothing to do.")
@@ -910,14 +914,15 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
             lines.append(f"- {p['ticker']}: {sg['action']}. {sg['text']} {pos_line(p)}")
     fcs = scan.get("fill_checks") or []
     rec = [c for c in fcs if c.get("filled")]
-    ask = [c for c in fcs if c.get("filled") is None and c.get("status") == "placed"]
+    ask = [c for c in fcs if (c.get("filled") is None or c.get("touched")) and c.get("status") == "placed"]
     if rec or ask:
         lines += ["", numbered("ORDERS TO RECORD (did your buy order fill?)")]
         for c in rec + ask:
             lines.append(f"- {c['ticker']} (buy limit {_money(c.get('limit'))}, {_day(c['valid_for'])}{', marked placed' if c.get('status') == 'placed' else ''}): {c['text']}")
     recent_day = str(now.date() if scan["mode"] == "postclose" and not (scan.get("data") or {}).get("partial_bar")
                      else cal.prev_trading_day(now.date()))
-    gone = [c for c in fcs if c.get("filled") is False and c.get("status") == "placed" and c.get("last_day", "") >= recent_day]
+    gone = [c for c in fcs if c.get("filled") is False and not c.get("touched") and c.get("status") == "placed"
+            and c.get("last_day", "") >= recent_day]
     if gone:
         lines += ["", "=== ORDERS THAT DIDN'T FILL (expired at the close; the dashboard records them, nothing to do) ==="]
         for c in gone:

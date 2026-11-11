@@ -312,7 +312,8 @@ def test_an_order_that_never_filled_expires_with_its_proof():
     c = SC.order_fill_check(a, ind, _dt.date(2026, 11, 10), "premarket", False)
     assert c["filled"] is False and c["low"] == 199.32 and c["text"].startswith("Didn't fill") and "expired" in c["text"]
     touch = SC.order_fill_check({**a, "ticker": "IEX", "valid_for": "2026-11-06", "entry": 222.60}, ind, _dt.date(2026, 11, 9), "premarket", False)
-    assert touch["filled"] is False and touch["touched"] is True and "touched" in touch["text"]
+    assert touch["filled"] is False and touch["touched"] is True and touch["text"].startswith("Probably didn't fill")
+    assert "check your brokerage" in touch["text"]  # a touch can fill: ask, don't assume
     hit = SC.order_fill_check({**a, "valid_for": "2026-11-10", "entry": 210.0}, ind, _dt.date(2026, 11, 10), "postclose", False)
     assert hit["filled"] is True and hit["text"].startswith("Probably FILLED") and "opened at $204.92" in hit["text"]
     unmarked = SC.order_fill_check({**a, "status": "new", "valid_for": "2026-11-10", "entry": 210.0}, ind, _dt.date(2026, 11, 11), "premarket", False)
@@ -330,6 +331,10 @@ def test_an_order_that_never_filled_expires_with_its_proof():
             "counts": {"orders_to_record": 1}}
     txt = SC.make_digest(scan, [], [], [], [], 0, S.params_with_defaults(None), _dt.datetime(2026, 11, 10, 14, 5))
     assert "ORDERS TO RECORD" in txt and "ORDERS THAT DIDN'T FILL" in txt
+    t2 = SC.make_digest({**scan, "fill_checks": [{**touch, "last_day": "2026-11-10"}]}, [], [], [], [], 0,
+                        S.params_with_defaults(None), _dt.datetime(2026, 11, 10, 14, 5))
+    assert "ORDERS TO RECORD" in t2 and "ORDERS THAT DIDN'T FILL" not in t2
+    assert "1 order to check: filled or not?" in SC.headline({"counts": {"orders_to_check": 1}, "data": {"status": "ok"}})
     assert "1 order probably filled: record" in SC.headline({"counts": {"orders_to_record": 1}, "data": {"status": "ok"}})
 
 

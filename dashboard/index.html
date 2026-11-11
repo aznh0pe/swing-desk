@@ -397,7 +397,7 @@ function orderResolutions() {
   for (const a of S.alerts) {
     if (a.type !== "entry" || !sessionOver(a)) continue;
     const fc = fcm[a.id];
-    if (a.status === "placed") { if (fc?.filled === false) continue; out.push({ a, fc, kind: fc?.filled ? "likely" : "ask" }); }
+    if (a.status === "placed") { if (fc?.filled === false && !fc.touched) continue; out.push({ a, fc, kind: fc?.filled ? "likely" : "ask" }); }
     else if (a.status === "new" && fc?.filled && !a.withdrawn && (lastValidDay(a) || "") >= recent) out.push({ a, fc, kind: "unmarked" });
   }
   return out.sort((x, y) => String(y.a.valid_for).localeCompare(String(x.a.valid_for)));
@@ -409,7 +409,7 @@ async function autoExpireOrders() {
   const fcm = fillCheckMap(), done = [];
   for (const a of S.alerts) {
     if (a.type !== "entry" || a.status !== "placed" || AUTO_DONE.has(a.id) || !sessionOver(a)) continue;
-    const fc = fcm[a.id]; if (!fc || fc.filled !== false) continue;
+    const fc = fcm[a.id]; if (!fc || fc.filled !== false || fc.touched) continue;  // a touch can fill: ask instead
     AUTO_DONE.add(a.id);
     try {
       await updDoc("alerts/" + a.id, { status: "unfilled", unfilled_at: nowIso(), unfilled_auto: true,
