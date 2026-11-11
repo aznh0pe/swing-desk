@@ -237,7 +237,10 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
     week_so_far = sum(1 for v in state["alerts"].values() if v["doc"].get("type") == "entry"
                       and str(v["doc"].get("signal_date", "")) >= wk_start)
     n_aplus = sum(1 for cd in ranked if cd["grade"] == "A+")
-    need = max(0, int(G.get("min_week", 3)) - week_so_far - n_aplus) if (mode == "postclose" and asof.weekday() >= 2) else 0
+    # paced through the week (1 by Monday night, 2 by Tuesday, min_week from Wednesday on) so a calm week
+    # doesn't leave you without setups until Wednesday; A+ setups always count first
+    pace = min(int(G.get("min_week", 3)), asof.weekday() + 1)
+    need = max(0, pace - week_so_far - n_aplus) if mode == "postclose" else 0
     floor = float(G.get("topup_floor", G.get("aplus_score", 74) - 8))
     for cd in ranked:
         if need <= 0:
@@ -312,8 +315,9 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
         }
         if cd.get("topup"):
             doc["grade"] = "A"
-            doc["topup_note"] = ("Weekly top-up: the best grade-A setup, sent because this week has fewer than "
-                                 f"{G.get('min_week', 3)} A+ setups so far.")
+            doc["topup_note"] = ("Weekly top-up: the best grade-A setup, sent because this week is behind its pace of "
+                                 f"{G.get('min_week', 3)} setups (historically grade A wins about as often as A+ "
+                                 "but earns less per trade).")
         doc["sector_key"] = sector_of(cd["ticker"])
         if cd["grade"] == "A+" or cd.get("topup"):
             sc = doc["sector_key"]
@@ -448,6 +452,9 @@ def headline(scan_doc: dict) -> str:
     if wd:
         bits.append(f"{wd} withdrawn")
     out = " · ".join(bits) if bits else "No action needed"
+    ri = scan_doc.get("run_issues") or []
+    if ri:
+        out = f"⚠ {len(ri)} run problem{'s' if len(ri) != 1 else ''} · " + out
     if (scan_doc.get("data") or {}).get("status") not in (None, "ok"):
         out = "⚠ data " + str(scan_doc["data"]["status"]) + " · " + out
     return out
@@ -664,6 +671,8 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
         "positions": positions, "near_misses": near[:8], "premarket_checks": pm_checks, "fill_checks": fill_checks[:30],
         "expired_alert_ids": [a for a, _ in expire][:50],
         "params_version": P.get("version"), "errors": errors[:40], "notes": notes,
+        "run_issues": ([f"The scanner hit {len(errors)} error(s) and carried on without those items; the first: {errors[0]}"]
+                       if errors else []),
         "session_day": str(session_day), "engine": engine_version.info(),
     }
     scan_doc["alert_updates"] = build_overlay(scan_doc, entries, ctx)
@@ -875,6 +884,8 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
     lines.append(f"Capital {_money(f['capital'])} | cash free {_money(f['cash'])} | open positions {f['open_count']}"
                  f"/{P['risk']['max_open']}" + (f" | risk per trade {f['risk_pct']:g}% ({f['risk_reason']})" if f.get("risk_pct") else ""))
     d = scan["data"]
+    for i, t in enumerate(scan.get("run_issues") or []):
+        lines.insert(1 + i, f"⚠ RUN PROBLEM: {t}")
     if d["status"] != "ok":
         lines.insert(1, f"⚠ DATA WARNING ({d['status']}): " + " ".join(n for n in d["notes"] if "refreshed" not in n)
                      + " Verify prices in your broker before acting on anything below.")
@@ -981,17 +992,29 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
             for e in extra:
                 lines += setup_block(e, None)
     elif scan["mode"] == "postclose":
-        lines += ["", "No A+ setups tonight. Standing aside is a position."]
+        G = P.get("grading") or {}
+        a_sc, a_pw = G.get("aplus_score", 80), round(100 * float(G.get("aplus_pwin", 0.72)))
+        best = max(near, key=lambda e: e.get("score") or 0) if near else None
+        why = (f" The closest tonight was {best['ticker']} at score {best['score']} with a model win estimate of "
+               f"{best.get('model_win_pct', best.get('win_pct'))}%." if best else " Nothing came close tonight.")
+        lines += ["", f"No A+ setups tonight (A+ needs score {a_sc}+ and a model win estimate of {a_pw}%+).{why} "
+                  "The scan ran normally; A+ setups cluster in market selloffs, and calm days often have none. "
+                  "Standing aside is a position."]
     if near and (week_aplus < P["grading"].get("min_week", 3)):
-        lines += ["", "=== WATCHLIST (grade A, not A+, shown because the weekly A+ count is low) ==="]
+        G = P.get("grading") or {}
+        a_sc, a_pw = G.get("aplus_score", 80), round(100 * float(G.get("aplus_pwin", 0.72)))
+        lines += ["", "=== WATCHLIST (grade A, not A+: for information, not orders) ==="]
         for e in near[:4]:
+            mw = e.get("model_win_pct")
+            short = [x for x in (f"score {e['score']} (needs {a_sc})" if (e.get("score") or 0) < a_sc else None,
+                                 f"model win {mw}% (needs {a_pw}%)" if mw is not None and mw < a_pw else None) if x]
             lines.append(f"- {e['ticker']} {e['strategy_label']}: score {e['score']}, win {e['win_pct']}%, "
-                         f"limit ${e['entry']}, stop ${e['stop']}, target ${e['target']}")
+                         f"limit ${e['entry']}, stop ${e['stop']}, target ${e['target']}"
+                         + (f" | not A+: {' and '.join(short)}" if short else ""))
     lines += ["", f"A+ setups this week: {week_aplus}"]
     eng = scan.get("engine") or {}
-    if eng.get("source") and eng["source"] != "repo":
-        lines.append(f"Engine: {eng['source']} {eng.get('fingerprint') or ''} (the repo couldn't be attached, so "
-                     "this run used the identical copy published with the dashboard)")
+    if eng.get("fingerprint"):
+        lines.append(f"Scanner version {eng['fingerprint']}")
     lines += ["", "Model-generated signals from backtested rules, not financial advice. Win % is an "
               "estimate from historical setups and can be wrong."]
     return mark_caution("\n".join(lines))

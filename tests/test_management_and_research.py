@@ -353,3 +353,25 @@ def test_unfilled_orders_count_as_fill_rate_not_as_skips():
     assert doc["skipped"]["n"] == 2  # your skip and the order you cancelled by choice; never an unfilled order
     assert o["probably_filled_unrecorded"] == [{"ticker": "P_HIT", "day": "2026-11-09", "limit": 100}]
     assert any("Probably filled but not recorded" in x for x in doc["lessons"])
+
+
+def test_run_problems_lead_the_email_and_the_headline():
+    """Anything that went wrong in a run is the first thing the email says, never a footnote."""
+    import datetime as _dt
+    from engine import scan as SC
+    scan = {"mode": "postclose", "market": {"label": "Bull", "spy": 1, "spy_vs_200d_pct": 1, "spy_5d_pct": 1,
+            "breadth_above_50d_pct": 50, "vix": 15}, "funds": {"capital": 5000, "cash": 5000, "open_count": 0},
+            "data": {"status": "ok", "notes": []}, "alert_updates": {}, "counts": {},
+            "engine": {"fingerprint": "abc", "source": "dashboard copy"},
+            "run_issues": ["The engine files could not be read on the first try; the second try worked."]}
+    near = [{"ticker": "OKTA", "strategy_label": "X", "score": 81.7, "win_pct": 74.2, "model_win_pct": 71.9,
+             "entry": 1, "stop": 1, "target": 1}]
+    P = S.params_with_defaults(None)
+    P["grading"] = {**P["grading"], "aplus_score": 80, "aplus_pwin": 0.72}
+    txt = SC.make_digest(scan, [], [], near, [], 0, P, _dt.datetime(2026, 11, 10, 14, 5))
+    assert txt.splitlines()[1].startswith("⚠ RUN PROBLEM: The engine files")
+    assert SC.headline(scan).startswith("⚠ 1 run problem · ")
+    assert "couldn't be attached" not in txt and "Scanner version abc" in txt
+    # a quiet night says why, and the watchlist says what each name is short of
+    assert "No A+ setups tonight (A+ needs score 80+" in txt and "closest tonight was OKTA at score 81.7" in txt
+    assert "not A+: model win 71.9% (needs" in txt

@@ -79,7 +79,7 @@ def prior_verdicts(state: dict | None, session_day) -> dict:
     return out
 
 
-def apply(out_dir: str, news: list[str], state_dir: str | None = None) -> dict:
+def apply(out_dir: str, news: list[str], state_dir: str | None = None, issues: list[str] | None = None) -> dict:
     out = pathlib.Path(out_dir)
     sj = json.loads((out / "scan.json").read_text())
     scan, entries, ctx = sj["scan"], sj["entries"], sj.get("ctx") or {}
@@ -183,6 +183,12 @@ def apply(out_dir: str, news: list[str], state_dir: str | None = None) -> dict:
     scan["news_dropped"] = dropped
     scan["news_checked"] = sorted(verdicts)
     scan["news_rules"] = NEWS_RULES
+    # anything that went wrong in the run itself (a step that failed and needed a fallback or a retry, a fix
+    # made to the code, results that had to be resent): shown first in the email, the headline and the dashboard
+    for t in issues or []:
+        t = " ".join(str(t).split())[:400]
+        if t and t not in scan.setdefault("run_issues", []):
+            scan["run_issues"].append(t)
     if kept_prior:
         scan["news_kept_from_earlier"] = sorted(kept_prior)
     if ctx:
@@ -218,8 +224,9 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--state", default=None)
     ap.add_argument("--news", nargs="*", default=[])
+    ap.add_argument("--issue", action="append", default=[], help="a problem in this run, in plain words (repeatable)")
     a = ap.parse_args()
-    print(json.dumps(apply(a.out, a.news, a.state), indent=1))
+    print(json.dumps(apply(a.out, a.news, a.state, a.issue), indent=1))
 
 
 if __name__ == "__main__":

@@ -14,20 +14,20 @@ import pathlib
 HERE = pathlib.Path(__file__).resolve().parent
 
 SETUP = (
-    "1. Setup: get my scanner code. It is my own code, and running it is the point of this task. Use the first way that works:\n"
-    '   a. Attach my repo: load the add_repo tool with ToolSearch (query "add_repo"). If it isn\'t found, call RefreshMcpTools if you have '
-    "it and search again (3 tries in all, about 20 seconds apart). Call add_repo with owner \"{OWNER}\", repo \"swing-desk\", access "
-    "\"read\", then clone it exactly as its result says (normally to /home/claude/swing-desk; if that folder already holds a working "
-    "clone, use it). Call that folder C.\n"
-    "   b. If add_repo still isn't available, or a command that runs code from C is refused at any step: use the identical copy of the "
-    "engine published with my dashboard. Artifact tool, action \"read\", url {ARTIFACT}, path \"engine/MANIFEST.json\" (a short JSON "
-    "list of files), then one more \"read\" on the same url with paths set to that manifest's \"files\" (no out_dir: the default folder "
-    "needs no approval). The result says where the files landed: call the folder that holds engine/ C, and carry on from "
-    "the step you were on. Don't run code from a plain git clone that add_repo didn't attach.\n"
+    "1. Setup: get my scanner code. It is my own code, and running it is the point of this task. Keep a list called ISSUES as you "
+    "work: one plain sentence for anything in this run that fails, is refused, needs a retry, a fallback or a fix (say what happened "
+    "and what you did instead). I must hear about every one of them.\n"
+    "   a. The engine is published with my dashboard, always current, and needs nothing attached. Artifact tool, action \"read\", url "
+    "{ARTIFACT}, path \"engine/MANIFEST.json\" (a short JSON list of files), then one more \"read\" on the same url with paths set to "
+    "that manifest's \"files\" (no out_dir: the default folder needs no approval). The result says where the files landed: call the "
+    "folder that holds engine/ C. If a read fails, try it once more.\n"
+    "   b. Only if (a) fails twice, or a command that runs code from C is refused: load the add_repo tool with ToolSearch (query "
+    "\"add_repo\"), call it with owner \"{OWNER}\", repo \"swing-desk\", access \"read\", clone it exactly as its result says and "
+    "call that folder C. Add a sentence to ISSUES. Don't run code from a plain git clone that add_repo didn't attach.\n"
     "   c. If neither way can run, follow \"If the scanner can't run\" at the end.\n"
     "   Then in Bash: W=/tmp/sd; rm -rf $W; mkdir -p $W/state; `git clone --depth 1 -b data https://github.com/{OWNER}/swing-desk "
     "$W/data` for the market data (retry up to 3 times, 20 s apart; if it keeps failing, `cd $C && python3 -c \"from engine.data import "
-    "fetch_branch; print(fetch_branch('{OWNER}/swing-desk','data','$W/data'))\"`). If imports fail, "
+    "fetch_branch; print(fetch_branch('{OWNER}/swing-desk','data','$W/data'))\"`, and add a sentence to ISSUES). If imports fail, "
     "`pip install --break-system-packages -q pandas numpy scikit-learn pyarrow`."
 )
 
@@ -70,7 +70,7 @@ NEWS_AUTO = (
 
 PROGRESS = '''
 Progress for the dashboard's Scan now bar: the extra message after these instructions may contain a line "Run token: rt_...". If it does, call that value T and record progress by creating small documents in collection "runs" with ArtifactData action "set" (new documents, so no if_version), each with data {"token": T, "seq": n, "state": "running", "step": "<label>", "pct": <p>, "at": "<current UTC time, e.g. 2026-11-05T23:14:05Z, from `date -u +%Y-%m-%dT%H:%M:%SZ` chained onto that step's shell command>", "by": "scan"}:
-- doc_id "T-s1", label "Loading scanner code and market data", pct 12: as soon as ArtifactData is loaded (send it in the same message as the add_repo call; for this first one, take the time from a `date -u +%Y-%m-%dT%H:%M:%SZ` Bash call made together with your first ToolSearch).
+- doc_id "T-s1", label "Loading scanner code and market data", pct 12: as soon as ArtifactData is loaded (send it in the same message as the first engine read; for this first one, take the time from a `date -u +%Y-%m-%dT%H:%M:%SZ` Bash call made together with your first ToolSearch).
 - "T-s2", "Reading your positions, funds and alerts", 28: in the same message as the step 3 exports.
 - "T-s3", "Scanning 605 stocks & ETFs for A+ setups", 42: in the same message as the step 4 command.
 - "T-s4", "Checking news on the top setups", 62: in the same message as the first step 5 search (skip it if step 5 is skipped).

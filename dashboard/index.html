@@ -704,6 +704,9 @@ function healthPanel() {
 function attentionBanner() {
   const h = runHealth(), res = orderResolutions().filter((r) => r.kind !== "ask" || r.fc);
   let out = h.bad.length ? `<div class="banner crit" style="margin-bottom:12px"><b>${h.bad.map((i) => esc(i.label)).join(", ")} didn't run today.</b> The backup check couldn't recover ${h.bad.length === 1 ? "it" : "them"} either. <button class="btn small" type="button" data-tab="scans">See today's runs</button></div>` : "";
+  // problems inside a run that still finished (a failed step, a fallback, a fix): shown until the next clean run
+  const lastRun = S.scans.find((x) => x.status !== "closed"), ri = lastRun?.run_issues || [];
+  if (ri.length || lastRun?.status === "failed") out += `<div class="banner crit" style="margin-bottom:12px"><b>Problem in the last scan (${dtShort(lastRun.started_at)}):</b> ${lastRun.status === "failed" ? "the scan failed. " : ""}${ri.map((t) => esc(t)).join(" ")} ${lastRun.status === "failed" ? "" : "The scan still finished and its results are complete. "}Tell Claude in the Swing Desk chat so it gets fixed.</div>`;
   if (res.length) out += `<div class="banner info" style="margin-bottom:12px"><b>${res.map((r) => esc(r.a.ticker)).join(", ")}: ${res.length === 1 ? "did this order fill?" : "did these orders fill?"}</b> ${res.some((r) => r.kind !== "ask") ? "The day's low traded below the limit, so it probably filled. " : ""}Record it so the scans watch the position. <button class="btn small" type="button" data-tab="alerts">Answer</button></div>`;
   return out;
 }
