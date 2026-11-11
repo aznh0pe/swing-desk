@@ -206,6 +206,64 @@ def condition_gate(ind: dict, conds, like: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(np.broadcast_to(day[:, None], like.shape), index=like.index, columns=like.columns)
 
 
+# All-weather strategies: some setups hold up in every market condition. They trade everywhere, are never
+# paused in a condition on old data alone, need more live evidence before a live pause, and are never
+# narrowed into specialists.
+ALL_WEATHER = {"train_n": 50, "oos_n": 30, "train_win": 0.60, "train_pf": 1.15, "oos_win": 0.62, "oos_pf": 1.05,
+               "min_conditions": 3, "min_share": 0.85}
+ALL_WEATHER_RULE = ("All-weather = holds up in every market condition it has enough trades in (2008-2021: 60%+ wins and "
+                    "profit factor 1.15+ on 50+ trades; 2022-now: 62%+ wins and profit factor 1.05+ on 30+ trades), "
+                    "tested in at least 3 of the 4 conditions.")
+
+
+def all_weather(by_cond: dict | None, share: dict | None = None, q: dict | None = None) -> dict:
+    """Does a strategy hold up in every market condition? `by_cond` is {condition: {"train": stats, "oos": stats}}
+    (stats with trades, win_rate and profit_factor; a missing profit factor is not held against it). A condition
+    counts as tested when either period has enough trades there; the strategy is all-weather when it clears the
+    bars in every tested condition and period, the tested conditions number at least 3 and (when `share` of
+    trading days is given) cover at least 85% of days. Returns the verdict with the tested and weak conditions
+    and the 2022-now win-rate range across conditions."""
+    q = {**ALL_WEATHER, **(q or {})}
+    tested, weak, wins, why = [], [], [], {}
+    for c in CONDITIONS:
+        d = (by_cond or {}).get(c) or {}
+        tr, oo = d.get("train") or {}, d.get("oos") or {}
+        t_ok, o_ok = (tr.get("trades") or 0) >= q["train_n"], (oo.get("trades") or 0) >= q["oos_n"]
+        if not (t_ok or o_ok):
+            continue
+        tested.append(c)
+        bad = False
+        for ok_, st, wk, pk, per in ((t_ok, tr, "train_win", "train_pf", "2008-2021"), (o_ok, oo, "oos_win", "oos_pf", "2022-now")):
+            if ok_ and ((st.get("win_rate") or 0) < q[wk] or (st.get("profit_factor") is not None and st["profit_factor"] < q[pk])):
+                bad = True
+                why.setdefault(c, []).append(f"{per} {100 * (st.get('win_rate') or 0):.0f}% wins"
+                                             + (f", profit factor {st['profit_factor']}" if st.get("profit_factor") is not None else ""))
+        if o_ok and oo.get("win_rate") is not None:
+            wins.append(float(oo["win_rate"]))
+        if bad:
+            weak.append(c)
+    cover = None if share is None else round(sum(float(share.get(c) or 0) for c in tested), 3)
+    aw = len(tested) >= q["min_conditions"] and not weak and (cover is None or cover >= q["min_share"])
+    return {"all_weather": bool(aw), "tested": tested, "weak": weak, "cover": cover,
+            "weak_detail": {c: "; ".join(v) for c, v in why.items()},
+            "oos_win_range": [round(min(wins), 4), round(max(wins), 4)] if wins else None}
+
+
+def all_weather_sentence(aw: dict | None, label: str = "It") -> str:
+    """One plain sentence on whether a strategy is all-weather."""
+    if not aw or not aw.get("tested"):
+        return ""
+    rng = aw.get("oos_win_range")
+    span = f" (won {100 * rng[0]:.0f}-{100 * rng[1]:.0f}% across them on 2022-now data)" if rng else ""
+    if aw.get("all_weather"):
+        return f"{label} is all-weather: it held up in every market condition{span}."
+    if aw.get("weak"):
+        det = aw.get("weak_detail") or {}
+        return (f"{label} is condition-dependent: weaker in "
+                + " and ".join(CONDITION_PLURAL[c] + (f" ({det[c]})" if det.get(c) else "") for c in aw["weak"]) + f"{span}.")
+    return ""
+
+
 def meta(name: str, P: dict | None = None) -> dict:
     """Label / family / description for a built-in or a promoted research strategy."""
     if name in STRATEGY_META:

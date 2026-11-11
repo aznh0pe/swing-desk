@@ -14,7 +14,7 @@ import datetime as dt
 
 import numpy as np
 
-from .strategies import CONDITIONS, CONDITION_LABEL, CONDITION_PLURAL, condition_of_features
+from .strategies import CONDITIONS, CONDITION_LABEL, CONDITION_PLURAL, all_weather, condition_of_features
 
 HALF_LIFE_MONTHS = 6.0  # older evidence counts less, never zero
 STRESS_VIX, STRESS_SPY5 = 1.10, -0.014
@@ -529,23 +529,45 @@ def aplus_watch(stats: dict | None, G: dict) -> dict | None:
 COND_MIN_N = 12        # weighted results of one strategy in one market condition before its own record counts
 COND_PRIOR_N = 20      # shrunk toward the strategy's tested win rate in that condition with this weight
 COND_GAP = 0.10        # this far under (after shrinkage), or under 58%, the strategy pauses in that condition
+COND_MIN_N_AW = 20     # an all-weather strategy (held up in every condition in testing) needs more live evidence
+COND_PRIOR_N_AW = 40   # ... and its tested record weighs twice as much before one condition can pause it
 
 
 def condition_gates_live(stats: dict | None, conditions: dict | None) -> dict:
     """{strategy: {condition: reason}} where a strategy's own record in a market condition (all its graded
-    setups and your trades, shrunk toward its tested win rate there) has fallen clearly short."""
+    setups and your trades, shrunk toward its tested win rate there) has fallen clearly short. A strategy the
+    tests found all-weather needs more live results, and its tested record counts double, before one market
+    condition can pause it: it has held up everywhere, so a short streak is more likely noise."""
     table = (conditions or {}).get("table") or {}
+    aw_all = (conditions or {}).get("all_weather") or {}
     out = {}
     for st, r in ((stats or {}).get("summary") or {}).items():
+        aw = bool((aw_all.get(st) or {}).get("all_weather"))
+        min_n, prior_n = (COND_MIN_N_AW, COND_PRIOR_N_AW) if aw else (COND_MIN_N, COND_PRIOR_N)
         for cond, d in (r.get("by_condition") or {}).items():
             n, wr = float(d.get("weighted_n") or 0), d.get("weighted_win_rate")
-            if n < COND_MIN_N or wr is None:
+            if n < min_n or wr is None:
                 continue
             prior = ((((table.get(st) or {}).get(cond) or {}).get("oos")) or {}).get("win_rate") or 0.65
-            shr = (wr * n + float(prior) * COND_PRIOR_N) / (n + COND_PRIOR_N)
+            shr = (wr * n + float(prior) * prior_n) / (n + prior_n)
             if shr < max(0.58, float(prior) - COND_GAP):
                 out.setdefault(st, {})[cond] = (f"its own setups won {wr:.0%} over {n:.0f} weighted results in "
-                                                f"{CONDITION_PLURAL[cond]} (tested {float(prior):.0%} there)")
+                                                f"{CONDITION_PLURAL[cond]} (tested {float(prior):.0%} there"
+                                                + ("; all-weather in testing, so it needed more evidence" if aw else "") + ")")
+    return out
+
+
+def all_weather_live(stats: dict | None, min_n: float = COND_MIN_N) -> dict:
+    """{strategy: verdict} from each strategy's own live and paper record per market condition (weighted, 6-month
+    half-life): which strategies are proving all-weather live. A condition counts once it has `min_n` weighted
+    results; it needs 3 tested conditions before a verdict means anything."""
+    out = {}
+    for st, r in ((stats or {}).get("summary") or {}).items():
+        bc = {c: {"oos": {"trades": float(d.get("weighted_n") or 0), "win_rate": d.get("weighted_win_rate")}}
+              for c, d in (r.get("by_condition") or {}).items()}
+        v = all_weather(bc, q={"oos_n": min_n, "train_n": 10 ** 9})
+        if len(v["tested"]) >= 2:
+            out[st] = v
     return out
 
 

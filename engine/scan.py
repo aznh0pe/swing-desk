@@ -373,6 +373,11 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
                 parts.append(f"all {meta['label']} setups {100 * tb['win_rate']:.0f}% of {tb['trades']} (average {100 * (tb['avg_ret'] or 0):+.2f}%)")
             if parts:
                 doc["condition_note"] = f"In {S.CONDITION_PLURAL[cond_today]} (today's condition), 2022-now: " + "; ".join(parts) + "."
+            awd = (PC.get("all_weather") or {}).get(cd["name"]) or {}
+            if awd.get("all_weather"):
+                doc["all_weather"] = True
+                doc["condition_note"] = ((doc.get("condition_note") or "") + " "
+                                         + S.all_weather_sentence(awd, meta["label"])).strip()
         if cd.get("topup"):
             doc["grade"] = "A"
             ta, aw = G.get("oos_topup_avg_ret"), G.get("oos_aplus_win_rate")
@@ -977,6 +982,10 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
                 f"top-ups {100 * tu_['win_rate']:.0f}% of {tu_['trades']}" if tu_.get("trades") else None) if x)
         if best_:
             line += " | strongest here: " + ", ".join(best_)
+        live_ = [n for n, v in (P.get("strategies") or {}).items() if v.get("enabled", True)]
+        aw_ = [n for n in live_ if ((PCd.get("all_weather") or {}).get(n) or {}).get("all_weather")]
+        if PCd.get("all_weather") and live_:
+            line += f" | all-weather (hold up in any market): {len(aw_)} of {len(live_)} live strategies"
         if mc.get("paused"):
             line += " | paused today: " + ", ".join(S.meta(n, P)["label"] for n in mc["paused"])
         lines.append(line)

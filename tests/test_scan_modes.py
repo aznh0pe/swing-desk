@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT))
 
 from engine import calendar as cal  # noqa: E402
 from engine import scan  # noqa: E402
+from engine import strategies as S  # noqa: E402
 
 
 # everything an alert (and its email) must carry
@@ -232,3 +233,31 @@ def test_weekly_topups_follow_their_own_rule_and_say_so(synth, tmp_path):
     # nothing clears the bar: none forced, and the email says so
     doc4, digest4 = _run_with_grading(synth, tmp_path / "d", {**base, "topup_floor": 1000})
     assert not [e for e in doc4["entries"] if e.get("topup_note")] and "none was forced" in digest4
+
+
+def test_alerts_say_how_their_strategy_does_in_todays_market_condition(synth, tmp_path):
+    base = {"aplus_score": 999, "aplus_pwin": 0.99, "topup_floor": 0, "topup_pwin": 0.0, "topup_ok": True,
+            "oos_topup_win_rate": 0.735, "oos_topup_trades": 275, "oos_topup_avg_ret": 0.0085, "oos_aplus_win_rate": 0.76}
+    doc, _ = _run_with_grading(synth, tmp_path / "a", base)
+    tops = [e for e in doc["entries"] if e.get("topup_note")]
+    assert tops
+    cond = doc["scan"]["market"]["condition"]
+    names = {e["strategy"] for e in tops}
+    aw_name = sorted(names)[0]
+    cell = {"oos": {"trades": 400, "win_rate": 0.71, "avg_ret": 0.006, "profit_factor": 1.4}}
+    conds = {"table": {n: {cond: cell} for n in names}, "topup": {cond: {"trades": 139, "win_rate": 0.719}},
+             "all_weather": {aw_name: {"all_weather": True, "tested": list(S.CONDITIONS), "weak": [],
+                                       "oos_win_range": [0.64, 0.75]}}}
+    st = _state(tmp_path / "b")
+    (st / "strategy").mkdir()
+    (st / "strategy" / "params.json").write_text(json.dumps({"params": {"grading": base, "conditions": conds}}))
+    out = tmp_path / "b" / "out"
+    scan.run("postclose", str(synth), str(st), str(out), now=dt.datetime(2026, 11, 5, 14, 10, tzinfo=cal.PT))
+    d2 = json.loads((out / "scan.json").read_text())
+    t2 = [e for e in d2["entries"] if e.get("topup_note")]
+    assert t2 and all(e["market_condition"] == cond and "today's condition" in e["condition_note"] for e in t2)
+    assert all("weekly top-ups won 72% of 139" in e["condition_note"] for e in t2)
+    aw = [e for e in t2 if e["strategy"] == aw_name]
+    assert all(e.get("all_weather") and "is all-weather" in e["condition_note"] and "64-75%" in e["condition_note"] for e in aw)
+    assert not any(e.get("all_weather") for e in t2 if e["strategy"] != aw_name)
+    assert "all-weather (hold up in any market)" in (out / "digest.md").read_text() or not d2["scan"]["market"].get("condition")

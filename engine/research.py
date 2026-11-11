@@ -292,7 +292,8 @@ def research_focus(state_dir) -> dict | None:
                  + (f" ({100 * float(calm_share):.0f}% of trading days since 2008, the condition where the live strategies are weakest and A+ setups are rare)" if calm_share else "")
                  + " and still win 66%+ there with a real average trade: for example pullbacks in strong uptrends, relative-strength "
                  "leaders resting on support, quiet-market ETF mean reversion, continuation after strong earnings. The test reports "
-                 "every idea per market condition (by_condition) and proposes an idea that only works in some conditions as a "
+                 "every idea per market condition (by_condition): an all-weather idea that holds up in every condition is the "
+                 "best find (it trades in any market), and an idea that only works in some conditions can still qualify as a "
                  "specialist for them (market_conditions), so an idea that wins in calm bull markets but not in selloffs still counts")
     if G.get("aplus_watch"):
         return {"grade": "aplus", "why": (G["aplus_watch"] or {}).get("note", "A+ setups trail their test."),
@@ -355,11 +356,15 @@ def evaluate_spec(spec: dict, ind: dict, P: dict, P_live: dict, split, now, by="
     ]
     q_ok = {c["key"]: c["ok"] for c in q}
     bc = condition_breakdown(tr, split)
+    aw = S.all_weather(bc)
     spec_conds = list(spec.get("market_conditions") or [])
     special = None
-    if not spec_conds and not (ok_live and all(q_ok.values())):
-        # not good enough everywhere: is it a specialist for some market conditions?
+    if not spec_conds and not (ok_live and all(q_ok.values())) and not aw["all_weather"]:
+        # not good enough everywhere: is it a specialist for some market conditions? (an all-weather idea never is:
+        # it holds up everywhere, so narrowing it would only throw good trades away)
         sc_ = specialist_conditions(bc)
+        if sc_ and set(sc_) >= set(aw["tested"]):
+            sc_ = []  # passes in every condition it was tested in: that is all-weather, not a specialist
         if sc_:
             rows_ = pd.Series(S.condition_series(tr).values, index=tr.index).isin(sc_)
             tr_s = tr[rows_.values]
@@ -417,6 +422,9 @@ def evaluate_spec(spec: dict, ind: dict, P: dict, P_live: dict, split, now, by="
     if gp and "error" not in gp:
         summary += preview_sentence(gp)
     summary += condition_sentence(bc)
+    aws = S.all_weather_sentence(aw)
+    if aws and not special:
+        summary += " " + aws
     variant = res["variant"]
     path = None
     if verdict != "candidate":
@@ -425,7 +433,7 @@ def evaluate_spec(spec: dict, ind: dict, P: dict, P_live: dict, split, now, by="
     doc = {**base, "verdict": verdict, "summary": summary, "path": path, "checks": checks + q, "live_rule_ok": bool(ok_live),
            "live_reason": live_reason, "variant": variant, "rules": R.describe({**spec, "params": variant, "grid": {}}),
            "train": _compact(st_train), "oos": _compact(st_test), "overlap_live": round(overlap, 3),
-           "oos_signals_per_week": round(per_week, 2), "grade_preview": gp, "by_condition": bc,
+           "oos_signals_per_week": round(per_week, 2), "grade_preview": gp, "by_condition": bc, "all_weather": aw,
            **({"market_conditions": special["conditions"], "specialist": special} if special else
               ({"market_conditions": spec_conds} if spec_conds else {})),
            "yearly": B.yearly(tr).reset_index().to_dict("records")[-20:],

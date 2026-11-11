@@ -551,3 +551,73 @@ def test_condition_pauses_are_adopted_only_when_unseen_alerts_improve():
     # a strategy that is fine everywhere is never paused
     t2 = t.assign(ret=np.where(rng.random(len(t)) < 0.74, 0.02, -0.02))
     assert CB.condition_report(t2, "2022-01-01", G, 5)["gates"] == {}
+
+
+def test_all_weather_strategies_trade_everywhere_and_need_more_evidence_to_pause():
+    from engine import learnlog as LL
+    good = lambda n, w, pf: {"trades": n, "win_rate": w, "profit_factor": pf}
+    every = {c: {"train": good(300, 0.70, 1.5), "oos": good(120, 0.68 + 0.02 * i, 1.4)} for i, c in enumerate(S.CONDITIONS)}
+    v = S.all_weather(every, {"bull_calm": 0.66, "bull_stress": 0.17, "bear_calm": 0.09, "bear_stress": 0.08})
+    assert v["all_weather"] and v["weak"] == [] and v["oos_win_range"] == [0.68, 0.74] and v["cover"] == 1.0
+    assert "all-weather" in S.all_weather_sentence(v, "Leader 7-Day Pullback")
+    # weak in one condition: condition-dependent, and the sentence names where
+    dep = {**every, "bear_stress": {"train": good(300, 0.55, 0.9), "oos": good(120, 0.50, 0.8)}}
+    d = S.all_weather(dep)
+    assert not d["all_weather"] and d["weak"] == ["bear_stress"] and "bear-market selloffs" in S.all_weather_sentence(d)
+    # too few conditions tested is not enough to call it all-weather
+    two = {c: every[c] for c in ("bull_calm", "bull_stress")}
+    assert not S.all_weather(two)["all_weather"] and S.all_weather(two)["weak"] == []
+    # tested conditions must cover most trading days when the shares are known
+    three = {c: every[c] for c in ("bull_stress", "bear_calm", "bear_stress")}
+    assert S.all_weather(three)["all_weather"]
+    assert not S.all_weather(three, {"bull_calm": 0.66, "bull_stress": 0.17, "bear_calm": 0.09, "bear_stress": 0.08})["all_weather"]
+
+    # the weekly study marks them and never proposes a pause for them on old data
+    rng = np.random.default_rng(11)
+    days = pd.bdate_range("2010-01-04", "2026-10-30")
+    regimes = [{"spy_above200": 1.0, "vix_ratio": 1.0, "spy_ret5": 0.01}, {"spy_above200": 1.0, "vix_ratio": 1.4, "spy_ret5": -0.03},
+               {"spy_above200": 0.0, "vix_ratio": 1.0, "spy_ret5": 0.0}, {"spy_above200": 0.0, "vix_ratio": 1.5, "spy_ret5": -0.04}]
+    rows = []
+    for i, d0 in enumerate(days):
+        f = regimes[i % 4]
+        cond = S.condition_of(f["spy_above200"], f["vix_ratio"], f["spy_ret5"])
+        for k, strat in enumerate(("ALL_WX", "SELLOFF_LOSER")):
+            p_win = 0.45 if (strat == "SELLOFF_LOSER" and cond == "bear_stress") else 0.72
+            rows.append({"signal_date": d0, "ticker": f"T{k}", "strategy": strat, "score": float(rng.uniform(60, 99)),
+                         "p": 0.75, "filled": True, "ret": 0.02 if rng.random() < p_win else -0.02, **f})
+    t = pd.DataFrame(rows)
+    G = {"aplus_score": 85, "aplus_pwin": 0.7, "topup_ok": True, "topup_floor": 70, "topup_pwin": 0.7, "topup_excluded": {}}
+    cr = CB.condition_report(t, "2022-01-01", G, 5)
+    assert cr["all_weather"]["ALL_WX"]["all_weather"] and not cr["all_weather"]["SELLOFF_LOSER"]["all_weather"]
+    assert cr["all_weather"]["SELLOFF_LOSER"]["weak"] == ["bear_stress"]
+    assert {g["strategy"] for g in cr["gates_tested"]} == {"SELLOFF_LOSER"}
+    line = CB._all_weather_line(cr, {"strategies": {"ALL_WX": {"enabled": True}, "SELLOFF_LOSER": {"enabled": True}}})
+    assert "All-weather" in line and "ALL_WX" in line and "SELLOFF_LOSER (weaker in bear-market selloffs: 2008-2021 " in line
+
+    # live pauses: a short bad streak pauses an ordinary strategy in that condition, not an all-weather one;
+    # a long, clearly bad record pauses either
+    def stats(n, wr):
+        return {"summary": {"X": {"by_condition": {"bull_calm": {"weighted_n": n, "weighted_win_rate": wr}}}}}
+    conds = {"table": {"X": {"bull_calm": {"oos": {"win_rate": 0.72}}}}}
+    assert set(LL.condition_gates_live(stats(15, 0.45), conds)) == {"X"}
+    aw = {**conds, "all_weather": {"X": {"all_weather": True}}}
+    assert LL.condition_gates_live(stats(15, 0.45), aw) == {}
+    long_bad = LL.condition_gates_live(stats(30, 0.40), aw)
+    assert "all-weather in testing" in long_bad["X"]["bull_calm"]
+    # the live record can prove a strategy all-weather too
+    live = LL.all_weather_live({"summary": {"X": {"by_condition": {
+        c: {"weighted_n": 14, "weighted_win_rate": 0.7} for c in ("bull_calm", "bull_stress", "bear_stress")}}}})
+    assert live["X"]["all_weather"]
+
+
+def test_research_never_narrows_an_all_weather_idea_into_a_specialist():
+    good = lambda n, w, pf, a=0.004: {"trades": n, "win_rate": w, "profit_factor": pf, "avg_ret": a}
+    # clears the specialist bars in every condition it has data in: that is all-weather, not a specialist
+    bc = {c: {"train": good(400, 0.70, 1.5), "oos": good(200, 0.70, 1.5)} for c in S.CONDITIONS}
+    assert RS.specialist_conditions(bc) == list(S.CONDITIONS) and S.all_weather(bc)["all_weather"]
+    # a real specialist: strong in one condition, poor elsewhere
+    sp = {c: {"train": good(400, 0.55, 1.0), "oos": good(200, 0.55, 0.9)} for c in S.CONDITIONS}
+    sp["bear_calm"] = {"train": good(400, 0.72, 1.6), "oos": good(200, 0.73, 1.4)}
+    assert RS.specialist_conditions(sp) == ["bear_calm"] and not S.all_weather(sp)["all_weather"]
+    src = pathlib.Path(RS.__file__).read_text()
+    assert "not aw[\"all_weather\"]" in src and "set(sc_) >= set(aw[\"tested\"])" in src

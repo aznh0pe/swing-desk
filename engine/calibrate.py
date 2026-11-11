@@ -416,6 +416,8 @@ def condition_report(trades: pd.DataFrame, split, G: dict, min_week: int = 5) ->
     out = {"rule": S.CONDITION_RULE, "labels": dict(S.CONDITION_LABEL), "share_of_days": share, "share_of_days_oos": share_oos,
            "table": table, "gates": {}, "gates_tested": []}
     if post.empty or not G.get("aplus_score"):
+        out["all_weather"] = {name: S.all_weather(v, share) for name, v in table.items()}
+        out["all_weather_rule"] = S.ALL_WEATHER_RULE
         return out
     sent, ap, pk, wk = _sent(post, G, min_week)
     out["aplus"] = {c: _trade_stats(g) for c, g in ap.groupby("condition")}
@@ -426,9 +428,14 @@ def condition_report(trades: pd.DataFrame, split, G: dict, min_week: int = 5) ->
         rows = [(n, o) for n, o in rows if (o.get("trades") or 0) >= 100 and (o.get("profit_factor") or 0) >= 1.15]
         best[cond] = [n for n, o in sorted(rows, key=lambda x: (-(x[1]["win_rate"] or 0), -(x[1]["avg_ret"] or 0)))]
     out["best"] = best
+    # all-weather strategies hold up in every condition: they trade everywhere and are never paused on old data
+    out["all_weather"] = {name: S.all_weather(v, share) for name, v in table.items()}
+    out["all_weather_rule"] = S.ALL_WEATHER_RULE
     # pauses proposed by 2008-2021 alone, each kept only if it improves 2022-now
     cands = []
     for name, v in table.items():
+        if out["all_weather"][name]["all_weather"]:
+            continue
         for cond, d in v.items():
             tr_ = d.get("train") or {}
             if (tr_.get("trades") or 0) >= COND_GATE_TRAIN_N and ((tr_.get("win_rate") or 1) < COND_GATE_WIN
@@ -453,6 +460,19 @@ def condition_report(trades: pd.DataFrame, split, G: dict, min_week: int = 5) ->
             base = st
     out["sent_oos"] = base
     return out
+
+
+def _all_weather_line(pc: dict, P: dict) -> str:
+    """One changelog line: which live strategies are all-weather and which depend on the market condition."""
+    live = {n for n, v in (P.get("strategies") or {}).items() if v.get("enabled", True)}
+    aw = pc.get("all_weather") or {}
+    yes = [S.meta(n, P)["label"] for n, v in aw.items() if n in live and v.get("all_weather")]
+    dep = [f"{S.meta(n, P)['label']} (weaker in " + " and ".join(
+               S.CONDITION_PLURAL[c] + (f": {(v.get('weak_detail') or {})[c]}" if (v.get("weak_detail") or {}).get(c) else "")
+               for c in v["weak"]) + ")"
+           for n, v in aw.items() if n in live and not v.get("all_weather") and v.get("weak")]
+    return ("All-weather (held up in every market condition, so they trade in any market and are never paused on old "
+            "data): " + (", ".join(yes) or "none") + ". Condition-dependent: " + ("; ".join(dep) or "none") + ".")
 
 
 def calibrate_grades(all_tr: pd.DataFrame, split, min_week=3, cal_end=CAL_END, topup_min_week=5,
@@ -782,6 +802,8 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
         if pairs_(oc_) != pairs_(nc_):
             changes.append("Market-condition pauses validated on 2022-now data: " + (
                 "; ".join(f"{S.meta(n_, P)['label']} in {S.CONDITION_PLURAL[c_]}" for n_, c_ in sorted(pairs_(nc_))) or "none") + ".")
+        if (P.get("conditions") or {}).get("all_weather"):
+            changes.append(_all_weather_line(P["conditions"], P))
         og_, ng_ = oldP.get("grading") or {}, P["grading"]
         if ng_.get("topup_ok") is False:
             changes.append(ng_.get("topup_note") or "Weekly top-ups are off: no top-up rule cleared the floors.")
@@ -984,6 +1006,7 @@ def run_topups(data_dir, state_dir, out_dir, split="2022-01-01", log=print, now=
                            f"{S.meta(n, P)['label']} in {S.CONDITION_PLURAL[c]}" for n, v in pc["gates"].items() for c in v)
                           if pc.get("gates") else
                           f"No pause adopted: {len(tested)} proposed by 2008-2021 results, none improved 2022-now alerts."))
+        changes.append(_all_weather_line(pc, P))
     P["version"] = int(time.time())
     P["updated"] = now.isoformat(timespec="seconds")
     (out / "doc_params.json").write_text(json.dumps({"params": P, "updated_at": now.isoformat(timespec="seconds"),
@@ -1113,9 +1136,22 @@ def run_learning(data_dir, state_dir, out_dir, now=None) -> dict:
                 bits.append(f"{nm} {d['wins']} of {d['n']} won here")
         best = [S.meta(n_, P)["label"] for n_ in ((PC.get("best") or {}).get(cond_today) or [])[:3]]
         tested = (PC.get("aplus") or {}).get(cond_today) or {}
+        aw_t = [S.meta(n_, P)["label"] for n_, v_ in (PC.get("all_weather") or {}).items()
+                if v_.get("all_weather") and ((P.get("strategies") or {}).get(n_) or {}).get("enabled", True)]
         insights.append(f"Today's market: {lab.lower()}. " + (f"Your record in it: {', '.join(bits)}. " if bits else "")
                         + (f"Tested 2022-now in this condition: A+ setups won {100 * tested['win_rate']:.0f}% of {tested['trades']}. " if tested.get("trades") else "")
-                        + (f"Strongest strategies here: {', '.join(best)}." if best else ""))
+                        + (f"Strongest strategies here: {', '.join(best)}. " if best else "")
+                        + (f"All-weather in testing (they hold up in every condition, so they keep trading in any market): {', '.join(aw_t)}." if aw_t else ""))
+    aw_live = LL.all_weather_live(stats)
+    for n_, v_ in aw_live.items():
+        tested_aw = ((PC.get("all_weather") or {}).get(n_) or {}).get("all_weather")
+        if v_["all_weather"] and len(v_["tested"]) >= 3:
+            insights.append(f"{S.meta(n_, P)['label']} is proving all-weather live: it held up in "
+                            f"{', '.join(S.CONDITION_PLURAL[c] for c in v_['tested'])}"
+                            + (" (as tested)." if tested_aw else " (testing had it condition-dependent)."))
+        elif v_["weak"] and tested_aw:
+            insights.append(f"{S.meta(n_, P)['label']} tested all-weather but its own record lags in "
+                            f"{' and '.join(S.CONDITION_PLURAL[c] for c in v_['weak'])}: watched, paused there only on clear evidence.")
     if PC.get("table"):
         gl = LL.condition_gates_live(stats, PC)
         old_gl = PC.get("gates_live") or {}
@@ -1184,7 +1220,7 @@ def run_learning(data_dir, state_dir, out_dir, now=None) -> dict:
     journal = {"id": day, "date": day, "created_at": now.isoformat(timespec="seconds"),
                "shadow": agg(sh), "live": agg(closed), "by_strategy": by, "worked": worked,
                "didnt_work": didnt, "by_grade": journal_grades, "grade_rules": grade_rules,
-               "market_condition": cond_today, "by_condition": by_cond,
+               "market_condition": cond_today, "by_condition": by_cond, "all_weather_live": aw_live,
                "insights": insights or ["No statistically meaningful drift yet."],
                "changes": changes or ["No parameter changes today."], "params_version": P.get("version")}
     writes = []
