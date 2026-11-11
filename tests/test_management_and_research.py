@@ -375,3 +375,14 @@ def test_run_problems_lead_the_email_and_the_headline():
     # a quiet night says why, and the watchlist says what each name is short of
     assert "No A+ setups tonight (A+ needs score 80+" in txt and "closest tonight was OKTA at score 81.7" in txt
     assert "not A+: model win 71.9% (needs" in txt
+
+
+def test_weekly_minimum_is_five_and_quiet_scans_still_report():
+    from engine import scan as SC
+    assert SC.week_min({}) == 5 and SC.week_min({"min_setups_week": 7}) == 7 and SC.week_min(None) == 5
+    quiet = {"mode": "premarket", "counts": {"open_positions": 2}, "data": {"status": "ok"}, "market": {"label": "Bull"}}
+    h = SC.email_headline(quiet)
+    assert h.startswith("No action needed (pre-market check done: 2 open positions checked, keep holding)") and h.endswith("market Bull")
+    assert "no new A+ setups tonight" in SC.email_headline({**quiet, "mode": "postclose"})
+    busy = SC.email_headline({**quiet, "counts": {"open_positions": 2, "exit_alerts": 1}})
+    assert busy.startswith("1 exit alert") and "done:" not in busy

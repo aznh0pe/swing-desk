@@ -3,7 +3,7 @@ Each scheduled task must carry the matching file in ops/generated/. Done = updat
 - [x] postclose  trig_01VJiBMjH2dJJnBrAaTr9BcX
 - [x] premarket  trig_01BC6UyGsrA3mesQsU6pFbRP
 - [x] preclose   trig_015vu682N2v147NyT2kAdSLJ
-- [ ] weekend    trig_01XGcnEVgDkEYRGBoFe9xijx
+- [x] weekend    trig_01XGcnEVgDkEYRGBoFe9xijx
 - [ ] manual     trig_01812Le9m7LTp5vm9HhfZSvN
 - [x] learning   trig_01V9Hsf7VTMtsod6AoHQnyiP
 - [x] weekly     trig_01QZiuM65EDHm187zYcSY7Kk
@@ -14,5 +14,5 @@ Each scheduled task must carry the matching file in ops/generated/. Done = updat
 - [ ] backup postclose trig_01PY6eHAikqDnNCUU4QR2q51
 - [ ] backup learning  trig_01GShKJnc3qaLTWHnZzqHg7o
 - [ ] backup weekly    trig_01XCwqgr1TMFQuHDDY1drXFa
-- [ ] backup weekend   trig_01TYGCAK2FcGJmaF9wXMKPLE
+- [x] backup weekend   trig_01TYGCAK2FcGJmaF9wXMKPLE
 Tasks not yet updated still work: they try the repo first and fall back to the dashboard's engine copy.

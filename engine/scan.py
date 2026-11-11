@@ -52,6 +52,18 @@ def _r(x, nd=2):
     return round(x, nd) if math.isfinite(x) else None
 
 
+# Setups to send each week at the least. Not a ceiling: every A+ setup is always sent; when a week runs behind
+# this pace, the best grade-A setups top it up. Set "min_setups_week" in the dashboard settings to change it.
+WEEK_MIN = 5
+
+
+def week_min(settings: dict | None) -> int:
+    try:
+        return max(0, int((settings or {}).get("min_setups_week", WEEK_MIN)))
+    except Exception:
+        return WEEK_MIN
+
+
 def resolve_mode(mode: str, now) -> str:
     if mode != "auto":
         return mode
@@ -239,13 +251,17 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
     n_aplus = sum(1 for cd in ranked if cd["grade"] == "A+")
     # paced through the week (1 by Monday night, 2 by Tuesday, min_week from Wednesday on) so a calm week
     # doesn't leave you without setups until Wednesday; A+ setups always count first
-    pace = min(int(G.get("min_week", 3)), asof.weekday() + 1)
+    wmin = week_min(settings)
+    pace = min(wmin, asof.weekday() + 1)  # one more each night: 1 by Monday ... 5 by Friday
     need = max(0, pace - week_so_far - n_aplus) if mode == "postclose" else 0
     floor = float(G.get("topup_floor", G.get("aplus_score", 74) - 8))
+    # a top-up may sit up to 3 points under the A+ model bar: in the backtest the score band just under A+
+    # won about as often as A+ (smaller average gain), so it is the honest next-best when A+ is scarce
+    top_p = float(G.get("topup_pwin", float(G.get("aplus_pwin", 0.62)) - 0.03))
     for cd in ranked:
         if need <= 0:
             break
-        if cd["grade"] != "A+" and cd["score"] >= floor and cd["p"] >= G.get("aplus_pwin", 0.62):
+        if cd["grade"] != "A+" and cd["score"] >= floor and cd["p"] >= top_p:
             cd["grade"], cd["topup"] = "A", True
             need -= 1
     out, near = [], []
@@ -316,7 +332,7 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
         if cd.get("topup"):
             doc["grade"] = "A"
             doc["topup_note"] = ("Weekly top-up: the best grade-A setup, sent because this week is behind its pace of "
-                                 f"{G.get('min_week', 3)} setups (historically grade A wins about as often as A+ "
+                                 f"{wmin} setups a week (historically grade A wins about as often as A+ "
                                  "but earns less per trade).")
         doc["sector_key"] = sector_of(cd["ticker"])
         if cd["grade"] == "A+" or cd.get("topup"):
@@ -427,8 +443,12 @@ def headline(scan_doc: dict) -> str:
         return f"Market closed ({scan_doc.get('closed_reason') or 'holiday'})"
     c = scan_doc.get("counts") or {}
     bits = []
-    if c.get("aplus"):
-        bits.append(f"{c['aplus']} A+ setup{'s' if c['aplus'] != 1 else ''}")
+    n_top = int(c.get("topups") or 0)
+    n_ap = max(0, int(c.get("aplus") or 0) - n_top)
+    if n_ap:
+        bits.append(f"{n_ap} A+ setup{'s' if n_ap != 1 else ''}")
+    if n_top:
+        bits.append(f"{n_top} grade-A weekly top-up{'s' if n_top != 1 else ''}")
     if c.get("exit_alerts"):
         bits.append(f"{c['exit_alerts']} exit alert{'s' if c['exit_alerts'] != 1 else ''}")
     if c.get("stop_raises"):
@@ -479,8 +499,14 @@ def signal_counts(positions: list) -> dict:
 
 
 def email_headline(scan_doc: dict) -> str:
-    """The first line of the emailed digest: what to act on, then the market label."""
+    """The first line of the emailed digest: what to act on, then the market label. Every scan is a report I
+    asked to receive, quiet ones included, so a quiet one says what it checked instead of only "no action"."""
     out = headline(scan_doc)
+    if out.endswith("No action needed") and scan_doc.get("status") != "closed":
+        n = int((scan_doc.get("counts") or {}).get("open_positions") or 0)
+        kind = {"premarket": "pre-market check", "preclose": "pre-close scan", "postclose": "post-close scan"}.get(scan_doc.get("mode"), "scan")
+        out += (f" ({kind} done: " + (f"{n} open position{'s' if n != 1 else ''} checked, keep holding" if n else "no open positions")
+                + ("; no new A+ setups tonight" if scan_doc.get("mode") == "postclose" else "") + ")")
     label = (scan_doc.get("market") or {}).get("label")
     if label and scan_doc.get("status") != "closed":
         out += f" · market {label}"
@@ -661,7 +687,7 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
                  "intraday_asof": meta.get("intraday_asof"), "partial_bar": partial,
                  "tickers": int(ind["close"].shape[1])},
         "market": regime_summary(ind), "funds": f,
-        "counts": {"aplus": len(entries), "near_misses": len(near), **signal_counts(positions),
+        "counts": {"aplus": len(entries), "topups": sum(1 for e in entries if e.get("topup_note")), "near_misses": len(near), **signal_counts(positions),
                    "orders_to_record": sum(1 for c in fill_checks if c.get("filled")),
                    "orders_to_check": sum(1 for c in fill_checks if c.get("status") == "placed"
                                           and (c.get("filled") is None or c.get("touched"))),
@@ -670,7 +696,7 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
                    "new_docs": len(writes)},
         "positions": positions, "near_misses": near[:8], "premarket_checks": pm_checks, "fill_checks": fill_checks[:30],
         "expired_alert_ids": [a for a, _ in expire][:50],
-        "params_version": P.get("version"), "errors": errors[:40], "notes": notes,
+        "params_version": P.get("version"), "errors": errors[:40], "notes": notes, "week_min": week_min(state["settings"]),
         "run_issues": ([f"The scanner hit {len(errors)} error(s) and carried on without those items; the first: {errors[0]}"]
                        if errors else []),
         "session_day": str(session_day), "engine": engine_version.info(),
@@ -1000,7 +1026,7 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
         lines += ["", f"No A+ setups tonight (A+ needs score {a_sc}+ and a model win estimate of {a_pw}%+).{why} "
                   "The scan ran normally; A+ setups cluster in market selloffs, and calm days often have none. "
                   "Standing aside is a position."]
-    if near and (week_aplus < P["grading"].get("min_week", 3)):
+    if near and (week_aplus < int(scan.get("week_min") or WEEK_MIN)):
         G = P.get("grading") or {}
         a_sc, a_pw = G.get("aplus_score", 80), round(100 * float(G.get("aplus_pwin", 0.72)))
         lines += ["", "=== WATCHLIST (grade A, not A+: for information, not orders) ==="]

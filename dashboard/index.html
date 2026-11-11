@@ -707,6 +707,11 @@ function attentionBanner() {
   // problems inside a run that still finished (a failed step, a fallback, a fix): shown until the next clean run
   const lastRun = S.scans.find((x) => x.status !== "closed"), ri = lastRun?.run_issues || [];
   if (ri.length || lastRun?.status === "failed") out += `<div class="banner crit" style="margin-bottom:12px"><b>Problem in the last scan (${dtShort(lastRun.started_at)}):</b> ${lastRun.status === "failed" ? "the scan failed. " : ""}${ri.map((t) => esc(t)).join(" ")} ${lastRun.status === "failed" ? "" : "The scan still finished and its results are complete. "}Tell Claude in the Swing Desk chat so it gets fixed.</div>`;
+  // problems in the daily learning review or the weekly recalibration: shown until that job's next clean run
+  for (const [weekly, name] of [[false, "daily learning review"], [true, "weekly recalibration"]]) {
+    const j = S.journal.find((x) => String(x.id).endsWith("-weekly") === weekly), ji = Array.isArray(j?.issues) ? j.issues : [];
+    if (ji.length) out += `<div class="banner crit" style="margin-bottom:12px"><b>Problem in the last ${name} (${j.date ? dShort(j.date) : "latest"}):</b> ${ji.map((t) => esc(t)).join(" ")} Tell Claude in the Swing Desk chat so it gets fixed.</div>`;
+  }
   if (res.length) out += `<div class="banner info" style="margin-bottom:12px"><b>${res.map((r) => esc(r.a.ticker)).join(", ")}: ${res.length === 1 ? "did this order fill?" : "did these orders fill?"}</b> ${res.some((r) => r.kind !== "ask") ? "The day's low traded below the limit, so it probably filled. " : ""}Record it so the scans watch the position. <button class="btn small" type="button" data-tab="alerts">Answer</button></div>`;
   return out;
 }
@@ -1398,6 +1403,7 @@ function journalEntry(j) {
   const li = (arr) => (arr || []).map((x) => `<li>${esc(x)}</li>`).join("");
   return `<article class="panel" style="display:flex;flex-direction:column;gap:6px"><div class="section-head"><h3>${dShort(j.date)}</h3>
     <span class="meta">Shadow ${j.shadow?.n ? `${pct(100 * j.shadow.win_rate)} of ${esc(j.shadow.n)}` : "–"} · live ${j.live?.n ? `${pct(100 * j.live.win_rate)} of ${esc(j.live.n)}` : "–"}</span></div>
+    ${Array.isArray(j.issues) && j.issues.length ? `<div class="small" style="color:var(--crit)"><b>Run problems:</b><ul style="margin:2px 0 0;padding-left:18px">${li(j.issues)}</ul></div>` : ""}
     ${j.worked?.length ? `<div class="small"><b>Worked:</b><ul style="margin:2px 0 0;padding-left:18px">${li(j.worked)}</ul></div>` : ""}
     ${j.didnt_work?.length ? `<div class="small"><b>Didn't work:</b><ul style="margin:2px 0 0;padding-left:18px">${li(j.didnt_work)}</ul></div>` : ""}
     <div class="small"><b>Insights:</b><ul style="margin:2px 0 0;padding-left:18px">${li(j.insights)}</ul></div>

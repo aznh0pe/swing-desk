@@ -180,6 +180,7 @@ def apply(out_dir: str, news: list[str], state_dir: str | None = None, issues: l
     flat = [w for ch in chunks for w in ch if not (w["collection"] == "alerts" and w["doc_id"] in drop_ids)]
     # scan doc, overlay for alerts that already exist, digest
     scan["counts"]["aplus"] = len(kept)
+    scan["counts"]["topups"] = sum(1 for e in kept if e.get("topup_note"))
     scan["news_dropped"] = dropped
     scan["news_checked"] = sorted(verdicts)
     scan["news_rules"] = NEWS_RULES
