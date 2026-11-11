@@ -492,3 +492,62 @@ def test_topup_replay_follows_the_weekly_pace_and_is_tuned_on_its_own():
     awful = sig.assign(ret=-0.01)
     off = CB.calibrate_topups(awful, 95, 0.78, 5)
     assert off["topup_ok"] is False and "off" in off["topup_note"]
+
+
+def test_market_conditions_are_learned_validated_and_used():
+    import datetime as dt
+    import pandas as pd
+    from engine import learnlog as LL, strategies as S
+    # one definition everywhere
+    assert S.condition_of(1, 1.0, 0.01) == "bull_calm" and S.condition_of(1, 1.2, 0.0) == "bull_stress"
+    assert S.condition_of(0, 1.0, 0.0) == "bear_calm" and S.condition_of(0, 1.0, -0.03) == "bear_stress"
+    assert S.condition_of(None, 1, 0) is None
+    # every graded result and trade is tagged with its condition, per strategy and per grade, and kept
+    now = dt.datetime(2026, 11, 20, 15, 0)
+    calm = {"spy_above200": 1, "vix_ratio": 1.0, "spy_ret5": 0.01}
+    sell = {"spy_above200": 0, "vix_ratio": 1.5, "spy_ret5": -0.04}
+    alerts, shadow = [], []
+    for i in range(30):
+        f = calm if i < 20 else sell
+        alerts.append({"id": f"e{i}", "valid_for": "2026-11-0%d" % (i % 9 + 1), "strategy": "S", "grade": "A+",
+                       "grade_kind": "aplus", "features": f})
+        win = (i >= 20) or (i % 4 == 0)          # calm: 5 of 20 win; selloff: 10 of 10
+        shadow.append({"alert_id": f"e{i}", "status": "closed", "fill": 100.0, "exit": 103.0 if win else 97.0, "strategy": "S"})
+    trades = [{"alert_id": "e0", "entry_price": 100, "exit_price": 104, "exit_date": "2026-11-12", "strategy": "S",
+               "grade_kind": "aplus", "market_condition": "bull_calm"}]
+    st = LL.stats_doc(None, alerts, shadow, trades, True, now)
+    bc = st["summary"]["S"]["by_condition"]
+    assert bc["bull_calm"]["n"] == 20 and bc["bull_calm"]["wins"] == 5 and bc["bull_calm"]["live_n"] == 1
+    assert bc["bear_stress"]["wins"] == 10 and st["grade_summary"]["aplus"]["by_condition"]["bear_stress"]["n"] == 10
+    # a clearly failing record in one condition pauses the strategy there only
+    conds = {"table": {"S": {"bull_calm": {"oos": {"win_rate": 0.70}}, "bear_stress": {"oos": {"win_rate": 0.75}}}}}
+    gl = LL.condition_gates_live(st, conds)
+    assert set(gl) == {"S"} and set(gl["S"]) == {"bull_calm"} and "calm bull market" in gl["S"]["bull_calm"]
+    few = LL.stats_doc(None, alerts[:5], shadow[:5], [], True, now)
+    assert LL.condition_gates_live(few, conds) == {}
+
+
+def test_condition_pauses_are_adopted_only_when_unseen_alerts_improve():
+    import pandas as pd
+    rng = np.random.default_rng(5)
+    days = pd.bdate_range("2012-01-03", "2026-10-30")
+    rows = []
+    for d in days:
+        bull_calm = (d.dayofyear % 3) != 0
+        f = {"spy_above200": 1.0, "vix_ratio": 1.0 if bull_calm else 1.4, "spy_ret5": 0.01 if bull_calm else -0.03}
+        for k in range(4):
+            strat = "WEAK_IN_CALM" if k == 0 else "STEADY"
+            p_win = 0.40 if (strat == "WEAK_IN_CALM" and bull_calm) else 0.74
+            sc = float(rng.uniform(80, 99)) if strat == "WEAK_IN_CALM" else float(rng.uniform(60, 99))
+            rows.append({"signal_date": d, "ticker": f"T{k}", "strategy": strat, "score": sc, "p": 0.75, "filled": True,
+                         "ret": 0.02 if rng.random() < p_win else -0.02, **f})
+    t = pd.DataFrame(rows)
+    G = {"aplus_score": 85, "aplus_pwin": 0.7, "topup_ok": True, "topup_floor": 70, "topup_pwin": 0.7, "topup_excluded": {}}
+    cr = CB.condition_report(t, "2022-01-01", G, 5)
+    assert cr["table"]["WEAK_IN_CALM"]["bull_calm"]["oos"]["win_rate"] < 0.5
+    assert cr["gates"] == {"WEAK_IN_CALM": {"bull_calm": cr["gates"]["WEAK_IN_CALM"]["bull_calm"]}}
+    assert any(g["adopted"] for g in cr["gates_tested"]) and cr["sent_oos"]["win_rate"] > 0.7
+    assert cr["best"]["bull_calm"][0] == "STEADY" and abs(sum(cr["share_of_days"].values()) - 1) < 0.01
+    # a strategy that is fine everywhere is never paused
+    t2 = t.assign(ret=np.where(rng.random(len(t)) < 0.74, 0.02, -0.02))
+    assert CB.condition_report(t2, "2022-01-01", G, 5)["gates"] == {}

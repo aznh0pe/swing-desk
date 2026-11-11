@@ -127,6 +127,11 @@ td .t { font-family: var(--f-display); font-stretch: 85%; font-weight: 700; font
 .gchip { display: inline-block; font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--line-2); margin-right: 5px; vertical-align: 1px; white-space: nowrap; }
 .gchip.aplus { color: var(--brass); border-color: var(--brass); background: var(--brass-soft); }
 .gchip.topup { color: var(--ink-2); background: var(--surface-2); }
+.cond-tbl td.c { text-align: center; white-space: nowrap; }
+.cond-tbl td.c .w { font-weight: 700; }
+.cond-tbl td.c.good .w { color: var(--good); } .cond-tbl td.c.warn .w { color: var(--warn); } .cond-tbl td.c.crit .w { color: var(--crit); }
+.cond-tbl th.today, .cond-tbl td.today { background: var(--surface-2); }
+.cond-tbl tr.grade-row td { font-weight: 600; }
 .t-title { min-width: 0; flex: 1; }
 .t-title .tk { font-family: var(--f-display); font-weight: 800; font-stretch: 78%; font-size: 24px; letter-spacing: .02em; line-height: 1.05; }
 .t-title .nm { color: var(--ink-2); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -981,6 +986,7 @@ function ticket(a, today) {
     </div>
     ${a.withdrawn ? `<div class="note-strip" style="background:var(--crit-bg);color:var(--crit)"><b>Withdrawn:</b> ${hiCaution(a.withdrawn_reason || "a later scan dropped this setup.")} ${a.status === "placed" ? "Cancel the order in your brokerage, then press Cancelled." : "Don't place it."}</div>` : ""}
     ${a.topup_note ? `<div class="note-strip">${esc(a.topup_note)}</div>` : ""}
+    ${a.condition_note ? `<div class="small muted" style="margin-top:4px">${esc(a.condition_note)}</div>` : ""}
     ${a.size_note ? `<div class="note-strip">${esc(a.size_note)}</div>` : ""}
     ${a.capacity_note ? `<div class="note-strip">${esc(a.capacity_note)}</div>` : ""}
     ${a.status === "placed" ? `<div class="note-strip">Order placed ${a.placed_at ? dtShort(a.placed_at) : ""}. It works until the ${dShort(lastValidDay(a))} close; if it hasn't filled by then it expires, and the dashboard records it as Didn't fill on its own.</div>` : ""}
@@ -1340,9 +1346,43 @@ function viewGrades() {
   if (decisions.length) html += `<div class="panel" style="margin-top:12px"><h3 style="margin:0 0 6px">Recent grade decisions</h3><ul style="margin:0;padding-left:18px">${decisions.slice(0, 6).map(([d, ch]) => `<li><span class="muted small">${dShort(d)}</span> ${esc(ch)}</li>`).join("")}</ul></div>`;
   return html + `</section>`;
 }
+const COND_KEYS = ["bull_calm", "bull_stress", "bear_calm", "bear_stress"];
+const COND_LABEL = { bull_calm: "Calm bull market", bull_stress: "Pullback in a bull market", bear_calm: "Quiet bear market", bear_stress: "Bear-market selloff" };
+const COND_PLURAL = { bull_calm: "calm bull markets", bull_stress: "pullbacks in bull markets", bear_calm: "quiet bear markets", bear_stress: "bear-market selloffs" };
+function viewConditions() {
+  const P = S.params?.params || S.params; const PC = P?.conditions || {};
+  const label = (n) => S.backtest?.strategies?.[n]?.label || P?.custom?.[n]?.label || n;
+  const lastScan = S.scans.find((x) => x.market?.condition);
+  const today = lastScan?.market?.condition || null;
+  const sum = S.learning.stats?.summary || {}, gs = S.learning.stats?.grade_summary || {};
+  const cellCls = (o) => !o?.trades ? "" : (o.win_rate >= 0.7 && (o.profit_factor ?? 9) >= 1.3) ? "good" : (o.win_rate < 0.64 || (o.profit_factor ?? 9) < 1.1) ? "warn" : "";
+  const live = (r) => r?.n || r?.live_n ? `<div class="small muted">live ${esc((r.wins || 0) + (r.live_wins || 0))}/${esc((r.n || 0) + (r.live_n || 0))}</div>` : "";
+  const cell = (o, tr, lv, k) => `<td class="c ${cellCls(o)} ${k === today ? "today" : ""}" title="${o?.trades ? `2022–now: ${o.trades} trades, average ${spct(100 * (o.avg_ret || 0), 2)}, profit factor ${o.profit_factor ?? "–"}` : "no 2022–now trades"}${tr?.trades ? ` · 2008–2021: ${pct(100 * tr.win_rate, 0)} of ${tr.trades}` : ""}">${o?.trades ? `<span class="w">${pct(100 * o.win_rate, 0)}</span> <span class="muted small">(${esc(o.trades)})</span>` : `<span class="muted">–</span>`}${live(lv)}</td>`;
+  const paused = [];
+  for (const [src, why] of [["gates", "validated on 2022–now data"], ["gates_live", "its own live record"]]) for (const [n, v] of Object.entries(PC[src] || {})) for (const [c, r] of Object.entries(v || {})) paused.push(`<li><b>${esc(label(n))}</b> in ${esc(COND_PLURAL[c])} (${why}): ${esc(r)}</li>`);
+  const specialists = Object.entries(P?.strategies || {}).filter(([, v]) => v.enabled !== false && (v.market_conditions || []).length);
+  const tested = PC.gates_tested || [];
+  let html = `<section class="section" id="conditions"><div class="section-head"><h2>Market conditions</h2><span class="meta">Which strategies work best in which conditions${PC.updated ? ` · learned ${dtShort(PC.updated)}` : ""}</span></div>`;
+  if (!PC.table) return html + `<div class="empty">The strategy-by-condition results fill in after the next recalibration.</div></section>`;
+  const share = PC.share_of_days || {};
+  html += `<div class="banner info"><b>Today: ${today ? esc(COND_LABEL[today]) : "–"}.</b> ${esc(PC.rule || "")} Share of trading days since 2008: ${COND_KEYS.map((k) => `${esc(COND_LABEL[k].toLowerCase())} ${share[k] != null ? pct(100 * share[k], 0) : "–"}`).join(" · ")}.${today && (PC.best?.[today] || []).length ? ` <b>Strongest in today's condition (2022–now):</b> ${PC.best[today].slice(0, 3).map((n) => esc(label(n))).join(", ")}.` : ""}</div>`;
+  const names = Object.keys(PC.table).sort((a, b) => label(a).localeCompare(label(b)));
+  html += `<div class="tbl-wrap"><table class="cond-tbl"><thead><tr><th>2022–now win rate (trades)</th>${COND_KEYS.map((k) => `<th class="n ${k === today ? "today" : ""}">${esc(COND_LABEL[k])}${k === today ? " · today" : ""}</th>`).join("")}</tr></thead><tbody>
+    <tr class="grade-row"><td>A+ setups</td>${COND_KEYS.map((k) => cell((PC.aplus || {})[k], null, (gs.aplus?.by_condition || {})[k], k)).join("")}</tr>
+    <tr class="grade-row"><td>Weekly top-ups</td>${COND_KEYS.map((k) => cell((PC.topup || {})[k], null, (gs.topup?.by_condition || {})[k], k)).join("")}</tr>
+    ${names.map((n) => `<tr><td>${esc(label(n))}${(P?.strategies?.[n]?.market_conditions || []).length ? ` <span class="pill info">specialist</span>` : ""}<div class="small muted">every signal, any grade</div></td>${COND_KEYS.map((k) => cell(PC.table[n]?.[k]?.oos, PC.table[n]?.[k]?.train, sum[n]?.by_condition?.[k], k)).join("")}</tr>`).join("")}
+    </tbody></table></div>
+    <p class="small muted" style="margin:6px 0 0">Green: 70%+ wins with profit factor 1.3+; amber: under 64% or profit factor under 1.1. Hover a cell for the average trade, profit factor and 2008–2021 result; "live" is this desk's own graded setups and trades there.</p>`;
+  html += `<div class="panel" style="margin-top:12px"><h3 style="margin:0 0 6px">How conditions are used</h3><ul style="margin:0;padding-left:18px">
+    <li>The scoring model already reads the market (VIX, SPY trend and momentum, breadth): that is why A+ setups cluster in pullbacks and selloffs and are rare in calm bull markets.</li>
+    <li><b>Pauses:</b> a strategy is paused in a condition only if that would have made 2022–now alerts win more often without hurting the average trade, judged on data the pause wasn't chosen on, or if its own live record there falls clearly short. ${tested.length ? `${esc(tested.length)} pause${tested.length === 1 ? "" : "s"} proposed by 2008–2021 results were tested; ${esc(tested.filter((g) => g.adopted).length)} adopted.` : ""}${paused.length ? `<ul style="margin:4px 0 0;padding-left:18px">${paused.join("")}</ul>` : " None active."}</li>
+    <li><b>Specialists:</b> research tests every idea per condition; one that wins only in some conditions can be promoted to trade only there. ${specialists.length ? specialists.map(([n, v]) => `<b>${esc(label(n))}</b>: ${v.market_conditions.map((c) => esc(COND_PLURAL[c])).join(", ")}`).join("; ") : "None live yet."}</li>
+    <li>Calm bull markets are where the desk most needs new strategies, so daily research is pointed there.</li></ul></div>`;
+  return html + `</section>`;
+}
 function viewLab() {
   const bt = S.backtest; const P = S.params?.params || S.params; const G = P?.grading || bt?.grading || {};
-  let html = viewGrades() + `<section class="section"><div class="section-head"><h2>Strategy playbook</h2><span class="meta">${bt ? `Backtest ${esc(bt.period?.[0])} to ${esc(bt.period?.[1])} · ${esc(bt.tickers)} stocks & ETFs · out-of-sample from ${esc(bt.split)}` : "Backtest results load after the first calibration"}</span></div>`;
+  let html = viewGrades() + viewConditions() + `<section class="section"><div class="section-head"><h2>Strategy playbook</h2><span class="meta">${bt ? `Backtest ${esc(bt.period?.[0])} to ${esc(bt.period?.[1])} · ${esc(bt.tickers)} stocks & ETFs · out-of-sample from ${esc(bt.split)}` : "Backtest results load after the first calibration"}</span></div>`;
   if (G.aplus_score) {
     html += `<div class="banner info">A+ means score ≥ ${esc(G.aplus_score)} and estimated win rate ≥ ${pct(100 * G.aplus_pwin, 0)}.${G.oos_aplus_win_rate ? ` On out-of-sample data${G.oos_window ? ` (${esc(G.oos_window[0])} to ${esc(G.oos_window[1])})` : ""}, setups at that bar won ${pct(100 * G.oos_aplus_win_rate)} of ${esc(G.oos_aplus_trades)} trades (avg ${spct(100 * G.oos_aplus_avg_ret, 2)}), about ${esc(G.oos_aplus_signals_per_week)} per week.` : ""}</div>`;
     if (Array.isArray(G.by_year) && G.by_year.length) {
@@ -1479,6 +1519,7 @@ function ideaCard({ i, r, st }) {
     <div class="small">${esc(i.about || "")}</div>
     ${r && r.train ? `<div class="stats">${stat("Win 2008–21", tr.win_rate != null ? pct(100 * tr.win_rate) : "–")}${stat("Win 2022–now", te.win_rate != null ? pct(100 * te.win_rate) : "–")}${stat("PF 2022–now", te.profit_factor ?? "–")}${stat("Overlap", r.overlap_live != null ? pct(100 * r.overlap_live, 0) : "–")}</div>` : ""}
     <div class="why-box ${st === "candidate" || st === "live" ? "" : "off"}">${esc(r ? r.summary : "Queued: it is tested in an upcoming daily research run.")}</div>
+    ${r?.by_condition ? `<div class="small"><b>By market condition (2022–now):</b> ${COND_KEYS.filter((k) => (r.by_condition[k]?.oos?.trades || 0) >= 30).map((k) => `${esc(COND_LABEL[k].toLowerCase())} ${pct(100 * r.by_condition[k].oos.win_rate, 0)} (${esc(r.by_condition[k].oos.trades)})`).join(" · ") || "–"}${(r.market_conditions || []).length ? ` · <span class="pill info" style="white-space:normal">specialist: ${r.market_conditions.map((c) => esc(COND_PLURAL[c])).join(", ")}</span>` : ""}</div>` : ""}
     ${r?.grade_preview?.aplus ? `<div class="small"><b>By grade (today's model, 2022–now):</b> A+ ${pct(100 * r.grade_preview.aplus.share, 0)} of signals${r.grade_preview.aplus.win_rate != null ? `, won ${pct(100 * r.grade_preview.aplus.win_rate, 0)}` : ""} · top-up band ${pct(100 * r.grade_preview.topup_band.share, 0)}${r.grade_preview.topup_band.win_rate != null ? `, won ${pct(100 * r.grade_preview.topup_band.win_rate, 0)}` : ""} · calm-market days ${r.grade_preview.calm.win_rate != null ? `won ${pct(100 * r.grade_preview.calm.win_rate, 0)}` : "–"}</div>` : ""}
     ${(st === "live" || st === "held") && live?.status_reason ? `<div class="small"><b>Saturday recalibration:</b> ${esc(live.status_reason)}</div>` : ""}
     ${r?.path?.text && !["candidate", "live"].includes(st) ? `<div class="small"><b>What would change the verdict:</b> ${esc(r.path.text)}</div>` : ""}
@@ -1491,6 +1532,7 @@ function journalEntry(j) {
   const li = (arr) => (arr || []).map((x) => `<li>${esc(x)}</li>`).join("");
   return `<article class="panel" style="display:flex;flex-direction:column;gap:6px"><div class="section-head"><h3>${dShort(j.date)}</h3>
     <span class="meta">Shadow ${j.shadow?.n ? `${pct(100 * j.shadow.win_rate)} of ${esc(j.shadow.n)}` : "–"} · live ${j.live?.n ? `${pct(100 * j.live.win_rate)} of ${esc(j.live.n)}` : "–"}</span></div>
+    ${j.market_condition ? `<div class="small"><b>Market:</b> ${esc(COND_LABEL[j.market_condition] || j.market_condition)}</div>` : ""}
     ${j.by_grade ? `<div class="small"><b>By grade:</b> ${[["aplus", "A+"], ["topup", "Top-ups"], ["watch", "Watchlist"]].map(([k, l]) => { const r = j.by_grade[k] || {}; return `${l} ${r.n ? `${esc(r.wins)}/${esc(r.n)} (${pct(100 * r.win_rate, 0)})` : "–"}`; }).join(" · ")}</div>` : ""}
     ${Array.isArray(j.issues) && j.issues.length ? `<div class="small" style="color:var(--crit)"><b>Run problems:</b><ul style="margin:2px 0 0;padding-left:18px">${li(j.issues)}</ul></div>` : ""}
     ${j.worked?.length ? `<div class="small"><b>Worked:</b><ul style="margin:2px 0 0;padding-left:18px">${li(j.worked)}</ul></div>` : ""}
@@ -1539,7 +1581,7 @@ function fillModal(a) {
     "Save fill", async () => {
       const price = need($("#mPx").value, "Price"), sh = need($("#mSh").value, "Shares");
       const id = "t_" + $("#mDt").value.replace(/-/g, "") + "_" + String(a.ticker).replace(/[^A-Za-z0-9-]/g, "") + "_" + Math.random().toString(36).slice(2, 6);
-      await setDoc("trades/" + id, { id, ticker: a.ticker, name: a.name, strategy: a.strategy, strategy_label: a.strategy_label, alert_id: a.id, grade_kind: a.topup_note || a.grade_kind === "topup" ? "topup" : "aplus", status: "open",
+      await setDoc("trades/" + id, { id, ticker: a.ticker, name: a.name, strategy: a.strategy, strategy_label: a.strategy_label, alert_id: a.id, grade_kind: a.topup_note || a.grade_kind === "topup" ? "topup" : "aplus", ...(a.market_condition ? { market_condition: a.market_condition } : {}), status: "open",
         entry_price: price, planned_entry: num(a.entry), shares: sh, entry_date: $("#mDt").value, stop: num($("#mSt").value), target: num($("#mTg").value),
         max_hold: Number($("#mHd").value) || a.hold_max_days || 7, dyn_exit: a.dyn_exit || "none", win_pct: num(a.win_pct), score: num(a.score), opened_at: nowIso() });
       await updDoc("alerts/" + a.id, { status: "filled", actual_price: price, actual_shares: sh, done_at: nowIso(), trade_id: id });

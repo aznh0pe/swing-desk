@@ -16,6 +16,9 @@ A spec is plain JSON, so a new idea can be written, tested and promoted without 
   "exit": "sma5",                             sma5 | prev_high | high7 | rsi2_70 | none
   "max_hold": "{hold}", "valid_days": 1,
   "regime": [],                               optional gates: spy200, breadth, vixcalm
+  "market_conditions": [],                    optional: trade only in these market conditions (bull_calm,
+                                              bull_stress, bear_calm, bear_stress); the research test reports
+                                              every idea per condition and proposes this for a specialist
   "params": {"k": 0.3, "stop": 3.0, "hold": 7},
   "grid": {"k": [0, 0.3, 0.6], "hold": [5, 8]}
 }
@@ -295,6 +298,9 @@ def build_plan(spec: dict, ind: dict, P: dict, b: dict, params: dict | None = No
         if "vixcalm" in reg:
             gate &= mk["vix_ratio"].fillna(1.0) <= 1.35
         m = m & pd.DataFrame(np.repeat(gate.values[:, None], c.shape[1], axis=1), index=c.index, columns=c.columns)
+    if spec.get("market_conditions"):  # a specialist: signals only in these market conditions
+        from .strategies import condition_gate
+        m = m & condition_gate(ind, spec["market_conditions"], c)
     en = spec.get("entry") or {"kind": "limit_next", "price": "close"}
     kind = en.get("kind", "limit_next")
     limit = c.copy() if kind == "close" else ev.frame(subst(en.get("price", "close"), pr))
@@ -378,6 +384,9 @@ def validate(spec: dict) -> list[str]:
         reg = [reg]
     if any(r not in REGIMES for r in reg):
         errs.append("regime gates must be among spy200, breadth, vixcalm")
+    mc = spec.get("market_conditions") or []
+    if mc and (not isinstance(mc, list) or any(x not in ("bull_calm", "bull_stress", "bear_calm", "bear_stress") for x in mc)):
+        errs.append("market_conditions must list among bull_calm, bull_stress, bear_calm, bear_stress")
     allowed = FRAME_NAMES | MARKET_NAMES | CAL_NAMES
     for e in exprs:
         try:

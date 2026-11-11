@@ -14,6 +14,8 @@ import datetime as dt
 
 import numpy as np
 
+from .strategies import CONDITIONS, CONDITION_LABEL, CONDITION_PLURAL, condition_of_features
+
 HALF_LIFE_MONTHS = 6.0  # older evidence counts less, never zero
 STRESS_VIX, STRESS_SPY5 = 1.10, -0.014
 
@@ -28,6 +30,17 @@ def stressed(f: dict) -> bool:
 def _blank():
     return {"shadow_n": 0, "shadow_wins": 0, "shadow_ret": 0.0, "live_n": 0, "live_wins": 0, "live_ret": 0.0,
             "stress_n": 0, "stress_wins": 0, "calm_n": 0, "calm_wins": 0, "exits": {}}
+
+
+def _cadd(c: dict, cond, ret: float, live: bool = False) -> None:
+    """Adds one result to a cell's per-market-condition breakdown."""
+    if not cond:
+        return
+    d = c.setdefault("cond", {}).setdefault(cond, {"n": 0, "wins": 0, "ret": 0.0, "live_n": 0, "live_wins": 0, "live_ret": 0.0})
+    k = "live_" if live else ""
+    d[k + "n"] += 1
+    d[k + "wins"] += int(ret > 0)
+    d[k + "ret"] = round(d[k + "ret"] + ret, 5)
 
 
 def monthly_tallies(alerts: list, shadow: list, closed_trades: list) -> dict:
@@ -50,6 +63,7 @@ def monthly_tallies(alerts: list, shadow: list, closed_trades: list) -> dict:
         c[reg + "_wins"] += int(ret > 0)
         r = s.get("reason") or "other"
         c["exits"][r] = c["exits"].get(r, 0) + 1
+        _cadd(c, condition_of_features(a.get("features")), ret)
     for t in closed_trades:
         try:
             ret = float(t["exit_price"]) / float(t["entry_price"]) - 1
@@ -62,6 +76,7 @@ def monthly_tallies(alerts: list, shadow: list, closed_trades: list) -> dict:
         c["live_n"] += 1
         c["live_wins"] += int(ret > 0)
         c["live_ret"] += ret
+        _cadd(c, t.get("market_condition") or condition_of_features((amap.get(t.get("alert_id")) or {}).get("features")), ret, live=True)
     for cells in out.values():
         for c in cells.values():
             c["shadow_ret"], c["live_ret"] = round(c["shadow_ret"], 5), round(c["live_ret"], 5)
@@ -113,9 +128,35 @@ def summary(months: dict, now) -> dict:
             for k in ("stress_n", "stress_wins", "calm_n", "calm_wins", "live_n", "live_wins"):
                 r[k] += c.get(k, 0)
             r["first_month"] = min(r["first_month"], m)
+            _cond_acc(r.setdefault("_cond", {}), c, 0.5 ** (_age_months(m, now) / HALF_LIFE_MONTHS))
     for r in out.values():
         tot = r.pop("all_ret")
         r["all_avg_ret"] = round(tot / r["all_n"], 5) if r["all_n"] else None
+        r["by_condition"] = _cond_fin(r.pop("_cond", {}))
+    return out
+
+
+def _cond_acc(acc: dict, c: dict, wt: float) -> None:
+    """Adds a cell's per-condition results to an accumulator (with the weighted record the rules use)."""
+    for cond, d in (c.get("cond") or {}).items():
+        a = acc.setdefault(cond, {"n": 0, "wins": 0, "ret": 0.0, "live_n": 0, "live_wins": 0, "live_ret": 0.0, "wn": 0.0, "ww": 0.0})
+        for k in ("n", "wins", "ret", "live_n", "live_wins", "live_ret"):
+            a[k] += d.get(k, 0)
+        a["wn"] += wt * (d.get("n", 0) + 2 * d.get("live_n", 0))
+        a["ww"] += wt * (d.get("wins", 0) + 2 * d.get("live_wins", 0))
+
+
+def _cond_fin(acc: dict) -> dict:
+    out = {}
+    for cond in CONDITIONS:
+        a = acc.get(cond)
+        if not a:
+            continue
+        n, ln = a["n"], a["live_n"]
+        out[cond] = {"n": n, "wins": a["wins"], "win_rate": round(a["wins"] / n, 4) if n else None,
+                     "avg_ret": round(a["ret"] / n, 5) if n else None, "live_n": ln, "live_wins": a["live_wins"],
+                     "live_avg_ret": round(a["live_ret"] / ln, 5) if ln else None,
+                     "weighted_n": round(a["wn"], 1), "weighted_win_rate": round(a["ww"] / a["wn"], 4) if a["wn"] else None}
     return out
 
 
@@ -291,6 +332,7 @@ def _add_shadow(c: dict, ret: float, alert: dict, reason) -> None:
     c[reg + "_wins"] += int(ret > 0)
     r = reason or "other"
     c["exits"][r] = c["exits"].get(r, 0) + 1
+    _cadd(c, condition_of_features((alert or {}).get("features")), ret)
 
 
 def _round(c: dict) -> dict:
@@ -327,6 +369,7 @@ def grade_tallies(alerts: list, shadow: list, closed_trades: list) -> dict:
         c["live_n"] += 1
         c["live_wins"] += int(ret > 0)
         c["live_ret"] += ret
+        _cadd(c, t.get("market_condition") or condition_of_features((a or {}).get("features")), ret, live=True)
     for cells in out.values():
         for g in cells.values():
             for c in g.values():
@@ -372,7 +415,7 @@ def accumulate_watch(prev_doc: dict | None, watch: list, wshadow: list, now) -> 
 
 def _acc():
     return {"n": 0, "wins": 0, "ret": 0.0, "live_n": 0, "live_wins": 0, "live_ret": 0.0, "stress_n": 0,
-            "stress_wins": 0, "calm_n": 0, "calm_wins": 0, "wn": 0.0, "ww": 0.0, "exits": {}}
+            "stress_wins": 0, "calm_n": 0, "calm_wins": 0, "wn": 0.0, "ww": 0.0, "exits": {}, "cond": {}}
 
 
 def _add_acc(r: dict, c: dict, wt: float) -> None:
@@ -385,6 +428,7 @@ def _add_acc(r: dict, c: dict, wt: float) -> None:
     r["ww"] += wt * (c.get("shadow_wins", 0) + 2 * c.get("live_wins", 0))
     for k, v in (c.get("exits") or {}).items():
         r["exits"][k] = r["exits"].get(k, 0) + v
+    _cond_acc(r["cond"], c, wt)
 
 
 def _fin(r: dict) -> dict:
@@ -395,7 +439,7 @@ def _fin(r: dict) -> dict:
             "live_avg_ret": round(r["live_ret"] / ln, 5) if ln else None,
             "stress_n": r["stress_n"], "stress_wins": r["stress_wins"], "calm_n": r["calm_n"], "calm_wins": r["calm_wins"],
             "weighted_n": round(r["wn"], 1), "weighted_win_rate": round(r["ww"] / r["wn"], 4) if r["wn"] else None,
-            "exits": r["exits"]}
+            "exits": r["exits"], "by_condition": _cond_fin(r["cond"])}
 
 
 def grade_summary(grade_months: dict, watch_months: dict, now) -> dict:
@@ -480,6 +524,29 @@ def aplus_watch(stats: dict | None, G: dict) -> dict | None:
     return {"record": round(wr, 4), "n": round(n, 1), "expected": float(exp),
             "note": (f"A+ setups won {wr:.0%} over {n:.0f} weighted results vs {float(exp):.0%} tested: the weekly "
                      "recalibration will favour the stricter A+ bar until the record recovers.")}
+
+
+COND_MIN_N = 12        # weighted results of one strategy in one market condition before its own record counts
+COND_PRIOR_N = 20      # shrunk toward the strategy's tested win rate in that condition with this weight
+COND_GAP = 0.10        # this far under (after shrinkage), or under 58%, the strategy pauses in that condition
+
+
+def condition_gates_live(stats: dict | None, conditions: dict | None) -> dict:
+    """{strategy: {condition: reason}} where a strategy's own record in a market condition (all its graded
+    setups and your trades, shrunk toward its tested win rate there) has fallen clearly short."""
+    table = (conditions or {}).get("table") or {}
+    out = {}
+    for st, r in ((stats or {}).get("summary") or {}).items():
+        for cond, d in (r.get("by_condition") or {}).items():
+            n, wr = float(d.get("weighted_n") or 0), d.get("weighted_win_rate")
+            if n < COND_MIN_N or wr is None:
+                continue
+            prior = ((((table.get(st) or {}).get(cond) or {}).get("oos")) or {}).get("win_rate") or 0.65
+            shr = (wr * n + float(prior) * COND_PRIOR_N) / (n + COND_PRIOR_N)
+            if shr < max(0.58, float(prior) - COND_GAP):
+                out.setdefault(st, {})[cond] = (f"its own setups won {wr:.0%} over {n:.0f} weighted results in "
+                                                f"{CONDITION_PLURAL[cond]} (tested {float(prior):.0%} there)")
+    return out
 
 
 def stats_doc(prev_doc: dict | None, alerts: list, shadow: list, closed_trades: list, export_complete: bool, now,

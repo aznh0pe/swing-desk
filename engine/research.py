@@ -84,7 +84,11 @@ def candidate_specs(state_dir, old_params: dict | None = None, cap: int = 6, ext
             pool[iid] = (1.0, cu["spec"])  # already promoted: always re-tested
     for iid, r in latest.items():
         if r.get("verdict") == "candidate" and iid in ideas and ideas[iid].get("spec") and iid not in pool:
-            pool[iid] = (float((r.get("oos") or {}).get("win_rate") or 0), ideas[iid]["spec"])
+            sp_ = dict(ideas[iid]["spec"])
+            if r.get("market_conditions"):  # a specialist: re-tested restricted to its market conditions
+                sp_["market_conditions"] = list(r["market_conditions"])
+            win_ = (r.get("specialist") or {}).get("oos", {}).get("win_rate") or (r.get("oos") or {}).get("win_rate") or 0
+            pool[iid] = (float(win_), sp_)
     ranked = sorted(pool.items(), key=lambda kv: -kv[1][0])[:cap]
     return {k: v[1] for k, v in ranked}
 
@@ -221,6 +225,36 @@ def grade_preview(tr: pd.DataFrame, P_live: dict, split) -> dict | None:
             "tested_topup_win": G.get("oos_topup_win_rate"), "tested_aplus_win": G.get("oos_aplus_win_rate")}
 
 
+SPECIALIST = {"train_n": 150, "oos_n": 100, "train_win": 0.62, "train_pf": 1.25, "oos_win": 0.66, "oos_pf": 1.30,
+              "oos_avg": 0.0025}
+
+
+def condition_breakdown(tr: pd.DataFrame, split) -> dict:
+    """The idea's results in each market condition, 2008-2021 and 2022-now."""
+    split = pd.Timestamp(split)
+    t = tr.assign(condition=S.condition_series(tr).values)
+    f = t[t["filled"] & t["ret"].notna()]
+    out = {}
+    for cond, g in f.groupby("condition"):
+        out[cond] = {"train": _compact(B.stats(g[g["signal_date"] < split])), "oos": _compact(B.stats(g[g["signal_date"] >= split]))}
+    return out
+
+
+def specialist_conditions(bc: dict) -> list[str]:
+    """Market conditions where the idea clears specialist bars in both periods (enough trades, win rate,
+    profit factor, and a real average trade on 2022-now)."""
+    q = SPECIALIST
+    ok = []
+    for cond, d in bc.items():
+        tr_, oo = d.get("train") or {}, d.get("oos") or {}
+        if ((tr_.get("trades") or 0) >= q["train_n"] and (oo.get("trades") or 0) >= q["oos_n"]
+                and (tr_.get("win_rate") or 0) >= q["train_win"] and (tr_.get("profit_factor") or 0) >= q["train_pf"]
+                and (oo.get("win_rate") or 0) >= q["oos_win"] and (oo.get("profit_factor") or 0) >= q["oos_pf"]
+                and (oo.get("avg_ret") or 0) >= q["oos_avg"]):
+            ok.append(cond)
+    return [c for c in S.CONDITIONS if c in ok]
+
+
 def preview_sentence(gp: dict | None) -> str:
     if not gp:
         return ""
@@ -232,6 +266,17 @@ def preview_sentence(gp: dict | None) -> str:
             f"{100 * t['share']:.0f}% fall in the weekly top-up band ({w(t)}); on calm-market days its setups {w(c)}.")
 
 
+def condition_sentence(bc: dict | None) -> str:
+    if not bc:
+        return ""
+    bits = []
+    for c in S.CONDITIONS:
+        o = (bc.get(c) or {}).get("oos") or {}
+        if (o.get("trades") or 0) >= 30:
+            bits.append(f"{S.CONDITION_LABEL[c].lower()} {100 * o['win_rate']:.0f}% ({o['trades']})")
+    return (" By market condition, 2022-now: " + ", ".join(bits) + ".") if bits else ""
+
+
 def research_focus(state_dir) -> dict | None:
     """What the desk needs most from new strategies right now, from the live grades and their records."""
     try:
@@ -241,9 +286,14 @@ def research_focus(state_dir) -> dict | None:
     pd_ = st.get("params_doc") or {}
     G = (pd_.get("params") or pd_).get("grading") or {}
     mn = int((st.get("settings") or {}).get("min_setups_week", 5))
-    calm_hint = ("rules-based long setups that fire in calm or rising markets, when A+ setups are scarce, and still win 70%+ "
-                 "(for example pullbacks in strong uptrends, relative-strength leaders resting on support, quiet-market ETF "
-                 "mean reversion, continuation after strong earnings); check the test's calm-market win rate and top-up band")
+    pc_ = (pd_.get("params") or pd_).get("conditions") or {}
+    calm_share = (pc_.get("share_of_days") or {}).get("bull_calm")
+    calm_hint = ("rules-based long setups that win in calm bull markets"
+                 + (f" ({100 * float(calm_share):.0f}% of trading days since 2008, the condition where the live strategies are weakest and A+ setups are rare)" if calm_share else "")
+                 + " and still win 66%+ there with a real average trade: for example pullbacks in strong uptrends, relative-strength "
+                 "leaders resting on support, quiet-market ETF mean reversion, continuation after strong earnings. The test reports "
+                 "every idea per market condition (by_condition) and proposes an idea that only works in some conditions as a "
+                 "specialist for them (market_conditions), so an idea that wins in calm bull markets but not in selloffs still counts")
     if G.get("aplus_watch"):
         return {"grade": "aplus", "why": (G["aplus_watch"] or {}).get("note", "A+ setups trail their test."),
                 "look_for": "high-win-rate ideas for market selloffs and sharp dips (where A+ setups come from) that would "
@@ -304,7 +354,33 @@ def evaluate_spec(spec: dict, ind: dict, P: dict, P_live: dict, split, now, by="
          "need": f"<= {QUALITY['max_overlap']:.0%}", "ok": overlap <= QUALITY["max_overlap"]},
     ]
     q_ok = {c["key"]: c["ok"] for c in q}
-    if ok_live and all(q_ok.values()):
+    bc = condition_breakdown(tr, split)
+    spec_conds = list(spec.get("market_conditions") or [])
+    special = None
+    if not spec_conds and not (ok_live and all(q_ok.values())):
+        # not good enough everywhere: is it a specialist for some market conditions?
+        sc_ = specialist_conditions(bc)
+        if sc_:
+            rows_ = pd.Series(S.condition_series(tr).values, index=tr.index).isin(sc_)
+            tr_s = tr[rows_.values]
+            st_tr, st_te = B.stats(tr_s[tr_s["signal_date"] < split]), B.stats(tr_s[tr_s["signal_date"] >= split])
+            ok_s, checks_s, _ = S.enable_checks(st_tr, st_te)
+            cmask = cand & S.condition_gate(ind, sc_, cand)
+            n_s = int(cmask.loc[rows].values.sum())
+            ov_s = float((cmask.loc[rows].values & live_any.loc[rows].values).sum() / n_s) if (n_s and live_any is not None) else 0.0
+            if ok_s and ov_s <= QUALITY["max_overlap"] and (st_te.get("trades") or 0) >= QUALITY["oos_trades"]:
+                special = {"conditions": sc_, "train": _compact(st_tr), "oos": _compact(st_te), "overlap": round(ov_s, 3),
+                           "per_week": round(n_s / weeks, 2), "checks": checks_s}
+    if special:
+        verdict = "candidate"
+        labs = " and ".join(S.CONDITION_PLURAL[c] for c in special["conditions"])
+        so = special["oos"]
+        summary = (f"Candidate as a specialist for {labs} only: there {100 * so['win_rate']:.1f}% of {so['trades']} trades won on "
+                   f"unseen 2022-now data (profit factor {so['profit_factor']:.2f}, average {100 * so['avg_ret']:+.2f}%, about "
+                   f"{special['per_week']:.1f} signals a week), {100 * special['overlap']:.0f}% overlap with the live strategies. "
+                   f"Across all conditions it won {100 * (ow or 0):.1f}%, so it would trade only in {labs}. It goes into "
+                   "Saturday's recalibration restricted to those conditions.")
+    elif ok_live and all(q_ok.values()):
         verdict = "candidate"
         summary = (f"Candidate: {100 * ow:.1f}% of {on} trades won on unseen 2022-now data (profit factor {opf:.2f}, "
                    f"about {per_week:.1f} signals a week), and {100 * overlap:.0f}% of its signals overlap the live strategies. "
@@ -340,6 +416,7 @@ def evaluate_spec(spec: dict, ind: dict, P: dict, P_live: dict, split, now, by="
         gp = {"error": repr(ex)[:200]}
     if gp and "error" not in gp:
         summary += preview_sentence(gp)
+    summary += condition_sentence(bc)
     variant = res["variant"]
     path = None
     if verdict != "candidate":
@@ -348,7 +425,9 @@ def evaluate_spec(spec: dict, ind: dict, P: dict, P_live: dict, split, now, by="
     doc = {**base, "verdict": verdict, "summary": summary, "path": path, "checks": checks + q, "live_rule_ok": bool(ok_live),
            "live_reason": live_reason, "variant": variant, "rules": R.describe({**spec, "params": variant, "grid": {}}),
            "train": _compact(st_train), "oos": _compact(st_test), "overlap_live": round(overlap, 3),
-           "oos_signals_per_week": round(per_week, 2), "grade_preview": gp,
+           "oos_signals_per_week": round(per_week, 2), "grade_preview": gp, "by_condition": bc,
+           **({"market_conditions": special["conditions"], "specialist": special} if special else
+              ({"market_conditions": spec_conds} if spec_conds else {})),
            "yearly": B.yearly(tr).reset_index().to_dict("records")[-20:],
            "grid_tried": len(res["tried"]), "runtime_s": round(time.time() - t0, 1)}
     return doc

@@ -156,6 +156,56 @@ def _target(ind, sp):
             "cap_atr": float(t.get("cap_atr", 4.0))}
 
 
+# ----------------------------------------------------------------------------- market conditions
+# Four market conditions from SPY's trend and short-term stress. Every signal, alert and trade is tagged
+# with the condition on its signal day; each strategy and each grade is learned per condition, and a
+# strategy can be restricted to the conditions where it has proven itself.
+CONDITIONS = ("bull_calm", "bull_stress", "bear_calm", "bear_stress")
+CONDITION_LABEL = {"bull_calm": "Calm bull market", "bull_stress": "Pullback in a bull market",
+                   "bear_calm": "Quiet bear market", "bear_stress": "Bear-market selloff"}
+CONDITION_PLURAL = {"bull_calm": "calm bull markets", "bull_stress": "pullbacks in bull markets",
+                    "bear_calm": "quiet bear markets", "bear_stress": "bear-market selloffs"}
+STRESS_VIX, STRESS_SPY5 = 1.10, -0.014
+CONDITION_RULE = ("Bull = SPY above its 200-day average. Stressed = VIX at least 1.10x its 20-day average, or SPY down "
+                  "1.4% or more over 5 days. Calm = neither.")
+
+
+def _f(x, default):
+    try:
+        v = float(x)
+        return default if v != v else v
+    except (TypeError, ValueError):
+        return default
+
+
+def condition_of(spy_above200, vix_ratio, spy_ret5) -> str | None:
+    """The market condition for one day's SPY trend / VIX ratio / SPY 5-day return (None when unknown)."""
+    up = _f(spy_above200, None)
+    if up is None:
+        return None
+    stressed = _f(vix_ratio, 1.0) >= STRESS_VIX or _f(spy_ret5, 0.0) <= STRESS_SPY5
+    return ("bull_" if up >= 0.5 else "bear_") + ("stress" if stressed else "calm")
+
+
+def condition_of_features(f: dict | None) -> str | None:
+    f = f or {}
+    return condition_of(f.get("spy_above200"), f.get("vix_ratio"), f.get("spy_ret5"))
+
+
+def condition_series(df: pd.DataFrame) -> pd.Series:
+    """Per-row condition from spy_above200 / vix_ratio / spy_ret5 columns (a market frame or a trade table)."""
+    up = df["spy_above200"].astype(float)
+    stressed = (df["vix_ratio"].astype(float).fillna(1.0) >= STRESS_VIX) | (df["spy_ret5"].astype(float).fillna(0.0) <= STRESS_SPY5)
+    out = np.where(up >= 0.5, np.where(stressed, "bull_stress", "bull_calm"), np.where(stressed, "bear_stress", "bear_calm"))
+    return pd.Series(np.where(up.isna(), None, out), index=df.index)
+
+
+def condition_gate(ind: dict, conds, like: pd.DataFrame) -> pd.DataFrame:
+    """Boolean frame (dates x tickers, shaped like `like`) that is True on days in one of `conds`."""
+    day = condition_series(ind["market"]).reindex(like.index).isin(list(conds)).values
+    return pd.DataFrame(np.broadcast_to(day[:, None], like.shape), index=like.index, columns=like.columns)
+
+
 def meta(name: str, P: dict | None = None) -> dict:
     """Label / family / description for a built-in or a promoted research strategy."""
     if name in STRATEGY_META:
@@ -318,7 +368,8 @@ def build(name: str, ind: dict, P: dict, b: dict | None = None) -> dict | None:
     if cu:
         from .rules import build_plan
         try:
-            return build_plan(cu["spec"], ind, P, b, cu.get("params"), name=name)
+            spec = {**cu["spec"], **({"market_conditions": sp["market_conditions"]} if sp.get("market_conditions") else {})}
+            return build_plan(spec, ind, P, b, cu.get("params"), name=name)
         except Exception:
             return None
     c, o, h, l = ind["close"], ind["open"], ind["high"], ind["low"]
@@ -391,6 +442,8 @@ def build(name: str, ind: dict, P: dict, b: dict | None = None) -> dict | None:
         if "vixcalm" in reg:
             gate &= mk["vix_ratio"].fillna(1.0) <= 1.35
         m = m & pd.DataFrame(np.broadcast_to(gate.values[:, None], c.shape), index=c.index, columns=c.columns)
+    if sp.get("market_conditions"):  # a specialist trades only in the market conditions where it has proven itself
+        m = m & condition_gate(ind, sp["market_conditions"], c)
     plan["mask"] = m.fillna(False).astype(bool)
     plan["limit"] = limit
     return plan

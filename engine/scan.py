@@ -96,7 +96,9 @@ def regime_summary(ind) -> dict:
         label = "Correction"
     else:
         label = "Bear"
-    return {"label": label, "spy": _r(mk["spy"]), "spy_vs_200d_pct": _r(100 * mk["spy_dist200"], 1),
+    cond = S.condition_of(mk.get("spy_above200"), mk.get("vix_ratio"), mk.get("spy_ret5"))
+    return {"label": label, "condition": cond, "condition_label": S.CONDITION_LABEL.get(cond) if cond else None,
+            "spy": _r(mk["spy"]), "spy_vs_200d_pct": _r(100 * mk["spy_dist200"], 1),
             "spy_5d_pct": _r(100 * mk["spy_ret5"], 1), "breadth_above_50d_pct": _r(100 * b50, 0) if b50 is not None else None,
             "vix": _r(vix, 1), "vix_vs_20d": _r(mk["vix_ratio"], 2)}
 
@@ -145,6 +147,7 @@ def exit_signal_text(plan_name, sp, dyn, target, stop, hold, earnings_next):
     return " ".join(parts)
 
 
+CONDITION_STATE: dict = {}  # today's market condition and the strategies paused in it, from the last build_entries call
 TOPUP_STATE: dict = {}  # how far the week is behind pace and what the top-up rule did, from the last build_entries call
 HELD_SECTORS: dict = {}  # open positions per sector bucket from the last build_entries call (saved in ctx)
 
@@ -234,6 +237,17 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
                 cd["p"] = (row["win"] * n + cd["model_p"] * 30) / (n + 30)
                 cd["band_avg"] = row["avg"]
                 break
+    # market conditions: a strategy paused in today's condition (validated on 2022-now data, or by its own
+    # live record there) sends nothing today
+    PC = P.get("conditions") or {}
+    mk_ = ind["market"].iloc[-1]
+    cond_today = S.condition_of(mk_.get("spy_above200"), mk_.get("vix_ratio"), mk_.get("spy_ret5"))
+    paused = {n for src in ("gates", "gates_live") for n, v in (PC.get(src) or {}).items() if cond_today in (v or {})}
+    CONDITION_STATE.clear()
+    CONDITION_STATE.update(condition=cond_today, paused=sorted(paused),
+                           skipped=sum(1 for cd in cands if cd["name"] in paused))
+    if paused:
+        cands = [cd for cd in cands if cd["name"] not in paused]
     # one setup per ticker: best score
     best = {}
     for cd in cands:
@@ -347,6 +361,18 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
             "partial_bar": bool(partial_bar),
         }
         doc["grade_kind"] = "topup" if cd.get("topup") else ("aplus" if cd["grade"] == "A+" else "watch")
+        if cond_today:
+            doc["market_condition"] = cond_today
+            tb = (((PC.get("table") or {}).get(cd["name"]) or {}).get(cond_today) or {}).get("oos") or {}
+            gk = "topup" if cd.get("topup") else "aplus"
+            gr = (PC.get(gk) or {}).get(cond_today) or {}
+            parts = []
+            if gr.get("trades"):
+                parts.append(f"{'weekly top-ups' if gk == 'topup' else 'A+ setups'} won {100 * gr['win_rate']:.0f}% of {gr['trades']}")
+            if tb.get("trades"):
+                parts.append(f"all {meta['label']} setups {100 * tb['win_rate']:.0f}% of {tb['trades']} (average {100 * (tb['avg_ret'] or 0):+.2f}%)")
+            if parts:
+                doc["condition_note"] = f"In {S.CONDITION_PLURAL[cond_today]} (today's condition), 2022-now: " + "; ".join(parts) + "."
         if cd.get("topup"):
             doc["grade"] = "A"
             ta, aw = G.get("oos_topup_avg_ret"), G.get("oos_aplus_win_rate")
@@ -727,6 +753,7 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
         "expired_alert_ids": [a for a, _ in expire][:50],
         "params_version": P.get("version"), "errors": errors[:40], "notes": notes, "week_min": week_min(state["settings"]),
         "topup_pace": dict(TOPUP_STATE) if mode == "postclose" else None,
+        "market_condition": dict(CONDITION_STATE) if CONDITION_STATE else None,
         "run_issues": ([f"The scanner hit {len(errors)} error(s) and carried on without those items; the first: {errors[0]}"]
                        if errors else []),
         "session_day": str(session_day), "engine": engine_version.info(),
@@ -937,6 +964,22 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
     lines = [f"SWING DESK | {mode_label} | {now.strftime('%a %b %d, %I:%M %p').replace(' 0', ' ')} PT", ""]
     lines.append(f"Market: {m['label']} | SPY {m['spy']} ({m['spy_vs_200d_pct']}% vs 200d, 5d {m['spy_5d_pct']}%) | "
                  f"breadth {m['breadth_above_50d_pct']}% above 50d | VIX {m['vix']}")
+    if m.get("condition"):
+        PCd = P.get("conditions") or {}
+        cnd = m["condition"]
+        ap_, tu_ = (PCd.get("aplus") or {}).get(cnd) or {}, (PCd.get("topup") or {}).get(cnd) or {}
+        best_ = [S.meta(n, P)["label"] for n in ((PCd.get("best") or {}).get(cnd) or [])[:3]]
+        mc = scan.get("market_condition") or {}
+        line = f"Condition: {m['condition_label'].lower()}"
+        if ap_.get("trades") or tu_.get("trades"):
+            line += " | 2022-now here: " + ", ".join(x for x in (
+                f"A+ {100 * ap_['win_rate']:.0f}% of {ap_['trades']}" if ap_.get("trades") else None,
+                f"top-ups {100 * tu_['win_rate']:.0f}% of {tu_['trades']}" if tu_.get("trades") else None) if x)
+        if best_:
+            line += " | strongest here: " + ", ".join(best_)
+        if mc.get("paused"):
+            line += " | paused today: " + ", ".join(S.meta(n, P)["label"] for n in mc["paused"])
+        lines.append(line)
     lines.append(f"Capital {_money(f['capital'])} | cash free {_money(f['cash'])} | open positions {f['open_count']}"
                  f"/{P['risk']['max_open']}" + (f" | risk per trade {f['risk_pct']:g}% ({f['risk_reason']})" if f.get("risk_pct") else ""))
     d = scan["data"]
@@ -1122,6 +1165,8 @@ def setup_block(e: dict, rank) -> list[str]:
         out.append("   NEWS     pending (the news check fills this in before the email goes out)")
     if e.get("topup_note"):
         out.append(f"   TOP-UP   {e['topup_note']}")
+    if e.get("condition_note"):
+        out.append(f"   MARKET   {e['condition_note']}")
     if e.get("capacity_note"):
         out.append(f"   NOTE     {e['capacity_note']}")
     if e.get("size_note"):

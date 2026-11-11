@@ -371,6 +371,90 @@ def calibrate_topups(post: pd.DataFrame, sc: float, pw: float, min_week: int = 5
     return out
 
 
+# ----------------------------------------------------------------------------- market conditions
+COND_GATE_TRAIN_N = 100     # trades in 2008-2021 before a strategy's result in one condition can propose a pause
+COND_GATE_WIN, COND_GATE_PF = 0.62, 1.10
+
+
+def _with_conditions(df: pd.DataFrame) -> pd.DataFrame:
+    return df if "condition" in df else df.assign(condition=S.condition_series(df).values)
+
+
+def _sent(post: pd.DataFrame, G: dict, min_week: int, pairs=frozenset()):
+    """What the desk would have sent on 2022-now signals (every A+ setup plus the weekly top-ups) when the
+    (strategy, condition) pairs in `pairs` are paused. Returns (sent, A+, top-ups, weeks)."""
+    sig = post
+    if pairs:
+        sig = post[[(a, b) not in pairs for a, b in zip(post["strategy"], post["condition"])]]
+    s = _one_per_ticker(sig)
+    sc, pw = float(G["aplus_score"]), float(G["aplus_pwin"])
+    ap = s[(s["score"] >= sc) & (s["p"] >= pw)]
+    if G.get("topup_ok", True) and G.get("topup_floor") is not None:
+        pk, wk = simulate_topups(s, sc, pw, float(G["topup_floor"]), float(G.get("topup_pwin", 0)), min_week,
+                                 list((G.get("topup_excluded") or {}).keys()))
+    else:
+        pk, wk = s.iloc[0:0], pd.Series(dtype=float)
+    return pd.concat([ap, pk]), ap, pk, wk
+
+
+def condition_report(trades: pd.DataFrame, split, G: dict, min_week: int = 5) -> dict:
+    """Which strategies work in which market conditions, and whether pausing a strategy in a condition where
+    it was weak on 2008-2021 would have made the 2022-now alerts better. A pause is adopted only if, on
+    2022-now data it was not chosen on, the setups the desk sends win more often (+0.2 points or more) with an
+    average trade at least 98% as good, keeping at least half of the trades."""
+    t = _with_conditions(trades)
+    split = pd.Timestamp(split)
+    f = t[t["filled"] & t["ret"].notna()]
+    table = {}
+    for (name, cond), g in f.groupby(["strategy", "condition"]):
+        table.setdefault(name, {})[cond] = {"train": _trade_stats(g[g["signal_date"] < split]),
+                                            "oos": _trade_stats(g[g["signal_date"] >= split])}
+    days = t.drop_duplicates("signal_date")
+    share = {c: round(float(v), 3) for c, v in days["condition"].value_counts(normalize=True).items() if c}
+    share_oos = {c: round(float(v), 3) for c, v in days[days["signal_date"] >= split]["condition"].value_counts(normalize=True).items() if c}
+    post = t[t["signal_date"] >= split]
+    out = {"rule": S.CONDITION_RULE, "labels": dict(S.CONDITION_LABEL), "share_of_days": share, "share_of_days_oos": share_oos,
+           "table": table, "gates": {}, "gates_tested": []}
+    if post.empty or not G.get("aplus_score"):
+        return out
+    sent, ap, pk, wk = _sent(post, G, min_week)
+    out["aplus"] = {c: _trade_stats(g) for c, g in ap.groupby("condition")}
+    out["topup"] = {c: _trade_stats(g) for c, g in pk.groupby("condition")}
+    best = {}
+    for cond in S.CONDITIONS:
+        rows = [(n, (v.get(cond) or {}).get("oos") or {}) for n, v in table.items()]
+        rows = [(n, o) for n, o in rows if (o.get("trades") or 0) >= 100 and (o.get("profit_factor") or 0) >= 1.15]
+        best[cond] = [n for n, o in sorted(rows, key=lambda x: (-(x[1]["win_rate"] or 0), -(x[1]["avg_ret"] or 0)))]
+    out["best"] = best
+    # pauses proposed by 2008-2021 alone, each kept only if it improves 2022-now
+    cands = []
+    for name, v in table.items():
+        for cond, d in v.items():
+            tr_ = d.get("train") or {}
+            if (tr_.get("trades") or 0) >= COND_GATE_TRAIN_N and ((tr_.get("win_rate") or 1) < COND_GATE_WIN
+                                                                  or (tr_.get("profit_factor") or 9) < COND_GATE_PF):
+                cands.append((tr_.get("win_rate") or 0, name, cond))
+    base = _trade_stats(sent)
+    adopted = set()
+    for _, name, cond in sorted(cands):
+        trial = frozenset(adopted | {(name, cond)})
+        st = _trade_stats(_sent(post, G, min_week, trial)[0])
+        ok = (base["trades"] and st["trades"] >= 0.5 * base["trades"] and st["win_rate"] >= base["win_rate"] + 0.002
+              and (st["avg_ret"] or 0) >= 0.98 * (base["avg_ret"] or 0))
+        trn = (table[name][cond].get("train") or {})
+        out["gates_tested"].append({"strategy": name, "condition": cond, "adopted": bool(ok),
+                                    "train": trn, "sent_before": base, "sent_after": st})
+        if ok:
+            adopted.add((name, cond))
+            out["gates"].setdefault(name, {})[cond] = (
+                f"won {100 * (trn.get('win_rate') or 0):.0f}% (profit factor {trn.get('profit_factor')}) in "
+                f"{S.CONDITION_PLURAL[cond]} on 2008-2021; pausing it there lifted the 2022-now alerts from "
+                f"{100 * base['win_rate']:.1f}% to {100 * st['win_rate']:.1f}% wins")
+            base = st
+    out["sent_oos"] = base
+    return out
+
+
 def calibrate_grades(all_tr: pd.DataFrame, split, min_week=3, cal_end=CAL_END, topup_min_week=5,
                      prefer_win=False) -> dict:
     """Pick A+ cut-offs on the post-split trades (2022-now): the highest win rate whose average trade is at
@@ -474,6 +558,8 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
                                                 "family": spec.get("family"), "about": spec.get("about"),
                                                 "source": spec.get("source")}
             P["strategies"][name] = R.strategy_entry(spec, res["variant"], True)
+            if spec.get("market_conditions"):  # a specialist: trades only in the market conditions it has proven itself in
+                P["strategies"][name]["market_conditions"] = list(spec["market_conditions"])
         else:
             P["strategies"][name].update(res["variant"])
         tr = res["trades"]
@@ -506,7 +592,8 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
                "path": None if enabled else S.path_to_pass(st_train, st_test, oos_weeks)}
         if spec is not None:
             rec.update(custom=True, about=spec.get("about"), source=spec.get("source"),
-                       rules=R.describe({**spec, "params": res["variant"], "grid": {}}))
+                       rules=R.describe({**spec, "params": res["variant"], "grid": {}}),
+                       market_conditions=list(spec.get("market_conditions") or []) or None)
         report["strategies"][name] = rec
         log(f"  {name}: train win {st_train.get('win_rate')} avg {st_train.get('avg_ret')} PF "
             f"{st_train.get('profit_factor')} | OOS win {st_test.get('win_rate')} avg {st_test.get('avg_ret')} "
@@ -626,6 +713,15 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
         allp = en
         P["grading"].update(G)
         report["grading"] = G
+        try:  # which strategies work in which market conditions, and validated pauses
+            cr = condition_report(en, split, P["grading"], desk_min)
+            report["conditions"] = cr
+            P["conditions"] = {**{k: v for k, v in cr.items() if k != "gates_tested"},
+                               "gates_tested": [{k: g[k] for k in ("strategy", "condition", "adopted")} for g in cr["gates_tested"]],
+                               "updated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+                               "source": "weekly recalibration"}
+        except Exception as ex:
+            log(f"market-condition report failed: {ex!r}")
         # score buckets (validates that a higher score = better setup)
         oos = en[(en["signal_date"] >= split) & en["ret"].notna()].copy()
         if len(oos) > 50:
@@ -673,8 +769,19 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
                 changes.append(f"{S.meta(n_, P)['label']} sends no top-ups for now: {why_}.")
             if aw:
                 changes.append(aw["note"])
+            if P.get("conditions"):
+                gl = LL_.condition_gates_live(st_, P["conditions"])
+                P["conditions"]["gates_live"] = gl
+                for n_, cs_ in gl.items():
+                    for c_, why_ in cs_.items():
+                        changes.append(f"{S.meta(n_, P)['label']} paused in {S.CONDITION_PLURAL[c_]}: {why_}.")
         except Exception as ex:
             log(f"grade records unavailable: {ex!r}")
+        oc_, nc_ = (oldP.get("conditions") or {}).get("gates") or {}, (P.get("conditions") or {}).get("gates") or {}
+        pairs_ = lambda d: {(n, c) for n, v in d.items() for c in v}
+        if pairs_(oc_) != pairs_(nc_):
+            changes.append("Market-condition pauses validated on 2022-now data: " + (
+                "; ".join(f"{S.meta(n_, P)['label']} in {S.CONDITION_PLURAL[c_]}" for n_, c_ in sorted(pairs_(nc_))) or "none") + ".")
         og_, ng_ = oldP.get("grading") or {}, P["grading"]
         if ng_.get("topup_ok") is False:
             changes.append(ng_.get("topup_note") or "Weekly top-ups are off: no top-up rule cleared the floors.")
@@ -835,6 +942,15 @@ def run_topups(data_dir, state_dir, out_dir, split="2022-01-01", log=print, now=
     res = calibrate_topups(post, float(G["aplus_score"]), float(G["aplus_pwin"]), desk_min, CAL_END)
     ap = _one_per_ticker(post)
     ap = ap[(ap["score"] >= G["aplus_score"]) & (ap["p"] >= G["aplus_pwin"])]
+    try:
+        Gc = {**G, **res}
+        cr = condition_report(t, split, Gc, desk_min)
+        P["conditions"] = {**{k: v for k, v in cr.items() if k != "gates_tested"},
+                           "gates_tested": [{k: g[k] for k in ("strategy", "condition", "adopted")} for g in cr["gates_tested"]],
+                           "updated": now.isoformat(timespec="seconds"), "source": "mid-week re-tune (live model)",
+                           "gates_live": LL.condition_gates_live(((state.get("learning") or {}).get("stats") or {}).get("doc"), cr)}
+    except Exception as ex:
+        log(f"market-condition report failed: {ex!r}")
     res["aplus_check_live_model"] = {**_trade_stats(ap),  # the A+ bar in the same replay, for comparison
                                      "by_year": [{"year": int(y), **_trade_stats(g)} for y, g in ap.groupby(ap["signal_date"].dt.year)]}
     G.update(res)
@@ -845,10 +961,13 @@ def run_topups(data_dir, state_dir, out_dir, split="2022-01-01", log=print, now=
     if not res.get("topup_ok"):
         changes.append(res.get("topup_note"))
     else:
+        same = (old["topup_floor"], old["topup_pwin"]) == (res["topup_floor"], res["topup_pwin"])
         changes.append(
             f"Weekly top-ups re-tuned on their own (live strategies and model, replaying the exact {desk_min}-a-week rule on "
-            f"{res['topup_by_year'][0]['year']}-now signals): bar score {old['topup_floor']} -> {res['topup_floor']}, "
-            f"model win {old['topup_pwin'] if old['topup_pwin'] is not None else 'not set'} -> {res['topup_pwin']:.2f}. "
+            f"{res['topup_by_year'][0]['year']}-now signals): "
+            + (f"bar unchanged at score {res['topup_floor']}+ and model win {100 * res['topup_pwin']:.0f}%+. " if same else
+               f"bar score {old['topup_floor']} -> {res['topup_floor']}, model win "
+               f"{old['topup_pwin'] if old['topup_pwin'] is not None else 'not set'} -> {res['topup_pwin']:.2f}. ") +
             f"Replayed top-ups won {100 * res['oos_topup_win_rate']:.1f}% of {res['oos_topup_trades']} (average "
             f"{100 * res['oos_topup_avg_ret']:+.2f}%, profit factor {res['oos_topup_pf']}) and kept "
             f"{100 * res['oos_weeks_at_min']:.0f}% of weeks at {desk_min}+ setups (A+ alone: "
@@ -857,6 +976,14 @@ def run_topups(data_dir, state_dir, out_dir, split="2022-01-01", log=print, now=
             changes.append("No top-ups from: " + "; ".join(f"{S.meta(n, P)['label']} ({why})" for n, why in res["topup_excluded"].items()) + ".")
     if pol["note"]:
         changes.append(pol["note"])
+    pc = P.get("conditions") or {}
+    if pc.get("table"):
+        tested = pc.get("gates_tested") or []
+        changes.append("Market conditions learned for every live strategy (2008-2021 and 2022-now, per condition). "
+                       + (f"Pauses adopted (they lifted 2022-now alerts): " + "; ".join(
+                           f"{S.meta(n, P)['label']} in {S.CONDITION_PLURAL[c]}" for n, v in pc["gates"].items() for c in v)
+                          if pc.get("gates") else
+                          f"No pause adopted: {len(tested)} proposed by 2008-2021 results, none improved 2022-now alerts."))
     P["version"] = int(time.time())
     P["updated"] = now.isoformat(timespec="seconds")
     (out / "doc_params.json").write_text(json.dumps({"params": P, "updated_at": now.isoformat(timespec="seconds"),
@@ -973,11 +1100,38 @@ def run_learning(data_dir, state_dir, out_dir, now=None) -> dict:
         else:
             G_.pop("aplus_watch", None)
             changes.append("A+ record back in line with its test: the A+ watch is lifted.")
+    # market conditions: today's, how each grade and strategy has done in it, and live pauses
+    mk = ind["market"].iloc[-1]
+    cond_today = S.condition_of(mk.get("spy_above200"), mk.get("vix_ratio"), mk.get("spy_ret5"))
+    PC = P.get("conditions") or {}
+    if cond_today:
+        lab = S.CONDITION_LABEL[cond_today]
+        bits = []
+        for g, nm in (("aplus", "A+"), ("topup", "top-ups")):
+            d = ((gs.get(g) or {}).get("by_condition") or {}).get(cond_today) or {}
+            if d.get("n"):
+                bits.append(f"{nm} {d['wins']} of {d['n']} won here")
+        best = [S.meta(n_, P)["label"] for n_ in ((PC.get("best") or {}).get(cond_today) or [])[:3]]
+        tested = (PC.get("aplus") or {}).get(cond_today) or {}
+        insights.append(f"Today's market: {lab.lower()}. " + (f"Your record in it: {', '.join(bits)}. " if bits else "")
+                        + (f"Tested 2022-now in this condition: A+ setups won {100 * tested['win_rate']:.0f}% of {tested['trades']}. " if tested.get("trades") else "")
+                        + (f"Strongest strategies here: {', '.join(best)}." if best else ""))
+    if PC.get("table"):
+        gl = LL.condition_gates_live(stats, PC)
+        old_gl = PC.get("gates_live") or {}
+        flat = lambda d: {(n_, c_) for n_, v_ in d.items() for c_ in v_}
+        if flat(gl) != flat(old_gl):
+            P["conditions"]["gates_live"] = gl
+            for n_, c_ in sorted(flat(gl) - flat(old_gl)):
+                changes.append(f"{S.meta(n_, P)['label']} paused in {S.CONDITION_PLURAL[c_]}: {gl[n_][c_]}.")
+            for n_, c_ in sorted(flat(old_gl) - flat(gl)):
+                changes.append(f"{S.meta(n_, P)['label']} trades again in {S.CONDITION_PLURAL[c_]}: its record there recovered.")
     journal_grades = {g: {k: v for k, v in (gs.get(g) or {}).items() if k not in ("exits",)} for g in LL.GRADES}
     for g in journal_grades.values():
         g["by_strategy"] = {n_: {k: r.get(k) for k in ("n", "wins", "win_rate", "avg_ret", "live_n", "live_wins")}
                             for n_, r in (g.get("by_strategy") or {}).items()}
-    grade_rules = {"aplus_score": G_.get("aplus_score"), "aplus_pwin": G_.get("aplus_pwin"),
+    by_cond = {n_: r.get("by_condition") for n_, r in (stats.get("summary") or {}).items() if r.get("by_condition")}
+    grade_rules = {"market_condition": cond_today, "aplus_score": G_.get("aplus_score"), "aplus_pwin": G_.get("aplus_pwin"),
                    "topup_floor": G_.get("topup_floor"), "topup_pwin": G_.get("topup_pwin"),
                    "topup_mode": G_.get("topup_mode", "normal"), "topup_ok": G_.get("topup_ok", True),
                    "topup_excluded": sorted((G_.get("topup_excluded") or {}).keys()),
@@ -1030,6 +1184,7 @@ def run_learning(data_dir, state_dir, out_dir, now=None) -> dict:
     journal = {"id": day, "date": day, "created_at": now.isoformat(timespec="seconds"),
                "shadow": agg(sh), "live": agg(closed), "by_strategy": by, "worked": worked,
                "didnt_work": didnt, "by_grade": journal_grades, "grade_rules": grade_rules,
+               "market_condition": cond_today, "by_condition": by_cond,
                "insights": insights or ["No statistically meaningful drift yet."],
                "changes": changes or ["No parameter changes today."], "params_version": P.get("version")}
     writes = []
