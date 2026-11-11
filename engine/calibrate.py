@@ -195,9 +195,10 @@ def _aplus_window(tr_all: pd.DataFrame, sc: int, pw: float, min_week: int) -> di
             "window": [str(tr_all["signal_date"].min().date()), str(tr_all["signal_date"].max().date())]}
 
 
-def _select_cutoffs(sig: pd.DataFrame, min_week: int, prefer_win: bool = False):
+def _select_cutoffs(sig: pd.DataFrame, min_week: int, prefer_win: bool = False, return_near: bool = False):
     """The (score, win-odds) bar with the highest filled-trade win rate whose average trade is at least
-    +0.6% and that still produces enough setups a week across the universe; None if nothing clears it."""
+    +0.6% and that still produces enough setups a week across the universe; None if nothing clears it.
+    With return_near, returns (pick, near-best bars) so the growth check can choose among them."""
     t = sig[sig["ret"].notna() & sig["filled"]]
     if t.empty:
         return None
@@ -218,15 +219,67 @@ def _select_cutoffs(sig: pd.DataFrame, min_week: int, prefer_win: bool = False):
             wk = s_all.groupby(pd.Grouper(key="signal_date", freq="W")).size().reindex(weeks_idx, fill_value=0)
             cands.append((float(wr), float(avg), sc, pw, per_week, len(sel), float((wk >= min_week).mean())))
     if not cands:
-        return None
+        return (None, []) if return_near else None
     top_wr = max(c[0] for c in cands)
     top_avg = max(c[1] for c in cands if c[0] >= top_wr - 0.012)
     # adjacent score bands are statistically indistinguishable, so among cut-offs within 1.2 points
     # of the best win rate (and 85% of its average trade) take the one that covers the most weeks
     near = [c for c in cands if c[0] >= top_wr - 0.012 and c[1] >= 0.85 * top_avg] or cands
     if prefer_win:  # A+ is on watch (its live record trails the test): take the strictest of the near-best bars
-        return max(near, key=lambda c: (c[0], c[2], c[3]))
-    return max(near, key=lambda c: (c[6], c[0]))
+        pick = max(near, key=lambda c: (c[0], c[2], c[3]))
+    else:
+        pick = max(near, key=lambda c: (c[6], c[0]))
+    return (pick, near) if return_near else pick
+
+
+GROWTH_MAX_CANDS = 8      # near-best A+ bars tried in the account simulation
+GROWTH_DD_SLACK = 0.02    # a bar may not deepen the simulated worst drawdown by more than 2 points
+
+
+def _growth_pick(post: pd.DataFrame, near: list, base, topup_min_week: int, risk: dict | None):
+    """Among the near-best A+ bars (all within 1.2 points of the best A+ win rate), the one that grows a
+    simulated $5,000 account most once each bar's own weekly top-ups are added: the desk's real sizing (risk
+    per trade, open-position limit, position cap) on exactly the setups it would have sent on 2022-now
+    signals. Win rate stays first (only near-best bars compete); growth decides among them, and a bar may
+    not deepen the worst drawdown by more than 2 points. Returns (pick, table) or (None, table)."""
+    need = {"fill", "stop", "exit_date", "ticker", "strategy"}
+    if not need <= set(post.columns) or not near:
+        return None, []
+    r = {"max_open": 5, "risk_pct": 2.0, "max_position_pct": 25.0, **(risk or {})}
+    uniq = {}
+    for c in sorted(near, key=lambda c: (-c[6], c[2], c[3])):  # same A+ set = same bar; keep the widest-covering
+        uniq.setdefault((c[5], round(c[0], 4)), c)
+    cands = sorted(uniq.values(), key=lambda c: (c[2], c[3]))
+    if len(cands) > GROWTH_MAX_CANDS:
+        step = (len(cands) - 1) / (GROWTH_MAX_CANDS - 1)
+        cands = [cands[round(i * step)] for i in range(GROWTH_MAX_CANDS)]
+    if base is not None and base not in cands:
+        cands.append(base)
+    s = _one_per_ticker(post)
+    table = []
+    for c in cands:
+        sc, pw = c[2], c[3]
+        tu = calibrate_topups(post, sc, pw, topup_min_week, None)
+        ap = s[(s["score"] >= sc) & (s["p"] >= pw)]
+        if tu.get("topup_ok"):
+            pk, wk = simulate_topups(s, sc, pw, float(tu["topup_floor"]), float(tu["topup_pwin"]), topup_min_week,
+                                     list((tu.get("topup_excluded") or {}).keys()))
+        else:
+            pk, wk = s.iloc[0:0], pd.Series(dtype=float)
+        pf = B.portfolio(pd.concat([ap, pk]), 5000, int(r["max_open"]), float(r["risk_pct"]), float(r["max_position_pct"]))
+        pf.pop("curve", None)
+        table.append({"aplus_score": sc, "aplus_pwin": pw, "aplus_win": round(c[0], 4), "aplus_trades": int(c[5]),
+                      "topup_rule": f"{tu.get('topup_floor')}/{tu.get('topup_pwin')}" if tu.get("topup_ok") else "off",
+                      "topup_win": tu.get("oos_topup_win_rate"), "weeks_at_min": tu.get("oos_weeks_at_min"),
+                      "account_cagr": pf.get("cagr"), "account_max_dd": pf.get("max_dd"), "account_win": pf.get("win_rate"),
+                      "account_trades": pf.get("trades"), "_c": c})
+    ok = [x for x in table if x["account_cagr"] is not None]
+    if not ok:
+        return None, []
+    base_dd = next((x["account_max_dd"] for x in ok if x["_c"] == base), None)
+    allowed = [x for x in ok if base_dd is None or (x["account_max_dd"] or 0) >= base_dd - GROWTH_DD_SLACK] or ok
+    best = max(allowed, key=lambda x: (x["account_cagr"], x["aplus_win"]))
+    return best["_c"], [{k: v for k, v in x.items() if k != "_c"} | {"chosen": x is best} for x in table]
 
 
 # ----------------------------------------------------------------------------- weekly top-ups
@@ -288,7 +341,7 @@ def _choose_topup_rule(s: pd.DataFrame, sc: float, pw: float, min_week: int, min
     average-trade and profit-factor floors; among rules within 1.5 points of the best, the one that keeps
     the most weeks at the minimum. None if no rule clears the floors."""
     cands = []
-    for floor in range(max(40, int(sc) - 24), int(sc), 2):
+    for floor in range(max(40, int(sc) - 30), int(sc), 2):
         for tpw in sorted({round(max(0.5, pw - d), 2) for d in (0.08, 0.06, 0.04, 0.02, 0.0)}):
             pk, wk = simulate_topups(s, sc, pw, floor, tpw, min_week)
             st = _trade_stats(pk)
@@ -476,7 +529,7 @@ def _all_weather_line(pc: dict, P: dict) -> str:
 
 
 def calibrate_grades(all_tr: pd.DataFrame, split, min_week=3, cal_end=CAL_END, topup_min_week=5,
-                     prefer_win=False) -> dict:
+                     prefer_win=False, risk: dict | None = None) -> dict:
     """Pick A+ cut-offs on the post-split trades (2022-now): the highest win rate whose average trade is at
     least +0.6% and that still produces enough setups per week across the universe.
 
@@ -486,9 +539,14 @@ def calibrate_grades(all_tr: pd.DataFrame, split, min_week=3, cal_end=CAL_END, t
     which it never saw. Both are stored so the dashboard and the journal can show them."""
     post = all_tr[all_tr["signal_date"] >= split]
     fallback = {"aplus_score": 70, "aplus_pwin": 0.66, "min_week": min_week, "note": "fallback cut-offs"}
-    best = _select_cutoffs(post, min_week, prefer_win)
+    best, near = _select_cutoffs(post, min_week, prefer_win, return_near=True)
     if best is None:
         return fallback
+    growth, rule = [], ("strictest near-best bar (A+ on watch)" if prefer_win else "near-best bar covering most weeks")
+    if not prefer_win and topup_min_week:
+        g_pick, growth = _growth_pick(post, near, best, topup_min_week, risk)
+        if g_pick is not None:
+            best, rule = g_pick, "near-best A+ bar that grows the account most with its own weekly top-ups"
     wr, avg, sc, pw, per_week, n, cover = best
     t = post[post["ret"].notna() & post["filled"]]
     # realised win rate by score band: what the alert's Win % shows
@@ -506,7 +564,7 @@ def calibrate_grades(all_tr: pd.DataFrame, split, min_week=3, cal_end=CAL_END, t
            "oos_aplus_win_rate": round(wr, 4), "oos_aplus_avg_ret": round(float(avg), 5),
            "oos_aplus_trades": int(n), "oos_aplus_signals_per_week": round(float(per_week), 1),
            "oos_weeks_with_min_setups": round(cover, 3), "score_win_table": table,
-           "by_year": by_year, "aplus_bar_rule": "strictest near-best bar (A+ on watch)" if prefer_win else "near-best bar covering most weeks",
+           "by_year": by_year, "aplus_bar_rule": rule, "aplus_bar_growth": growth,
            "oos_window": [str(post["signal_date"].min().date()), str(post["signal_date"].max().date())]}
     if cal_end is not None:
         cal_end = pd.Timestamp(cal_end)
@@ -514,7 +572,10 @@ def calibrate_grades(all_tr: pd.DataFrame, split, min_week=3, cal_end=CAL_END, t
         if len(late[late["filled"] & late["ret"].notna()]) >= 200 and len(early) and len(late):
             ts = {"chosen_bar_late": _aplus_window(late, sc, pw, min_week),
                   "chosen_bar_early": _aplus_window(early, sc, pw, min_week)}
-            e_best = _select_cutoffs(early, min_week)
+            e_best, e_near = _select_cutoffs(early, min_week, return_near=True)
+            if e_best is not None and growth and topup_min_week:
+                e_g, _ = _growth_pick(early, e_near, e_best, topup_min_week, risk)
+                e_best = e_g or e_best
             if e_best is None:
                 ts["early_selection"] = None
                 ts["note"] = (f"Choosing the bar on {early['signal_date'].min().date()} to {cal_end.date()} alone found no cut-off "
@@ -550,9 +611,16 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
     pre_changes = []
     # the desk's weekly minimum (top-ups are replayed against it) and whether A+ is on watch
     desk_min, prefer_win = 5, False
+    # the account the simulations size like: your own settings (risk per trade, open positions, position cap)
+    acct = {"max_open": int(P["risk"]["max_open"]), "risk_pct": float(P["risk"]["risk_pct"]),
+            "max_position_pct": float(P["risk"]["max_position_pct"])}
     if merge_state:
         try:
-            desk_min = int((load_state(merge_state).get("settings") or {}).get("min_setups_week", 5))
+            st_ = load_state(merge_state).get("settings") or {}
+            desk_min = int(st_.get("min_setups_week", 5))
+            acct.update({k: float(st_[s_]) for k, s_ in (("max_open", "max_open_positions"), ("risk_pct", "risk_pct"),
+                                                         ("max_position_pct", "max_position_pct")) if st_.get(s_) is not None})
+            acct["max_open"] = int(acct["max_open"])
         except Exception:
             desk_min = 5
         prefer_win = bool((oldP.get("grading") or {}).get("aplus_watch"))
@@ -676,7 +744,8 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
             except Exception as ex:  # keep the per-strategy scores if the pooled fit fails
                 log(f"pooled model failed: {ex!r}")
                 pm_ = None
-            return en_, pm_, calibrate_grades(en_, split, cal_end=cal_end, topup_min_week=desk_min, prefer_win=prefer_win)
+            return en_, pm_, calibrate_grades(en_, split, cal_end=cal_end, topup_min_week=desk_min, prefer_win=prefer_win,
+                                              risk=acct)
 
         en, pm, G = fit_and_grade(enabled_names)
         # research strategies must earn their place inside the A+ set, not just pass on their own
@@ -755,7 +824,7 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
                            ("late", aplus[aplus["signal_date"] >= cal_end] if cal_end is not None else aplus.iloc[0:0])):
             if sub.empty:
                 continue
-            pf = B.portfolio(sub, 5000, P["risk"]["max_open"], P["risk"]["risk_pct"], P["risk"]["max_position_pct"])
+            pf = B.portfolio(sub, 5000, acct["max_open"], acct["risk_pct"], acct["max_position_pct"])
             cv = pf.pop("curve", None)
             report.setdefault("portfolio", {})[label] = pf
             if label == "all_years" and cv is not None and len(cv):

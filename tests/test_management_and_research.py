@@ -621,3 +621,27 @@ def test_research_never_narrows_an_all_weather_idea_into_a_specialist():
     assert RS.specialist_conditions(sp) == ["bear_calm"] and not S.all_weather(sp)["all_weather"]
     src = pathlib.Path(RS.__file__).read_text()
     assert "not aw[\"all_weather\"]" in src and "set(sc_) >= set(aw[\"tested\"])" in src
+
+
+def test_a_plus_bar_is_chosen_by_account_growth_among_near_best_bars():
+    rng = np.random.default_rng(7)
+    days = pd.bdate_range("2022-01-03", "2025-12-31")
+    rows = []
+    for d in days:
+        for k in range(6):
+            sc = float(rng.uniform(50, 99))
+            band_bad = 80 <= sc < 86            # setups scored 80-86 are weak in this world
+            win = rng.random() < (0.45 if band_bad else 0.78)
+            ret = 0.03 if win else -0.03
+            rows.append({"signal_date": d, "ticker": f"T{k}{d.dayofyear % 7}", "strategy": "S", "score": sc, "p": 0.75,
+                         "filled": True, "ret": ret, "fill": 100.0, "stop": 94.0, "exit_date": d + pd.Timedelta(days=5)})
+    post = pd.DataFrame(rows)
+    n80 = int((post["score"] >= 80).sum()); n86 = int((post["score"] >= 86).sum())
+    c80, c86 = (0.70, 0.010, 80, 0.62, 10.0, n80, 0.6), (0.78, 0.018, 86, 0.62, 6.0, n86, 0.4)
+    pick, table = CB._growth_pick(post, [c80, c86], c80, 5, {"max_open": 5, "risk_pct": 2.0, "max_position_pct": 25.0})
+    assert pick == c86 and sum(r["chosen"] for r in table) == 1
+    assert {r["aplus_score"] for r in table} == {80, 86}
+    best = next(r for r in table if r["chosen"]); other = next(r for r in table if not r["chosen"])
+    assert best["account_cagr"] > other["account_cagr"] and "topup_rule" in best
+    # without the columns a portfolio needs, the growth check steps aside (the coverage rule decides)
+    assert CB._growth_pick(post.drop(columns=["stop"]), [c80, c86], c80, 5, None) == (None, [])
