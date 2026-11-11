@@ -197,3 +197,38 @@ def test_news_check_rewrites_digest_and_headline_together(synth, tmp_path):
     for chunk in json.loads((out / "writes.json").read_text()):
         for w in chunk:
             assert pathlib.Path(w["file_path"]).exists()
+
+
+def _run_with_grading(synth, tmp_path, grading):
+    now = dt.datetime(2026, 11, 5, 14, 10, tzinfo=cal.PT)
+    st = _state(tmp_path)
+    (st / "strategy").mkdir()
+    (st / "strategy" / "params.json").write_text(json.dumps({"params": {"grading": grading}}))
+    out = tmp_path / "out"
+    scan.run("postclose", str(synth), str(st), str(out), now=now)
+    return json.loads((out / "scan.json").read_text()), (out / "digest.md").read_text()
+
+
+def test_weekly_topups_follow_their_own_rule_and_say_so(synth, tmp_path):
+    base = {"aplus_score": 999, "aplus_pwin": 0.99, "topup_floor": 0, "topup_pwin": 0.0, "topup_ok": True,
+            "oos_topup_win_rate": 0.735, "oos_topup_trades": 275, "oos_topup_avg_ret": 0.0085, "oos_aplus_win_rate": 0.76}
+    doc, digest = _run_with_grading(synth, tmp_path / "a", base)
+    tops = [e for e in doc["entries"] if e.get("topup_note")]
+    pace = doc["scan"]["topup_pace"]
+    assert pace["pace"] == 4 and pace["behind"] == 4 and len(tops) == pace["sent"] and 1 <= len(tops) <= 4
+    for e in tops:
+        assert e["grade_kind"] == "topup" and e["grade"] == "A" and "won 74% of 275" in e["topup_note"]
+        assert abs(e["win_pct"] - 100 * (0.735 * 275 + e["model_win_pct"] / 100 * 30) / 305) < 0.2
+    assert "Weekly top-up (below A+)" in digest and "TOP-UP" in digest
+    assert doc["scan"]["counts"]["week_topups"] == len(tops) and "weekly top-up" in scan.email_headline(doc["scan"])
+    # strategies excluded from top-ups (by the test or by their live record) never top up
+    used = {e["strategy"] for e in tops}
+    doc2, _ = _run_with_grading(synth, tmp_path / "b", {**base, "topup_excluded": {s: "test" for s in used},
+                                                         "topup_excluded_live": {}})
+    assert not ({e["strategy"] for e in doc2["entries"] if e.get("topup_note")} & used)
+    # off: none, and the email says why the week is short
+    doc3, digest3 = _run_with_grading(synth, tmp_path / "c", {**base, "topup_mode": "off"})
+    assert not [e for e in doc3["entries"] if e.get("topup_note")] and "switched off" in digest3
+    # nothing clears the bar: none forced, and the email says so
+    doc4, digest4 = _run_with_grading(synth, tmp_path / "d", {**base, "topup_floor": 1000})
+    assert not [e for e in doc4["entries"] if e.get("topup_note")] and "none was forced" in digest4

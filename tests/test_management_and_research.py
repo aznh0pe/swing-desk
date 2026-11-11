@@ -388,7 +388,7 @@ def test_weekly_minimum_is_five_and_quiet_scans_still_report():
     assert busy.startswith("1 exit alert") and "done:" not in busy
 
 
-def test_topups_are_graded_apart_and_their_record_sets_the_rule():
+def test_grades_are_recorded_apart_per_strategy_and_their_records_set_the_rules():
     import datetime as dt
     from engine import learnlog as LL
     now = dt.datetime(2026, 11, 20, 15, 0)
@@ -396,25 +396,99 @@ def test_topups_are_graded_apart_and_their_record_sets_the_rule():
     for i in range(20):
         top = i < 14
         aid = f"e{i}"
-        alerts.append({"id": aid, "valid_for": "2026-11-1%d" % (i % 9), "strategy": "S", "grade": "A" if top else "A+",
-                       **({"topup_note": "Weekly top-up"} if top else {})})
-        win = (i % 2 == 0) if top else True   # top-ups win 7 of 14, A+ 6 of 6
-        shadow.append({"alert_id": aid, "status": "closed", "fill": 100.0, "exit": 102.0 if win else 97.0, "strategy": "S"})
-    trades = [{"alert_id": "e0", "entry_price": 100, "exit_price": 103, "exit_date": "2026-11-12", "strategy": "S"}]
+        st_ = "S" if i % 2 == 0 else "T"
+        alerts.append({"id": aid, "valid_for": "2026-11-1%d" % (i % 9), "strategy": st_, "grade": "A" if top else "A+",
+                       "grade_kind": "topup" if top else "aplus", **({"topup_note": "Weekly top-up"} if top else {})})
+        win = (i % 4 != 1) if top else True   # top-ups: S always wins, T wins 3 of 7; A+ 6 of 6
+        shadow.append({"alert_id": aid, "status": "closed", "fill": 100.0, "exit": 102.0 if win else 97.0, "strategy": st_,
+                       "reason": "target" if win else "stop"})
+    trades = [{"alert_id": "e0", "entry_price": 100, "exit_price": 103, "exit_date": "2026-11-12", "strategy": "S",
+               "grade_kind": "topup"}]
     st = LL.stats_doc(None, alerts, shadow, trades, True, now)
     gs = st["grade_summary"]
-    assert gs["topup"]["n"] == 14 and gs["topup"]["wins"] == 7 and gs["aplus"]["n"] == 6 and gs["aplus"]["win_rate"] == 1.0
+    assert gs["topup"]["n"] == 14 and gs["topup"]["wins"] == 10 and gs["aplus"]["n"] == 6 and gs["aplus"]["win_rate"] == 1.0
     assert gs["topup"]["live_n"] == 1 and gs["aplus"]["live_n"] == 0
-    G = {"aplus_pwin": 0.72, "oos_aplus_win_rate": 0.75}
-    pol = LL.topup_policy(st, G)
-    assert pol["mode"] == "off" and pol["topups_off"] is True and "stopped" in pol["note"]
-    # too few results: the rule stays as designed
+    assert gs["topup"]["by_strategy"]["S"]["wins"] == 7 and gs["topup"]["by_strategy"]["T"]["n"] == 7
+    assert st["grade_months"]["2026-11"]["topup"]["T"]["exits"] == {"target": 3, "stop": 4}
+    G = {"aplus_pwin": 0.72, "oos_aplus_win_rate": 0.76, "oos_topup_win_rate": 0.735}
+    assert LL.topup_policy(st, G)["mode"] == "normal"          # 10 of 14 + a real win (counted double): in line with the test
+    # one strategy's own top-ups trail badly: only that strategy stops sending top-ups
+    bad = [dict(s, exit=97.0) if a["strategy"] == "T" and a["grade_kind"] == "topup" else s for s, a in zip(shadow, alerts)]
+    for k in range(6):  # more T top-ups that lost, so its record carries weight
+        alerts.append({"id": f"x{k}", "valid_for": "2026-11-05", "strategy": "T", "grade": "A", "grade_kind": "topup"})
+        bad.append({"alert_id": f"x{k}", "status": "closed", "fill": 100.0, "exit": 97.0, "strategy": "T"})
+    st_bad = LL.stats_doc(None, alerts, bad, [], True, now)
+    ex = LL.topup_strategy_exclusions(st_bad, G)
+    assert set(ex) == {"T"} and "A+" in ex["T"]
+    assert LL.topup_policy(st_bad, G)["mode"] in ("tight", "off")
+    # all top-ups losing: off; clearly under the test: tight; too few results: normal
+    allbad = [dict(s, exit=97.0) if a.get("grade_kind") == "topup" else s for s, a in zip(bad, alerts)]
+    assert LL.topup_policy(LL.stats_doc(None, alerts, allbad, [], True, now), G)["mode"] == "off"
     few = LL.stats_doc(None, alerts[:4], shadow[:4], [], True, now)
-    assert LL.topup_policy(few, G) == {"mode": "keep", "topup_pwin": 0.69, "topups_off": False, "note": ""}
-    # a decent but clearly weaker record: back to the full A+ bar
-    sh2 = [dict(s, exit=102.0 if (i < 9 or i >= 14) else 97.0) for i, s in enumerate(shadow)]   # top-ups 9 of 14 = 64%
-    pol2 = LL.topup_policy(LL.stats_doc(None, alerts, sh2, [], True, now), G)
-    assert pol2["mode"] == "tight" and pol2["topup_pwin"] == 0.72 and pol2["topups_off"] is False
+    assert LL.topup_policy(few, G)["mode"] == "normal" and LL.topup_strategy_exclusions(few, G) == {}
+    # A+ on watch only with enough results well under its test
+    assert LL.aplus_watch(st, G) is None
+    many = [{"id": f"a{k}", "valid_for": "2026-11-0%d" % (k % 9 + 1), "strategy": "S", "grade": "A+", "grade_kind": "aplus"} for k in range(30)]
+    msh = [{"alert_id": f"a{k}", "status": "closed", "fill": 100.0, "exit": 102.0 if k % 2 else 97.0, "strategy": "S"} for k in range(30)]
+    aw = LL.aplus_watch(LL.stats_doc(None, many, msh, [], True, now), G)
+    assert aw and aw["record"] == 0.5 and "stricter A+ bar" in aw["note"]
     # the record survives when old alerts fall out of the export
     later = LL.stats_doc(st, [dict(alerts[0], valid_for="2026-12-02")], [], [], False, dt.datetime(2026, 12, 5))
-    assert later["grade_months"]["2026-11"]["topup"]["shadow_n"] == 14
+    assert later["grade_months"]["2026-11"]["topup"]["S"]["shadow_n"] == 7
+
+
+def test_watchlist_setups_are_graded_on_paper_once_each():
+    import datetime as dt
+    from engine import learnlog as LL
+    now = dt.datetime(2026, 11, 20, 15, 0)
+    nm = {"ticker": "W1", "valid_for": "2026-11-10", "strategy": "S", "entry": 10.0, "stop": 9.0, "target": 11.0, "grade": "A"}
+    scans = [{"started_at": "2026-11-09T14:05", "near_misses": [nm, dict(nm, ticker="SENT")]},
+             {"started_at": "2026-11-10T05:50", "near_misses": [nm]}]
+    sent = [{"id": "e1", "ticker": "SENT", "valid_for": "2026-11-10"}]
+    w = LL.watch_from_scans(scans, sent)
+    assert [x["ticker"] for x in w] == ["W1"] and w[0]["grade_kind"] == "watch"
+    sh = [{"alert_id": w[0]["id"], "status": "closed", "fill": 10.0, "exit": 11.0, "reason": "target"}]
+    st1 = LL.stats_doc(None, [], [], [], True, now, w, sh)
+    assert st1["grade_summary"]["watch"]["n"] == 1 and st1["grade_summary"]["watch"]["wins"] == 1
+    st2 = LL.stats_doc(st1, [], [], [], True, now + dt.timedelta(days=1), w, sh)   # graded again next day: counted once
+    assert st2["grade_summary"]["watch"]["n"] == 1
+    st3 = LL.stats_doc(st2, [], [], [], True, now + dt.timedelta(days=120), [], [])  # ids age out, the record stays
+    assert st3["grade_summary"]["watch"]["n"] == 1 and not st3["watch_ids"]
+
+
+def test_topup_replay_follows_the_weekly_pace_and_is_tuned_on_its_own():
+    import pandas as pd
+    rng = np.random.default_rng(3)
+    days = pd.bdate_range("2022-01-03", "2026-10-30")
+    rows = []
+    for d in days:
+        for k in range(6):
+            strat = "BAD" if k == 5 else "GOOD"
+            sc = float(rng.uniform(60, 94.9)) if strat == "BAD" else float(rng.uniform(40, 99))
+            p = float(rng.uniform(0.6, 0.8))
+            win = rng.random() < (0.35 if strat == "BAD" else 0.75)
+            rows.append({"signal_date": d, "ticker": f"T{k}", "strategy": strat, "score": sc, "p": p, "filled": True,
+                         "ret": float(rng.uniform(0.01, 0.04)) if win else -float(rng.uniform(0.01, 0.03))})
+    sig = pd.DataFrame(rows)
+    s = CB._one_per_ticker(sig)
+    # nothing is A+: every weekday adds exactly the setups the pace asks for (1 Monday ... 5 Friday, capped by supply)
+    pk, wk = CB.simulate_topups(s, 999, 9, 0, 0, 5)
+    per_day = pk.groupby("signal_date").size()
+    assert per_day.max() == 1 and float((wk == 5).mean()) > 0.9
+    # A+ setups count first: a Monday with two A+ needs no top-up that day
+    mon = days[days.weekday == 0][3]
+    s2 = s.copy()
+    s2.loc[(s2["signal_date"] == mon) & (s2["ticker"].isin(["T0", "T1"])), ["score", "p"]] = [99.5, 0.95]
+    pk2, _ = CB.simulate_topups(s2, 99, 0.9, 0, 0, 5)
+    assert not (pk2["signal_date"] == mon).any()
+    # excluded strategies never top up
+    pk3, _ = CB.simulate_topups(s, 999, 9, 0, 0, 5, excluded=["BAD"])
+    assert not (pk3["strategy"] == "BAD").any()
+    res = CB.calibrate_topups(sig[sig["signal_date"] >= "2022-01-01"], 95, 0.78, 5)
+    assert res["topup_ok"] and res["topup_floor"] < 95 and "BAD" in res["topup_excluded"]
+    assert res["oos_topup_trades"] >= CB.TOPUP_MIN_TRADES and res["oos_weeks_at_min"] >= res["oos_weeks_at_min_aplus_only"]
+    assert {r["year"] for r in res["topup_by_year"]} >= {2022, 2026} and "chosen_rule_late" in res["topup_time_split"]
+    # floors nobody can clear: top-ups off, said plainly
+    awful = sig.assign(ret=-0.01)
+    off = CB.calibrate_topups(awful, 95, 0.78, 5)
+    assert off["topup_ok"] is False and "off" in off["topup_note"]

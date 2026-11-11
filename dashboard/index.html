@@ -114,6 +114,19 @@ td .t { font-family: var(--f-display); font-stretch: 85%; font-weight: 700; font
 .t-head { display: flex; gap: 12px; padding: 12px 14px 10px; align-items: flex-start; border-bottom: 1px dashed var(--line-2); }
 .stamp { flex: none; display: grid; place-items: center; width: 48px; height: 48px; border: 2px solid var(--brass); color: var(--brass); background: var(--brass-soft); border-radius: 6px; font-family: var(--f-display); font-weight: 800; font-stretch: 70%; font-size: 22px; line-height: 1; transform: rotate(-4deg); }
 .stamp.a { border-color: var(--line-2); color: var(--ink-2); background: var(--surface-2); }
+.stamp.tu { font-size: 13px; letter-spacing: .02em; text-align: center; line-height: 1.05; }
+.g-2 { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); align-items: start; }
+.grade-card .gc-head { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-bottom: 10px; }
+.grade-card .gc-head > div:nth-child(2) { flex: 1 1 200px; }
+.grade-card .gc-head h3 { margin: 0; }
+.grade-card .gc-head .pill { margin-left: auto; }
+.gc-rows { display: grid; grid-template-columns: minmax(118px, max-content) minmax(0, 1fr); gap: 7px 14px; margin: 0; font-size: 14px; }
+.gc-rows dt { color: var(--ink-2); font-weight: 600; }
+.gc-rows dd { margin: 0; overflow-wrap: anywhere; }
+@media (max-width: 560px) { .gc-rows { grid-template-columns: minmax(0, 1fr); gap: 2px; } .gc-rows dd { margin-bottom: 8px; } }
+.gchip { display: inline-block; font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--line-2); margin-right: 5px; vertical-align: 1px; white-space: nowrap; }
+.gchip.aplus { color: var(--brass); border-color: var(--brass); background: var(--brass-soft); }
+.gchip.topup { color: var(--ink-2); background: var(--surface-2); }
 .t-title { min-width: 0; flex: 1; }
 .t-title .tk { font-family: var(--f-display); font-weight: 800; font-stretch: 78%; font-size: 24px; letter-spacing: .02em; line-height: 1.05; }
 .t-title .nm { color: var(--ink-2); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -945,7 +958,7 @@ function resolveCard({ a, fc, kind }) {
 function ticket(a, today) {
   const e = num(a.entry), s = num(a.stop), t = num(a.target);
   const riskPct = e ? (100 * (s - e)) / e : null, rewPct = e ? (100 * (t - e)) / e : null;
-  const grade = a.grade === "A+" ? `<div class="stamp" aria-label="Grade A plus">A+</div>` : `<div class="stamp a">${esc(a.grade || "A")}</div>`;
+  const grade = a.grade === "A+" ? `<div class="stamp" aria-label="Grade A plus">A+</div>` : a.topup_note ? `<div class="stamp a tu" aria-label="Weekly top-up">TOP<br>UP</div>` : `<div class="stamp a">${esc(a.grade || "A")}</div>`;
   const news = a.news_check && a.news_check !== "pending" ? `<div><b>News check:</b> ${hiCaution(a.news_check)}${a.news_note ? " · " + hiCaution(a.news_note) : ""}</div>` : "";
   return `<article class="ticket ${a.capacity_note ? "overcap" : ""}" aria-label="${esc(a.ticker)} setup">
     <div class="t-head">${grade}<div class="t-title"><div class="tk">${esc(a.ticker)}</div><div class="nm" title="${esc(a.name)}">${esc(a.name)}</div>
@@ -1096,7 +1109,7 @@ function positionCard(t, m) {
   const today = todayPT(), entryDay = String(t.entry_date || "").slice(0, 10);
   return `<article class="pos-card" aria-label="${esc(t.ticker)} position">
     <div class="pc-head"><div class="pc-title"><div class="tk">${esc(t.ticker)}</div>${t.name ? `<div class="nm" title="${esc(t.name)}">${esc(t.name)}</div>` : ""}
-      <div class="st">${esc(t.strategy_label || t.strategy || "Manual")} · entered ${dShort(t.entry_date)}${num(t.sold_shares) ? ` · ${shareStr(t.sold_shares)} sh sold so far` : ""}</div></div>
+      <div class="st">${gchip(gradeOfTrade(t))}${esc(t.strategy_label || t.strategy || "Manual")} · entered ${dShort(t.entry_date)}${num(t.sold_shares) ? ` · ${shareStr(t.sold_shares)} sh sold so far` : ""}</div></div>
       <div class="pc-pnl"><div class="lbl">Open P&L</div><div class="big">${pnl !== null ? pnlHtml(pnl) : "–"}</div><div class="lbl">${pnlPct !== null ? `${pnlPctHtml(pnl, pnlPct)} · last ${px(last)}` : "no mark yet"}</div></div></div>
     ${statusHtml}
     <div class="pc-levels">
@@ -1169,7 +1182,7 @@ function viewLog() {
     <div class="seg" role="group" aria-label="Filter trades">${[["all", "All"], ["open", "Open"], ["closed", "Closed"]].map(([k, l]) => `<button type="button" data-logf="${k}" aria-pressed="${S.logFilter === k}">${l}</button>`).join("")}</div>
     <span class="meta">${S.trades.length} trades logged</span></div>`;
   html += list.length ? `<div class="tbl-wrap"><table><thead><tr><th>Opened</th><th>Ticker</th><th>Strategy</th><th class="n">Entry</th><th class="n">Shares</th><th>Closed</th><th class="n">Exit</th><th class="n">P&L</th><th class="n">Return</th><th class="n">R</th><th class="n">Days</th><th>Exit reason</th><th class="n">Income</th><th></th></tr></thead><tbody>
-    ${list.map((t) => `<tr><td>${dShort(t.entry_date)}</td><td><span class="t">${esc(t.ticker)}</span></td><td class="small">${esc(t.strategy_label || t.strategy || "Manual")}</td><td class="n">${px(t.entry_price)}</td><td class="n">${esc(t.shares)}</td><td>${t.status === "closed" ? dShort(t.exit_date) : statusPill("placed").replace("Order placed", "Open")}</td><td class="n">${px(t.exit_price)}</td><td class="n ${signCls(t.pnl)}">${t.status === "closed" ? smoney(t.pnl) : "–"}</td><td class="n">${t.status === "closed" ? spct(t.pnl_pct, 2) : "–"}</td><td class="n">${t.r_mult != null ? Number(t.r_mult).toFixed(2) : "–"}</td><td class="n">${t.status === "closed" ? esc(t.days_held) : heldDays(t)}</td><td class="small">${esc(t.exit_reason || "")}</td><td class="n">${t.income_amount ? money(t.income_amount) : "–"}</td><td class="n"><button class="btn ghost small" type="button" data-act="edit" data-tid="${esc(t.id)}">Edit</button></td></tr>`).join("")}
+    ${list.map((t) => `<tr><td>${dShort(t.entry_date)}</td><td><span class="t">${esc(t.ticker)}</span></td><td class="small">${gchip(gradeOfTrade(t))}${esc(t.strategy_label || t.strategy || "Manual")}</td><td class="n">${px(t.entry_price)}</td><td class="n">${esc(t.shares)}</td><td>${t.status === "closed" ? dShort(t.exit_date) : statusPill("placed").replace("Order placed", "Open")}</td><td class="n">${px(t.exit_price)}</td><td class="n ${signCls(t.pnl)}">${t.status === "closed" ? smoney(t.pnl) : "–"}</td><td class="n">${t.status === "closed" ? spct(t.pnl_pct, 2) : "–"}</td><td class="n">${t.r_mult != null ? Number(t.r_mult).toFixed(2) : "–"}</td><td class="n">${t.status === "closed" ? esc(t.days_held) : heldDays(t)}</td><td class="small">${esc(t.exit_reason || "")}</td><td class="n">${t.income_amount ? money(t.income_amount) : "–"}</td><td class="n"><button class="btn ghost small" type="button" data-act="edit" data-tid="${esc(t.id)}">Edit</button></td></tr>`).join("")}
     </tbody></table></div>` : `<div class="empty">Trades appear here as soon as you mark an alert as filled, with every entry, exit and income decision recorded.</div>`;
   html += `</section><section class="section"><div class="section-head"><h2>Activity log</h2><span class="meta">Everything that changed your account, newest first</span></div>${activity()}</section>`;
   return html;
@@ -1253,9 +1266,83 @@ function viewScans() {
 }
 
 // ---------------------------------------------------------------- strategy lab
+function gradeOfTrade(t) {
+  if (t.grade_kind) return t.grade_kind;
+  const a = t.alert_id ? S.alerts.find((x) => x.id === t.alert_id) : null;
+  return a ? (a.topup_note || a.grade_kind === "topup" ? "topup" : "aplus") : null;
+}
+function gchip(g) { return g === "aplus" ? `<span class="gchip aplus" title="A+ setup">A+</span>` : g === "topup" ? `<span class="gchip topup" title="Weekly top-up: sent to keep the week on its minimum pace">Top-up</span>` : ""; }
+function viewGrades() {
+  const P = S.params?.params || S.params; const G = P?.grading || {};
+  const gs = S.learning.stats?.grade_summary || {};
+  const label = (n) => S.backtest?.strategies?.[n]?.label || P?.custom?.[n]?.label || n;
+  const ap = gs.aplus || {}, tu = gs.topup || {}, wa = gs.watch || {};
+  const years = (rows) => (rows || []).filter((r) => (r.win_rate ?? r.win) != null).map((r) => { const w = r.win_rate ?? r.win;
+    return `<span class="pill ${w >= 0.75 ? "good" : w >= 0.68 ? "neutral" : "warn"}" title="${esc(r.trades)} trades, average ${spct(100 * (r.avg_ret ?? r.avg ?? 0), 2)}">${esc(r.year)}: ${pct(100 * w, 0)} (${esc(r.trades)})</span>`; }).join(" ");
+  const rec = (r, empty) => {
+    if (!r || (!r.n && !r.live_n)) return `<span class="muted">${empty}</span>`;
+    const parts = [];
+    if (r.n) parts.push(`<b>${esc(r.wins)} of ${esc(r.n)}</b> graded won (${pct(100 * r.win_rate, 0)}), average ${spct(100 * (r.avg_ret || 0), 2)}`);
+    if (r.recent?.n && r.recent.n !== r.n) parts.push(`last 3 months ${esc(r.recent.wins)} of ${esc(r.recent.n)}`);
+    if (r.stress_n && r.calm_n) parts.push(`stressed market ${esc(r.stress_wins)} of ${esc(r.stress_n)}, calm ${esc(r.calm_wins)} of ${esc(r.calm_n)}`);
+    else if (r.stress_n || r.calm_n) parts.push(`all on ${r.stress_n ? "stressed" : "calm"}-market days so far`);
+    parts.push(r.live_n ? `your trades ${esc(r.live_wins)} of ${esc(r.live_n)} won` : "none of your trades closed yet");
+    return parts.join(" · ");
+  };
+  const apSt = G.aplus_watch ? ["warn", "On watch"] : (ap.weighted_n || 0) >= 25 ? ["good", "On track"] : ["neutral", "Building its record"];
+  const tmode = G.topup_ok === false ? "off" : (G.topup_mode && G.topup_mode !== "keep" ? G.topup_mode : "normal");
+  const tuSt = tmode === "off" ? ["crit", "Off"] : tmode === "tight" ? ["warn", "Tightened"] : (tu.weighted_n || 0) >= 12 ? ["good", "On track"] : ["neutral", "Building its record"];
+  const excl = { ...(G.topup_excluded || {}), ...(G.topup_excluded_live || {}) };
+  const exclTxt = Object.keys(excl).length ? Object.entries(excl).map(([n, why]) => `<b>${esc(label(n))}</b>: ${esc(why)}`).join("<br>") : "none";
+  const tts = G.topup_time_split || {}, ats = G.time_split || {};
+  const half = (a, b, w1, w2) => a?.win_rate != null && b?.win_rate != null ? `${esc(String(w1?.[0] || "").slice(0, 4))}–${esc(String(w1?.[1] || "").slice(0, 4))}: ${pct(100 * a.win_rate, 0)} (${esc(a.trades)}) · ${esc(String(w2?.[0] || "").slice(0, 4))}–${esc(String(w2?.[1] || "").slice(0, 4))}: ${pct(100 * b.win_rate, 0)} (${esc(b.trades)})` : "";
+  const tuRule = tmode === "off" ? `Off. ${esc(G.topup_note || "Their own record fell under the 60% floor.")}`
+    : `The best setups below the A+ bar with <b>score ${esc(G.topup_floor ?? "–")}+</b> and <b>model win ${G.topup_pwin != null ? pct(100 * G.topup_pwin, 0) : "–"}+</b>${tmode === "tight" ? `, tightened to the A+ win estimate (${pct(100 * (G.aplus_pwin || 0), 0)}+) because their record trails the test` : ""}.`;
+  const lastPc = S.scans.find((x) => x.mode === "postclose" && x.status !== "closed");
+  const c = lastPc?.counts || {}, wmin = lastPc?.week_min || settings().min_setups_week || 5;
+  let html = `<section class="section" id="grades"><div class="section-head"><h2>A+ setups and weekly top-ups</h2><span class="meta">Two grades, tested, tracked and tuned separately${S.learning.stats?.updated_at ? ` · record updated ${dtShort(S.learning.stats.updated_at)}` : ""}</span></div>
+    <div class="grid g-2">
+    <article class="panel grade-card" aria-label="A+ setups"><div class="gc-head"><div class="stamp" aria-hidden="true">A+</div><div><h3>A+ setups</h3><div class="small muted">Always sent, every one of them: no weekly cap</div></div><span class="pill ${apSt[0]}">${apSt[1]}</span></div>
+      <dl class="gc-rows">
+        <dt>Rule now</dt><dd>Score <b>${esc(G.aplus_score ?? "–")}+</b> and model win <b>${G.aplus_pwin != null ? pct(100 * G.aplus_pwin, 0) : "–"}+</b>${G.aplus_watch ? ` (the strictest near-best bar while on watch)` : ""}.</dd>
+        <dt>Tested 2022–now</dt><dd>${G.oos_aplus_win_rate ? `${pct(100 * G.oos_aplus_win_rate)} of ${esc(G.oos_aplus_trades)} won · average ${spct(100 * (G.oos_aplus_avg_ret || 0), 2)} · about ${esc(G.oos_aplus_signals_per_week)} a week` : "Set by the weekly recalibration."}</dd>
+        ${(G.by_year || []).length ? `<dt>By year</dt><dd>${years(G.by_year)}</dd>` : (G.aplus_check_live_model?.by_year || []).length ? `<dt>By year</dt><dd>${years(G.aplus_check_live_model.by_year)}<div class="small muted">Same day-by-day replay as the top-ups: ${pct(100 * G.aplus_check_live_model.win_rate)} of ${esc(G.aplus_check_live_model.trades)} won, average ${spct(100 * (G.aplus_check_live_model.avg_ret || 0), 2)}.</div></dd>` : ""}
+        ${half(ats.chosen_bar_early, ats.chosen_bar_late, ats.chosen_bar_early?.window, ats.chosen_bar_late?.window) ? `<dt>Each half</dt><dd>${half(ats.chosen_bar_early, ats.chosen_bar_late, ats.chosen_bar_early?.window, ats.chosen_bar_late?.window)}</dd>` : ""}
+        <dt>Live record</dt><dd>${rec(ap, "No A+ setup graded yet: each one is graded once its trade would have finished.")}</dd>
+        <dt>Learns how</dt><dd class="small">After 25 weighted results (your trades count double, older months fade), a record 10 points under the test puts A+ on watch and the weekly recalibration picks the stricter A+ bar. Each strategy's win estimate also moves toward its own record every day.</dd>
+      </dl></article>
+    <article class="panel grade-card" aria-label="Weekly top-ups"><div class="gc-head"><div class="stamp a tu" aria-hidden="true">TOP<br>UP</div><div><h3>Weekly top-ups</h3><div class="small muted">Only when a week is behind its pace: 1 by Monday night, then one more each night up to ${esc(wmin)} by Friday</div></div><span class="pill ${tuSt[0]}">${tuSt[1]}</span></div>
+      <dl class="gc-rows">
+        <dt>Rule now</dt><dd>${tuRule}</dd>
+        <dt>Never from</dt><dd>${exclTxt}</dd>
+        <dt>Tested 2022–now</dt><dd>${G.oos_topup_win_rate ? `The exact weekly rule replayed day by day: <b>${pct(100 * G.oos_topup_win_rate)} of ${esc(G.oos_topup_trades)}</b> won · average ${spct(100 * (G.oos_topup_avg_ret || 0), 2)} · profit factor ${esc(G.oos_topup_pf ?? "–")} · about ${G.oos_topup_sent_per_week != null ? esc(Number(G.oos_topup_sent_per_week).toFixed(1)) : "–"} a week` : "Not tested yet: the weekly recalibration replays the exact weekly rule on 2022–now data."}</dd>
+        ${G.oos_weeks_at_min != null ? `<dt>Weekly minimum</dt><dd>${pct(100 * G.oos_weeks_at_min, 0)} of weeks reached ${esc(G.topup_min_week || wmin)} setups with top-ups; A+ alone ${pct(100 * (G.oos_weeks_at_min_aplus_only || 0), 0)}. Win rate comes first: setups below the bar are not forced in.</dd>` : ""}
+        ${(G.topup_by_year || []).length ? `<dt>By year</dt><dd>${years(G.topup_by_year)}</dd>` : ""}
+        ${half(tts.chosen_rule_early, tts.chosen_rule_late, tts.window_early, tts.window_late) ? `<dt>Each half</dt><dd>${half(tts.chosen_rule_early, tts.chosen_rule_late, tts.window_early, tts.window_late)}${tts.early_rule_on_late?.win_rate != null ? ` · a bar chosen on the first half alone won ${pct(100 * tts.early_rule_on_late.win_rate, 0)} on the second` : ""}</dd>` : ""}
+        <dt>Live record</dt><dd>${rec(tu, "No top-ups sent yet: the first ones come in a week that falls behind its pace.")}</dd>
+        <dt>Learns how</dt><dd class="small">After 12 weighted results: under 60% wins they stop; 7 points under the test they must also clear the A+ win estimate; a strategy whose own top-ups trail stops sending top-ups (it can still send A+ setups). Every Saturday the exact weekly rule is replayed and the bar re-tuned.</dd>
+      </dl></article>
+    </div>`;
+  html += `<div class="panel" style="margin-top:12px"><div class="section-head"><h3>This week and the watchlist</h3></div>
+    <div class="small">${lastPc ? `<b>This week so far:</b> ${esc(c.week_aplus ?? 0)} A+ setup${c.week_aplus === 1 ? "" : "s"}, ${esc(c.week_topups ?? 0)} weekly top-up${c.week_topups === 1 ? "" : "s"} (minimum ${esc(wmin)}, never a ceiling), as of the ${dtShort(lastPc.started_at)} scan.` : "The first post-close scan of the week fills this in."}</div>
+    <div class="small" style="margin-top:6px"><b>Watchlist, graded on paper:</b> ${rec(wa, "The next-best setups each scan lists but doesn't send are graded on paper from today's review on, so the top-up band keeps learning even in weeks that need no top-ups.").replace("none of your trades closed yet", "never sent, so no trades")}</div></div>`;
+  const names = [...new Set([...Object.keys(ap.by_strategy || {}), ...Object.keys(tu.by_strategy || {}), ...Object.keys(wa.by_strategy || {}),
+    ...Object.keys(G.topup_by_strategy || {}), ...Object.entries(P?.strategies || {}).filter(([, v]) => v.enabled !== false).map(([n]) => n)])];
+  const cell = (r) => r?.n ? `${pct(100 * r.win_rate, 0)} <span class="muted">(${esc(r.n)})</span>` : `<span class="muted">–</span>`;
+  const tcell = (r) => r?.trades >= 10 ? `${pct(100 * r.win_rate, 0)} <span class="muted">(${esc(r.trades)})</span>` : r?.trades ? `<span class="muted" title="too few to judge">${esc(r.trades)} only</span>` : `<span class="muted">–</span>`;
+  if (names.length) html += `<div class="panel" style="margin-top:12px"><div class="section-head"><h3>By strategy</h3><span class="meta">graded setups won (count)</span></div><div class="tbl-wrap"><table><thead><tr><th>Strategy</th><th class="n">A+ graded</th><th class="n">Top-ups graded</th><th class="n">Watchlist</th><th class="n">Top-ups tested 2022–now</th><th>Sends top-ups</th></tr></thead><tbody>
+    ${names.sort((x, y) => label(x).localeCompare(label(y))).map((n) => `<tr><td>${esc(label(n))}</td><td class="n">${cell(ap.by_strategy?.[n])}</td><td class="n">${cell(tu.by_strategy?.[n])}</td><td class="n">${cell(wa.by_strategy?.[n])}</td><td class="n">${tcell(G.topup_by_strategy?.[n])}</td><td class="small">${excl[n] ? `<span class="pill warn">No</span>` : "Yes"}</td></tr>`).join("")}
+    </tbody></table></div></div>`;
+  const decisions = [];
+  const pdoc = S.params || {}, pday = String(pdoc.updated_at || "").slice(0, 10);
+  for (const ch of pdoc.changelog_entry || []) if (/top-up|A\+|watch/i.test(ch)) decisions.push([pday, ch]);
+  for (const j of S.journal) for (const ch of j.changes || []) if (/top-up|A\+|watch/i.test(ch) && !/^No parameter changes/.test(ch) && !decisions.some((d) => d[1] === ch)) decisions.push([j.date, ch]);
+  if (decisions.length) html += `<div class="panel" style="margin-top:12px"><h3 style="margin:0 0 6px">Recent grade decisions</h3><ul style="margin:0;padding-left:18px">${decisions.slice(0, 6).map(([d, ch]) => `<li><span class="muted small">${dShort(d)}</span> ${esc(ch)}</li>`).join("")}</ul></div>`;
+  return html + `</section>`;
+}
 function viewLab() {
   const bt = S.backtest; const P = S.params?.params || S.params; const G = P?.grading || bt?.grading || {};
-  let html = `<section class="section"><div class="section-head"><h2>Strategy playbook</h2><span class="meta">${bt ? `Backtest ${esc(bt.period?.[0])} to ${esc(bt.period?.[1])} · ${esc(bt.tickers)} stocks & ETFs · out-of-sample from ${esc(bt.split)}` : "Backtest results load after the first calibration"}</span></div>`;
+  let html = viewGrades() + `<section class="section"><div class="section-head"><h2>Strategy playbook</h2><span class="meta">${bt ? `Backtest ${esc(bt.period?.[0])} to ${esc(bt.period?.[1])} · ${esc(bt.tickers)} stocks & ETFs · out-of-sample from ${esc(bt.split)}` : "Backtest results load after the first calibration"}</span></div>`;
   if (G.aplus_score) {
     html += `<div class="banner info">A+ means score ≥ ${esc(G.aplus_score)} and estimated win rate ≥ ${pct(100 * G.aplus_pwin, 0)}.${G.oos_aplus_win_rate ? ` On out-of-sample data${G.oos_window ? ` (${esc(G.oos_window[0])} to ${esc(G.oos_window[1])})` : ""}, setups at that bar won ${pct(100 * G.oos_aplus_win_rate)} of ${esc(G.oos_aplus_trades)} trades (avg ${spct(100 * G.oos_aplus_avg_ret, 2)}), about ${esc(G.oos_aplus_signals_per_week)} per week.` : ""}</div>`;
     if (Array.isArray(G.by_year) && G.by_year.length) {
@@ -1336,14 +1423,6 @@ function viewLearning() {
   const label = (n) => S.backtest?.strategies?.[n]?.label || P?.custom?.[n]?.label || n;
   let html = `<section class="section"><div class="section-head"><h2>What the desk has learned</h2><span class="meta">${st?.updated_at ? "Updated " + dtShort(st.updated_at) : "Updated after every close"}</span></div>
     <div class="banner info">Every alert is graded against what the market actually did, whether you took it or not, and your real trades count double. The record is kept month by month, permanently, in this dashboard's database; each day's review is also in the journal below and in the Learning Journal doc in your project. Every scan uses it: a strategy's win estimate moves toward its real record, with recent months weighing more (6-month half-life).</div>`;
-  const gs = st?.grade_summary, G = P?.grading || {};
-  if (gs && ((gs.aplus?.n || 0) + (gs.topup?.n || 0) + (gs.aplus?.live_n || 0) + (gs.topup?.live_n || 0))) {
-    const row = (name, r) => `<tr><td>${name}</td><td class="n">${rate(r?.wins || 0, r?.n || 0)}</td><td class="n">${r?.n ? pct(100 * (r.avg_ret || 0), 2) : "–"}</td><td class="n">${rate(r?.live_wins || 0, r?.live_n || 0)}</td></tr>`;
-    const rule = G.topups_off ? "Top-ups are switched off: their record fell below the 62% floor." : G.topup_mode === "tight" ? "Top-ups now need the full A+ win estimate: their record trailed A+ by 10 points or more." : `Top-ups need score ${esc(G.topup_floor ?? 72)}+ and a win estimate within 3 points of the A+ bar. After 12 graded top-ups the rule follows their record: under 62% they stop; 10 points behind A+ they need the full A+ bar.`;
-    html += `<div class="panel" style="margin-top:12px"><div class="section-head"><h3>A+ setups vs weekly top-ups</h3><span class="meta">graded separately</span></div>
-      <div class="tbl-wrap"><table><thead><tr><th>Grade</th><th class="n">Graded setups, win rate</th><th class="n">Average result</th><th class="n">Your trades</th></tr></thead><tbody>${row("A+", gs.aplus)}${row("A (weekly top-up)", gs.topup)}</tbody></table></div>
-      <div class="small muted" style="margin-top:6px">${rule}</div></div>`;
-  }
   const sum = st?.summary || {};
   const names = Object.keys(sum).sort((a, b) => (sum[b].all_n || 0) - (sum[a].all_n || 0));
   if (!names.length) {
@@ -1400,6 +1479,7 @@ function ideaCard({ i, r, st }) {
     <div class="small">${esc(i.about || "")}</div>
     ${r && r.train ? `<div class="stats">${stat("Win 2008–21", tr.win_rate != null ? pct(100 * tr.win_rate) : "–")}${stat("Win 2022–now", te.win_rate != null ? pct(100 * te.win_rate) : "–")}${stat("PF 2022–now", te.profit_factor ?? "–")}${stat("Overlap", r.overlap_live != null ? pct(100 * r.overlap_live, 0) : "–")}</div>` : ""}
     <div class="why-box ${st === "candidate" || st === "live" ? "" : "off"}">${esc(r ? r.summary : "Queued: it is tested in an upcoming daily research run.")}</div>
+    ${r?.grade_preview?.aplus ? `<div class="small"><b>By grade (today's model, 2022–now):</b> A+ ${pct(100 * r.grade_preview.aplus.share, 0)} of signals${r.grade_preview.aplus.win_rate != null ? `, won ${pct(100 * r.grade_preview.aplus.win_rate, 0)}` : ""} · top-up band ${pct(100 * r.grade_preview.topup_band.share, 0)}${r.grade_preview.topup_band.win_rate != null ? `, won ${pct(100 * r.grade_preview.topup_band.win_rate, 0)}` : ""} · calm-market days ${r.grade_preview.calm.win_rate != null ? `won ${pct(100 * r.grade_preview.calm.win_rate, 0)}` : "–"}</div>` : ""}
     ${(st === "live" || st === "held") && live?.status_reason ? `<div class="small"><b>Saturday recalibration:</b> ${esc(live.status_reason)}</div>` : ""}
     ${r?.path?.text && !["candidate", "live"].includes(st) ? `<div class="small"><b>What would change the verdict:</b> ${esc(r.path.text)}</div>` : ""}
     <details><summary>Rules${src ? " and source" : ""}</summary><div style="margin-top:6px;display:flex;flex-direction:column;gap:6px"><div class="rules">${esc(r?.rules || i.rules || "")}</div>
@@ -1411,6 +1491,7 @@ function journalEntry(j) {
   const li = (arr) => (arr || []).map((x) => `<li>${esc(x)}</li>`).join("");
   return `<article class="panel" style="display:flex;flex-direction:column;gap:6px"><div class="section-head"><h3>${dShort(j.date)}</h3>
     <span class="meta">Shadow ${j.shadow?.n ? `${pct(100 * j.shadow.win_rate)} of ${esc(j.shadow.n)}` : "–"} · live ${j.live?.n ? `${pct(100 * j.live.win_rate)} of ${esc(j.live.n)}` : "–"}</span></div>
+    ${j.by_grade ? `<div class="small"><b>By grade:</b> ${[["aplus", "A+"], ["topup", "Top-ups"], ["watch", "Watchlist"]].map(([k, l]) => { const r = j.by_grade[k] || {}; return `${l} ${r.n ? `${esc(r.wins)}/${esc(r.n)} (${pct(100 * r.win_rate, 0)})` : "–"}`; }).join(" · ")}</div>` : ""}
     ${Array.isArray(j.issues) && j.issues.length ? `<div class="small" style="color:var(--crit)"><b>Run problems:</b><ul style="margin:2px 0 0;padding-left:18px">${li(j.issues)}</ul></div>` : ""}
     ${j.worked?.length ? `<div class="small"><b>Worked:</b><ul style="margin:2px 0 0;padding-left:18px">${li(j.worked)}</ul></div>` : ""}
     ${j.didnt_work?.length ? `<div class="small"><b>Didn't work:</b><ul style="margin:2px 0 0;padding-left:18px">${li(j.didnt_work)}</ul></div>` : ""}
@@ -1458,7 +1539,7 @@ function fillModal(a) {
     "Save fill", async () => {
       const price = need($("#mPx").value, "Price"), sh = need($("#mSh").value, "Shares");
       const id = "t_" + $("#mDt").value.replace(/-/g, "") + "_" + String(a.ticker).replace(/[^A-Za-z0-9-]/g, "") + "_" + Math.random().toString(36).slice(2, 6);
-      await setDoc("trades/" + id, { id, ticker: a.ticker, name: a.name, strategy: a.strategy, strategy_label: a.strategy_label, alert_id: a.id, status: "open",
+      await setDoc("trades/" + id, { id, ticker: a.ticker, name: a.name, strategy: a.strategy, strategy_label: a.strategy_label, alert_id: a.id, grade_kind: a.topup_note || a.grade_kind === "topup" ? "topup" : "aplus", status: "open",
         entry_price: price, planned_entry: num(a.entry), shares: sh, entry_date: $("#mDt").value, stop: num($("#mSt").value), target: num($("#mTg").value),
         max_hold: Number($("#mHd").value) || a.hold_max_days || 7, dyn_exit: a.dyn_exit || "none", win_pct: num(a.win_pct), score: num(a.score), opened_at: nowIso() });
       await updDoc("alerts/" + a.id, { status: "filled", actual_price: price, actual_shares: sh, done_at: nowIso(), trade_id: id });

@@ -26,6 +26,8 @@ import pandas as pd
 
 from . import backtest as B
 from . import calendar as cal
+from . import learnlog as LL
+from . import model as M
 from . import data as D
 from . import indicators as I
 from . import rules as R
@@ -190,6 +192,72 @@ def search_spec(spec: dict, ind: dict, P: dict, split, log=print) -> dict | None
     return best
 
 
+def grade_preview(tr: pd.DataFrame, P_live: dict, split) -> dict | None:
+    """How an idea's unseen-period (2022-now) setups would grade with today's live model and bars: how many
+    reach A+, how many fall in the weekly top-up band, and how each group did; plus calm vs stressed market
+    days (A+ setups cluster in selloffs, so ideas that win in calm markets are what fills the weekly minimum).
+    Approximate: the live model has no term of its own for a new strategy. The weekly recalibration fits it
+    properly and decides."""
+    pm = (P_live.get("models") or {}).get("_pooled")
+    G = P_live.get("grading") or {}
+    if not (pm and pm.get("kind") == "pooled") or not G.get("aplus_score"):
+        return None
+    o = tr[tr["signal_date"] >= pd.Timestamp(split)]
+    if o.empty or any(c not in o for c in S.FEATURES):
+        return None
+    p_, e_, ep_ = M.predict_pooled(pm, o[S.FEATURES], ["__new__"] * len(o))
+    o = o.assign(p=p_, score=M.score_pooled(p_, ep_))
+    ap = (o["score"] >= float(G["aplus_score"])) & (o["p"] >= float(G["aplus_pwin"]))
+    band = ~ap & (o["score"] >= float(G.get("topup_floor", float(G["aplus_score"]) - 8))) & (o["p"] >= float(G.get("topup_pwin", 0)))
+    stress = pd.Series([LL.stressed({"vix_ratio": v, "spy_ret5": r}) for v, r in zip(o["vix_ratio"], o["spy_ret5"])], index=o.index)
+
+    def grp(mask):
+        f = o[mask & o["filled"] & o["ret"].notna()]
+        return {"signals": int(mask.sum()), "share": round(float(mask.mean()), 4) if len(o) else 0.0, "trades": int(len(f)),
+                "win_rate": round(float((f["ret"] > 0).mean()), 4) if len(f) else None,
+                "avg_ret": round(float(f["ret"].mean()), 5) if len(f) else None}
+    return {"aplus": grp(ap), "topup_band": grp(band), "below_bars": grp(~ap & ~band), "calm": grp(~stress),
+            "stressed": grp(stress), "bars": {k: G.get(k) for k in ("aplus_score", "aplus_pwin", "topup_floor", "topup_pwin")},
+            "tested_topup_win": G.get("oos_topup_win_rate"), "tested_aplus_win": G.get("oos_aplus_win_rate")}
+
+
+def preview_sentence(gp: dict | None) -> str:
+    if not gp:
+        return ""
+    a, t, c = gp["aplus"], gp["topup_band"], gp["calm"]
+
+    def w(x):
+        return f"won {100 * x['win_rate']:.0f}%" if x.get("win_rate") is not None else "none filled"
+    return (f" Graded with today's model: {100 * a['share']:.0f}% of its 2022-now signals reach A+ ({w(a)}), "
+            f"{100 * t['share']:.0f}% fall in the weekly top-up band ({w(t)}); on calm-market days its setups {w(c)}.")
+
+
+def research_focus(state_dir) -> dict | None:
+    """What the desk needs most from new strategies right now, from the live grades and their records."""
+    try:
+        st = load_state(state_dir)
+    except Exception:
+        return None
+    pd_ = st.get("params_doc") or {}
+    G = (pd_.get("params") or pd_).get("grading") or {}
+    mn = int((st.get("settings") or {}).get("min_setups_week", 5))
+    calm_hint = ("rules-based long setups that fire in calm or rising markets, when A+ setups are scarce, and still win 70%+ "
+                 "(for example pullbacks in strong uptrends, relative-strength leaders resting on support, quiet-market ETF "
+                 "mean reversion, continuation after strong earnings); check the test's calm-market win rate and top-up band")
+    if G.get("aplus_watch"):
+        return {"grade": "aplus", "why": (G["aplus_watch"] or {}).get("note", "A+ setups trail their test."),
+                "look_for": "high-win-rate ideas for market selloffs and sharp dips (where A+ setups come from) that would "
+                            "raise the A+ set's win rate"}
+    if G.get("topup_ok") is False or G.get("topup_mode") in ("tight", "off"):
+        return {"grade": "topup", "why": "the weekly top-ups are the weak grade right now (their own record or test fell "
+                                         "below the bar)", "look_for": calm_hint}
+    cov, ap = G.get("oos_weeks_at_min"), G.get("oos_weeks_at_min_aplus_only")
+    if cov is not None and float(cov) < 0.6:
+        return {"grade": "topup", "why": (f"only {100 * float(cov):.0f}% of weeks reach the {mn}-setup minimum with setups "
+                                          f"that clear the bars (A+ alone {100 * float(ap or 0):.0f}%)"), "look_for": calm_hint}
+    return None
+
+
 def _compact(st: dict) -> dict:
     return {k: st.get(k) for k in STAT_KEYS if k in st}
 
@@ -266,6 +334,12 @@ def evaluate_spec(spec: dict, ind: dict, P: dict, P_live: dict, split, now, by="
                 bits.append(f"{c['label'].lower()} {v} (needs {c['need']})")
         verdict = "watch" if near else "rejected"
         summary = ("Watch: close to the bar but not there: " if near else "Rejected: ") + "; ".join(bits[:4]) + "."
+    try:
+        gp = grade_preview(tr, P_live, split)
+    except Exception as ex:  # the preview is a guide, never a reason to lose a test
+        gp = {"error": repr(ex)[:200]}
+    if gp and "error" not in gp:
+        summary += preview_sentence(gp)
     variant = res["variant"]
     path = None
     if verdict != "candidate":
@@ -274,7 +348,7 @@ def evaluate_spec(spec: dict, ind: dict, P: dict, P_live: dict, split, now, by="
     doc = {**base, "verdict": verdict, "summary": summary, "path": path, "checks": checks + q, "live_rule_ok": bool(ok_live),
            "live_reason": live_reason, "variant": variant, "rules": R.describe({**spec, "params": variant, "grid": {}}),
            "train": _compact(st_train), "oos": _compact(st_test), "overlap_live": round(overlap, 3),
-           "oos_signals_per_week": round(per_week, 2),
+           "oos_signals_per_week": round(per_week, 2), "grade_preview": gp,
            "yearly": B.yearly(tr).reset_index().to_dict("records")[-20:],
            "grid_tried": len(res["tried"]), "runtime_s": round(time.time() - t0, 1)}
     return doc
@@ -334,6 +408,9 @@ def cmd_next(state_dir, out_dir):
                    similar=similar_ideas(sp, ideas))
     families = sorted({str(d.get("family", "")).split("/")[0].strip() for d in ideas.values()} - {""})
     res["families_covered"] = families
+    focus = research_focus(state_dir)
+    if focus:
+        res["focus"] = focus  # when designing a new idea, serve this first
     (out / "next.json").write_text(json.dumps(res, indent=1))
     print(json.dumps(res, indent=1))
 

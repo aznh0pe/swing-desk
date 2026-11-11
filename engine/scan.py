@@ -145,6 +145,7 @@ def exit_signal_text(plan_name, sp, dyn, target, stop, hold, earnings_next):
     return " ".join(parts)
 
 
+TOPUP_STATE: dict = {}  # how far the week is behind pace and what the top-up rule did, from the last build_entries call
 HELD_SECTORS: dict = {}  # open positions per sector bucket from the last build_entries call (saved in ctx)
 
 
@@ -254,18 +255,32 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
     wmin = week_min(settings)
     pace = min(wmin, asof.weekday() + 1)  # one more each night: 1 by Monday ... 5 by Friday
     need = max(0, pace - week_so_far - n_aplus) if mode == "postclose" else 0
-    if G.get("topups_off"):  # the daily review stops top-ups when their own record falls under the floor
-        need = 0
+    # the top-up rule is tuned on its own (weekly recalibration, replaying this exact rule) and follows the
+    # top-ups' own live record: normal, tight (must also clear the A+ win estimate) or off
+    tmode = str(G.get("topup_mode") or "normal")
     floor = float(G.get("topup_floor", G.get("aplus_score", 74) - 8))
-    # a top-up may sit up to 3 points under the A+ model bar: in the backtest the score band just under A+
-    # won about as often as A+ (smaller average gain), so it is the honest next-best when A+ is scarce
     top_p = float(G.get("topup_pwin", float(G.get("aplus_pwin", 0.62)) - 0.03))
+    if tmode == "tight":
+        floor = max(floor, float(G.get("aplus_score", 80)) - 8)
+        top_p = max(top_p, float(G.get("aplus_pwin", 0.62)))
+    no_topup = set((G.get("topup_excluded") or {}).keys()) | set((G.get("topup_excluded_live") or {}).keys())
+    off = tmode == "off" or bool(G.get("topups_off")) or G.get("topup_ok") is False
+    TOPUP_STATE.clear()
+    TOPUP_STATE.update(behind=need, pace=pace, week_so_far=week_so_far + n_aplus, floor=floor, top_p=top_p,
+                       mode="off" if off else tmode, ok=G.get("topup_ok", True), sent=0)
+    if off:
+        need = 0
+    tw, tn = G.get("oos_topup_win_rate"), int(G.get("oos_topup_trades") or 0)
     for cd in ranked:
         if need <= 0:
             break
-        if cd["grade"] != "A+" and cd["score"] >= floor and cd["p"] >= top_p:
+        mp = cd.get("model_p", cd["p"])  # the model's own win estimate, as in the backtest replay
+        if cd["grade"] != "A+" and cd["score"] >= floor and mp >= top_p and cd["name"] not in no_topup:
             cd["grade"], cd["topup"] = "A", True
+            if tw and tn:  # shown win %: how this exact top-up rule's picks actually did, not the score band's average
+                cd["p"] = (float(tw) * tn + mp * 30) / (tn + 30)
             need -= 1
+            TOPUP_STATE["sent"] += 1
     out, near = [], []
     cap_left = int(settings.get("max_open_positions", P["risk"]["max_open"])) - f["open_count"]
     cash_left = f["cash"]
@@ -331,11 +346,15 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
             "features": {k: _r(v, 4) for k, v in cd["feats"].items()},
             "partial_bar": bool(partial_bar),
         }
+        doc["grade_kind"] = "topup" if cd.get("topup") else ("aplus" if cd["grade"] == "A+" else "watch")
         if cd.get("topup"):
             doc["grade"] = "A"
-            doc["topup_note"] = ("Weekly top-up: the best grade-A setup, sent because this week is behind its pace of "
-                                 f"{wmin} setups a week (historically grade A wins about as often as A+ "
-                                 "but earns less per trade).")
+            ta, aw = G.get("oos_topup_avg_ret"), G.get("oos_aplus_win_rate")
+            tested = (f" Testing this exact rule on 2022-now data: top-ups won {100 * float(tw):.0f}% of {tn} (average "
+                      f"{100 * float(ta or 0):+.1f}% a trade) vs {100 * float(aw or 0):.0f}% for A+ setups." if tw and tn else "")
+            doc["topup_note"] = (f"Weekly top-up: sent because this week is behind its pace of {wmin} setups a week (one more "
+                                 f"each weekday). It is the best setup below the A+ bar that clears the top-up bar (score "
+                                 f"{floor:.0f}+, model win {100 * top_p:.0f}%+).{tested}")
         doc["sector_key"] = sector_of(cd["ticker"])
         if cd["grade"] == "A+" or cd.get("topup"):
             sc = doc["sector_key"]
@@ -599,6 +618,10 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
         try:
             res = check_trade(t, ind, mode, earnings, premarket, P, partial, close_label)
             if res:
+                al = (state["alerts"].get(t.get("alert_id")) or {}).get("doc") if t.get("alert_id") else None
+                gk = t.get("grade_kind") or (("topup" if al.get("topup_note") else "aplus") if al else None)
+                if gk:
+                    res["grade_kind"] = gk
                 positions.append(res)
         except Exception as e:
             errors.append(f"monitor {t.get('ticker')}: {e!r}"[:200])
@@ -680,9 +703,12 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
                    "days_left": pos["days_left"], "created_at": ts, "scan_id": scan_id}
             _write(out, writes, "set", "alerts", did, doc)
     week_start = today - dt.timedelta(days=today.weekday())
-    week_aplus = sum(1 for v in existing.values() if v["doc"].get("type") == "entry"
-                     and v["doc"].get("grade") == "A+" and str(v["doc"].get("signal_date", "")) >= str(week_start)) \
-        + sum(1 for w_ in writes if w_["collection"] == "alerts" and w_["doc_id"].startswith("e_"))
+    this_week = [v["doc"] for v in existing.values() if v["doc"].get("type") == "entry"
+                 and str(v["doc"].get("signal_date", "")) >= str(week_start)]
+    new_ids = {w_["doc_id"] for w_ in writes if w_["collection"] == "alerts" and w_["doc_id"].startswith("e_")}
+    this_week += [e for e in entries if e.get("id") in new_ids]
+    week_topups = sum(1 for d in this_week if d.get("topup_note"))
+    week_aplus = len(this_week) - week_topups
     scan_doc = {
         "id": scan_id, "mode": mode, "started_at": ts, "status": "ok" if not errors else "ok_with_warnings",
         "data": {**health, "feed_generated_utc": meta.get("generated_utc"),
@@ -695,10 +721,12 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
                                           and (c.get("filled") is None or c.get("touched"))),
                    "orders_unfilled": sum(1 for c in fill_checks if c.get("filled") is False and not c.get("touched")),
                    "open_positions": len(positions), "expired": len(expire), "week_aplus": week_aplus,
+                   "week_topups": week_topups,
                    "new_docs": len(writes)},
         "positions": positions, "near_misses": near[:8], "premarket_checks": pm_checks, "fill_checks": fill_checks[:30],
         "expired_alert_ids": [a for a, _ in expire][:50],
         "params_version": P.get("version"), "errors": errors[:40], "notes": notes, "week_min": week_min(state["settings"]),
+        "topup_pace": dict(TOPUP_STATE) if mode == "postclose" else None,
         "run_issues": ([f"The scanner hit {len(errors)} error(s) and carried on without those items; the first: {errors[0]}"]
                        if errors else []),
         "session_day": str(session_day), "engine": engine_version.info(),
@@ -997,7 +1025,8 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
             lines.append(f"- {p['ticker']}: {TONE_MARK.get(st_.get('tone'), '')}{st_.get('label', 'KEEP HOLDING')}. {st_.get('detail', '')}".rstrip())
             if p.get("last") is None:
                 continue
-            lines.append(f"    {label} | entered {_day(p.get('entry_date'))} at ${p.get('entry')} x {sh} | last ${p['last']} "
+            gk = {"aplus": "A+", "topup": "weekly top-up"}.get(p.get("grade_kind") or "")
+            lines.append(f"    {label}{f' ({gk})' if gk else ''} | entered {_day(p.get('entry_date'))} at ${p.get('entry')} x {sh} | last ${p['last']} "
                          f"| P&L {pnl_mark(p.get('unrealized'))} ({_pct(p['last'], p.get('entry'))}) "
                          f"| day {p.get('day_now') or min(p['days_held'] + day_add, p['max_hold'])} of {p['max_hold']}"
                          f"{f', time stop at the close of {_day(end)}' if end else ''} | stop ${p.get('stop')} | target ${p.get('target')}")
@@ -1028,6 +1057,22 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
         lines += ["", f"No A+ setups tonight (A+ needs score {a_sc}+ and a model win estimate of {a_pw}%+).{why} "
                   "The scan ran normally; A+ setups cluster in market selloffs, and calm days often have none. "
                   "Standing aside is a position."]
+    tp = scan.get("topup_pace") or {}
+    if tp.get("behind"):
+        added = int(tp.get("sent") or 0)
+        short = int(tp["behind"]) - added
+        rule = f"score {tp.get('floor', 0):.0f}+ and a model win estimate of {100 * float(tp.get('top_p') or 0):.0f}%+"
+        if not tp.get("ok", True) or tp.get("mode") == "off":
+            msg = ("Weekly top-ups are switched off right now (their own record or test fell below the bar), so the week stays "
+                   f"{short} setup(s) behind its pace of {tp.get('pace')} by tonight.")
+        elif short > 0:
+            msg = (f"This week is {short} setup(s) behind its pace of {tp.get('pace')} by tonight"
+                   + (f" after {added} weekly top-up(s)" if added else "")
+                   + f". No other setup cleared the top-up bar ({rule}{'; tightened because the top-ups trail their test' if tp.get('mode') == 'tight' else ''}). "
+                   "Win rate comes first: setups below that bar won clearly less often in testing, so none was forced.")
+        else:
+            msg = f"{added} weekly top-up(s) added to keep the week on its pace of {tp.get('pace')} by tonight (top-up bar: {rule})."
+        lines += ["", msg]
     if near and (week_aplus < int(scan.get("week_min") or WEEK_MIN)):
         G = P.get("grading") or {}
         a_sc, a_pw = G.get("aplus_score", 80), round(100 * float(G.get("aplus_pwin", 0.72)))
@@ -1039,7 +1084,9 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
             lines.append(f"- {e['ticker']} {e['strategy_label']}: score {e['score']}, win {e['win_pct']}%, "
                          f"limit ${e['entry']}, stop ${e['stop']}, target ${e['target']}"
                          + (f" | not A+: {' and '.join(short)}" if short else ""))
-    lines += ["", f"A+ setups this week: {week_aplus}"]
+    wt = int((scan.get("counts") or {}).get("week_topups") or 0)
+    lines += ["", f"This week so far: {week_aplus} A+ setup{'s' if week_aplus != 1 else ''}"
+              + f", {wt} weekly top-up{'s' if wt != 1 else ''} (weekly minimum {int(scan.get('week_min') or WEEK_MIN)}, never a ceiling)"]
     eng = scan.get("engine") or {}
     if eng.get("fingerprint"):
         lines.append(f"Scanner version {eng['fingerprint']}")
@@ -1051,7 +1098,7 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
 def setup_block(e: dict, rank) -> list[str]:
     """Everything needed to place and manage one setup, one labelled line per item."""
     head = f"{rank}. " if rank else "- "
-    grade = e.get("grade", "A+") + (" (weekly top-up)" if e.get("topup_note") else "")
+    grade = "Weekly top-up (below A+)" if e.get("topup_note") else e.get("grade", "A+")
     out = ["", f"{head}{e['ticker']} | {e['name']} | {e['strategy_label']} | {grade} | score {e['score']} | win est. {e['win_pct']}%"
                 f" | exp. {e.get('exp_return_pct', '')}% per trade"]
     frac = " (FRACTIONAL: market hours only)" if e.get("fractional") else ""
@@ -1073,6 +1120,8 @@ def setup_block(e: dict, rank) -> list[str]:
         out.append(f"   NEWS     {e['news_check']}" + (f" · {e['news_note']}" if e.get("news_note") else ""))
     else:
         out.append("   NEWS     pending (the news check fills this in before the email goes out)")
+    if e.get("topup_note"):
+        out.append(f"   TOP-UP   {e['topup_note']}")
     if e.get("capacity_note"):
         out.append(f"   NOTE     {e['capacity_note']}")
     if e.get("size_note"):

@@ -195,7 +195,7 @@ def _aplus_window(tr_all: pd.DataFrame, sc: int, pw: float, min_week: int) -> di
             "window": [str(tr_all["signal_date"].min().date()), str(tr_all["signal_date"].max().date())]}
 
 
-def _select_cutoffs(sig: pd.DataFrame, min_week: int):
+def _select_cutoffs(sig: pd.DataFrame, min_week: int, prefer_win: bool = False):
     """The (score, win-odds) bar with the highest filled-trade win rate whose average trade is at least
     +0.6% and that still produces enough setups a week across the universe; None if nothing clears it."""
     t = sig[sig["ret"].notna() & sig["filled"]]
@@ -224,10 +224,155 @@ def _select_cutoffs(sig: pd.DataFrame, min_week: int):
     # adjacent score bands are statistically indistinguishable, so among cut-offs within 1.2 points
     # of the best win rate (and 85% of its average trade) take the one that covers the most weeks
     near = [c for c in cands if c[0] >= top_wr - 0.012 and c[1] >= 0.85 * top_avg] or cands
+    if prefer_win:  # A+ is on watch (its live record trails the test): take the strictest of the near-best bars
+        return max(near, key=lambda c: (c[0], c[2], c[3]))
     return max(near, key=lambda c: (c[6], c[0]))
 
 
-def calibrate_grades(all_tr: pd.DataFrame, split, min_week=3, cal_end=CAL_END) -> dict:
+# ----------------------------------------------------------------------------- weekly top-ups
+TOPUP_MIN_TRADES = 150   # filled top-ups 2022-now before a top-up rule can be chosen
+TOPUP_MIN_AVG = 0.004    # their average trade must clear +0.4%
+TOPUP_MIN_PF = 1.25      # and their profit factor 1.25
+TOPUP_STRAT_MIN = 30     # top-ups of one strategy before its own result counts
+TOPUP_STRAT_PRIOR = 20
+
+
+def _one_per_ticker(sig: pd.DataFrame) -> pd.DataFrame:
+    """One setup per ticker and day, the best-scored, as the scanner sends them."""
+    return sig.sort_values(["score", "p"], ascending=False).drop_duplicates(["signal_date", "ticker"])
+
+
+def simulate_topups(s: pd.DataFrame, sc: float, pw: float, floor: float, tpw: float, min_week: int,
+                    excluded=()) -> tuple[pd.DataFrame, pd.Series]:
+    """Replays the scanner's weekly top-up rule day by day. Every A+ setup counts first; when the week is
+    behind its pace (one more setup each weekday, up to min_week), the best-scored setups below the A+ bar
+    with score >= floor and model win >= tpw are added (strategies in `excluded` never top up).
+    s: one row per signal day and ticker (see _one_per_ticker). Returns (top-ups sent, setups per week)."""
+    ap = (s["score"] >= sc) & (s["p"] >= pw)
+    n_ap = s.loc[ap].groupby("signal_date").size()
+    band = s[~ap & (s["score"] >= floor) & (s["p"] >= tpw)]
+    if len(excluded):
+        band = band[~band["strategy"].isin(list(excluded))]
+    groups = {d: g for d, g in band.groupby("signal_date", sort=False)}
+    picks, weeks, so_far, cur = [], {}, 0, None
+    for d in sorted(s["signal_date"].unique()):
+        d = pd.Timestamp(d)
+        wk = d - pd.Timedelta(days=d.weekday())
+        if wk != cur:
+            cur, so_far = wk, 0
+        na = int(n_ap.get(d, 0))
+        need = max(0, min(min_week, d.weekday() + 1) - so_far - na)
+        k = 0
+        if need and d in groups:
+            g = groups[d].head(need)
+            picks.append(g)
+            k = len(g)
+        so_far += na + k
+        weeks[wk] = so_far
+    pk = pd.concat(picks) if picks else s.iloc[0:0]
+    return pk, pd.Series(weeks, dtype=float)
+
+
+def _trade_stats(df: pd.DataFrame) -> dict:
+    f = df[df["filled"] & df["ret"].notna()]
+    if not len(f):
+        return {"trades": 0, "win_rate": None, "avg_ret": None, "profit_factor": None}
+    w = f["ret"] > 0
+    gl = -f.loc[~w, "ret"].sum()
+    return {"trades": int(len(f)), "win_rate": round(float(w.mean()), 4), "avg_ret": round(float(f["ret"].mean()), 5),
+            "profit_factor": round(float(f.loc[w, "ret"].sum() / gl), 2) if gl > 0 else None}
+
+
+def _choose_topup_rule(s: pd.DataFrame, sc: float, pw: float, min_week: int, min_trades: int = TOPUP_MIN_TRADES):
+    """The top-up bar with the highest win rate among rules whose replayed top-ups clear the trade-count,
+    average-trade and profit-factor floors; among rules within 1.5 points of the best, the one that keeps
+    the most weeks at the minimum. None if no rule clears the floors."""
+    cands = []
+    for floor in range(max(40, int(sc) - 24), int(sc), 2):
+        for tpw in sorted({round(max(0.5, pw - d), 2) for d in (0.08, 0.06, 0.04, 0.02, 0.0)}):
+            pk, wk = simulate_topups(s, sc, pw, floor, tpw, min_week)
+            st = _trade_stats(pk)
+            if st["trades"] < min_trades or st["avg_ret"] < TOPUP_MIN_AVG or (st["profit_factor"] or 0) < TOPUP_MIN_PF:
+                continue
+            cands.append((st["win_rate"], float((wk >= min_week).mean()) if len(wk) else 0.0, floor, tpw, st, pk, wk))
+    if not cands:
+        return None
+    top = max(c[0] for c in cands)
+    near = [c for c in cands if c[0] >= top - 0.015]
+    return max(near, key=lambda c: (c[1], c[0]))
+
+
+def _topup_exclusions(pk: pd.DataFrame, wr: float) -> dict:
+    out = {}
+    for name, g in pk.groupby("strategy"):
+        st = _trade_stats(g)
+        n = st["trades"]
+        if n < TOPUP_STRAT_MIN:
+            continue
+        shr = (st["win_rate"] * n + wr * TOPUP_STRAT_PRIOR) / (n + TOPUP_STRAT_PRIOR)
+        if shr < wr - 0.04 or (st["profit_factor"] or 0) < 1.0:
+            out[name] = (f"its top-ups won {100 * st['win_rate']:.0f}% of {n} on 2022-now data (profit factor "
+                         f"{st['profit_factor']}) vs {100 * wr:.0f}% for all top-ups; it can still send A+ setups")
+    return out
+
+
+def calibrate_topups(post: pd.DataFrame, sc: float, pw: float, min_week: int = 5, cal_end=CAL_END) -> dict:
+    """The weekly top-ups, tested and tuned on their own: replays the exact weekly rule on 2022-now signals,
+    picks the top-up bar, drops strategies whose own top-ups trail, and reports the result by year, by
+    strategy and on the two halves of the window (bar chosen on the first half, measured on the second)."""
+    if post.empty:
+        return {"topup_ok": False, "topup_min_week": min_week, "topup_note": "No signals to test top-ups on."}
+    s = _one_per_ticker(post if "strategy" in post else post.assign(strategy="?"))
+    best = _choose_topup_rule(s, sc, pw, min_week)
+    _, wk_ap = simulate_topups(s, sc, pw, 999, 9.0, min_week)
+    ap_cover = round(float((wk_ap >= min_week).mean()), 3) if len(wk_ap) else None
+    if best is None:
+        return {"topup_ok": False, "topup_min_week": min_week, "oos_weeks_at_min_aplus_only": ap_cover,
+                "topup_floor": int(sc) - 8, "topup_pwin": round(pw - 0.03, 2), "topup_excluded": {},
+                "topup_note": (f"No top-up rule cleared the floors on 2022-now data (at least {TOPUP_MIN_TRADES} trades, "
+                               f"average above +{100 * TOPUP_MIN_AVG:.1f}%, profit factor {TOPUP_MIN_PF}), so top-ups are off "
+                               "until a recalibration finds one.")}
+    wr, cover, floor, tpw, st, pk, wk = best
+    # strategies whose own top-ups trail send none; removing one changes the picks, so check again (3 rounds at most)
+    excl, cover0 = {}, cover
+    for _ in range(3):
+        more = {n: why for n, why in _topup_exclusions(pk, st["win_rate"]).items() if n not in excl}
+        if not more:
+            break
+        trial = {**excl, **more}
+        pk2, wk2 = simulate_topups(s, sc, pw, floor, tpw, min_week, excluded=list(trial))
+        st2 = _trade_stats(pk2)
+        c2 = float((wk2 >= min_week).mean()) if len(wk2) else 0.0
+        if st2["trades"] < TOPUP_MIN_TRADES or st2["win_rate"] < st["win_rate"] or c2 < cover0 - 0.05:
+            break
+        excl, pk, wk, st, cover = trial, pk2, wk2, st2, c2
+    weeks = max(1, len(wk))
+    by_year = [{"year": int(y), **_trade_stats(g)} for y, g in pk.groupby(pk["signal_date"].dt.year)]
+    by_strategy = {n: _trade_stats(g) for n, g in pk.groupby("strategy")}
+    out = {"topup_ok": True, "topup_floor": int(floor), "topup_pwin": float(tpw), "topup_excluded": excl,
+           "topup_min_week": min_week, "oos_topup_win_rate": st["win_rate"], "oos_topup_avg_ret": st["avg_ret"],
+           "oos_topup_pf": st["profit_factor"], "oos_topup_trades": st["trades"],
+           "oos_topup_sent_per_week": round(len(pk) / weeks, 2), "oos_weeks_at_min": round(cover, 3),
+           "oos_weeks_at_min_aplus_only": ap_cover, "topup_by_year": by_year, "topup_by_strategy": by_strategy,
+           "topup_note": ""}
+    if cal_end is not None:
+        ce = pd.Timestamp(cal_end)
+        se, sl = s[s["signal_date"] < ce], s[s["signal_date"] >= ce]
+        if len(se) and len(sl):
+            ts = {"chosen_rule_early": _trade_stats(simulate_topups(se, sc, pw, floor, tpw, min_week, list(excl))[0]),
+                  "chosen_rule_late": _trade_stats(simulate_topups(sl, sc, pw, floor, tpw, min_week, list(excl))[0]),
+                  "window_early": [str(se["signal_date"].min().date()), str((ce - pd.Timedelta(days=1)).date())],
+                  "window_late": [str(ce.date()), str(sl["signal_date"].max().date())]}
+            eb = _choose_topup_rule(se, sc, pw, min_week, min_trades=60)
+            if eb is not None:
+                ts["early_selection"] = {"topup_floor": int(eb[2]), "topup_pwin": float(eb[3]), **eb[4]}
+                ts["early_rule_on_late"] = _trade_stats(simulate_topups(sl, sc, pw, eb[2], eb[3], min_week)[0])
+            out["topup_time_split"] = ts
+    return out
+
+
+def calibrate_grades(all_tr: pd.DataFrame, split, min_week=3, cal_end=CAL_END, topup_min_week=5,
+                     prefer_win=False) -> dict:
     """Pick A+ cut-offs on the post-split trades (2022-now): the highest win rate whose average trade is at
     least +0.6% and that still produces enough setups per week across the universe.
 
@@ -237,7 +382,7 @@ def calibrate_grades(all_tr: pd.DataFrame, split, min_week=3, cal_end=CAL_END) -
     which it never saw. Both are stored so the dashboard and the journal can show them."""
     post = all_tr[all_tr["signal_date"] >= split]
     fallback = {"aplus_score": 70, "aplus_pwin": 0.66, "min_week": min_week, "note": "fallback cut-offs"}
-    best = _select_cutoffs(post, min_week)
+    best = _select_cutoffs(post, min_week, prefer_win)
     if best is None:
         return fallback
     wr, avg, sc, pw, per_week, n, cover = best
@@ -257,7 +402,7 @@ def calibrate_grades(all_tr: pd.DataFrame, split, min_week=3, cal_end=CAL_END) -
            "oos_aplus_win_rate": round(wr, 4), "oos_aplus_avg_ret": round(float(avg), 5),
            "oos_aplus_trades": int(n), "oos_aplus_signals_per_week": round(float(per_week), 1),
            "oos_weeks_with_min_setups": round(cover, 3), "score_win_table": table,
-           "topup_floor": max(40, sc - 8), "by_year": by_year,
+           "by_year": by_year, "aplus_bar_rule": "strictest near-best bar (A+ on watch)" if prefer_win else "near-best bar covering most weeks",
            "oos_window": [str(post["signal_date"].min().date()), str(post["signal_date"].max().date())]}
     if cal_end is not None:
         cal_end = pd.Timestamp(cal_end)
@@ -276,6 +421,7 @@ def calibrate_grades(all_tr: pd.DataFrame, split, min_week=3, cal_end=CAL_END) -
                                          "avg_ret": round(float(e_avg), 5)}
                 ts["early_bar_on_late"] = _aplus_window(late, e_sc, e_pw, min_week)
             out["time_split"] = ts
+    out.update(calibrate_topups(post, sc, pw, topup_min_week, cal_end))
     return out
 
 
@@ -298,6 +444,14 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
     log(f"indicators done in {time.time() - t0:.0f}s")
     P = S.params_with_defaults(None)
     pre_changes = []
+    # the desk's weekly minimum (top-ups are replayed against it) and whether A+ is on watch
+    desk_min, prefer_win = 5, False
+    if merge_state:
+        try:
+            desk_min = int((load_state(merge_state).get("settings") or {}).get("min_setups_week", 5))
+        except Exception:
+            desk_min = 5
+        prefer_win = bool((oldP.get("grading") or {}).get("aplus_watch"))
     if merge_state:  # learn from real fills: stop slippage worse than assumed -> backtest with yours
         try:
             lp = ((load_state(merge_state).get("learning") or {}).get("portfolio") or {}).get("doc") or {}
@@ -415,7 +569,7 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
             except Exception as ex:  # keep the per-strategy scores if the pooled fit fails
                 log(f"pooled model failed: {ex!r}")
                 pm_ = None
-            return en_, pm_, calibrate_grades(en_, split, cal_end=cal_end)
+            return en_, pm_, calibrate_grades(en_, split, cal_end=cal_end, topup_min_week=desk_min, prefer_win=prefer_win)
 
         en, pm, G = fit_and_grade(enabled_names)
         # research strategies must earn their place inside the A+ set, not just pass on their own
@@ -439,10 +593,14 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
                                   and float(G.get("oos_aplus_avg_ret") or 0) >= float(G0.get("oos_aplus_avg_ret") or 0) - 0.0005
                                   and float(G.get("oos_aplus_signals_per_week") or 0) >= 0.8 * float(G0.get("oos_aplus_signals_per_week") or 0))
             drop = research_on if not better else weak
-            gate = {"with_research": {k: G.get(k) for k in ("aplus_score", "aplus_pwin", "oos_aplus_win_rate", "oos_aplus_avg_ret",
-                                                             "oos_aplus_trades", "oos_aplus_signals_per_week", "oos_weeks_with_min_setups")},
-                    "without_research": {k: G0.get(k) for k in ("aplus_score", "aplus_pwin", "oos_aplus_win_rate", "oos_aplus_avg_ret",
-                                                                 "oos_aplus_trades", "oos_aplus_signals_per_week", "oos_weeks_with_min_setups")},
+            gkeys = ("aplus_score", "aplus_pwin", "oos_aplus_win_rate", "oos_aplus_avg_ret", "oos_aplus_trades",
+                     "oos_aplus_signals_per_week", "oos_weeks_with_min_setups", "topup_floor", "topup_pwin",
+                     "oos_topup_win_rate", "oos_topup_avg_ret", "oos_topup_trades", "oos_weeks_at_min")
+            for n in research_on:  # each research strategy's own top-ups, judged apart from its A+ setups
+                tb = (G.get("topup_by_strategy") or {}).get(n) or {}
+                per[n].update(topup_trades_oos=tb.get("trades", 0), topup_win_oos=tb.get("win_rate"),
+                              topup_avg_oos=tb.get("avg_ret"), topup_excluded=n in (G.get("topup_excluded") or {}))
+            gate = {"with_research": {k: G.get(k) for k in gkeys}, "without_research": {k: G0.get(k) for k in gkeys},
                     "per_strategy": per, "dropped": drop}
             for n in drop:
                 pn = per.get(n) or {}
@@ -498,15 +656,35 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
             if d.get("verdict") == "candidate":
                 changes.append(f"Research idea {d.get('label')} became a candidate on this week's data.")
     if merge_state:
-        try:  # the top-up rule follows the live record of top-ups, whatever this week's backtest chose for A+
+        try:  # each grade's own live record, on top of this week's test
             from . import learnlog as LL_
             st_ = ((load_state(merge_state).get("learning") or {}).get("stats") or {}).get("doc")
             pol = LL_.topup_policy(st_, P["grading"])
-            P["grading"].update({"topup_mode": pol["mode"], "topup_pwin": pol["topup_pwin"], "topups_off": pol["topups_off"]})
+            ex_live = LL_.topup_strategy_exclusions(st_, P["grading"])
+            aw = LL_.aplus_watch(st_, P["grading"])
+            P["grading"].update(topup_mode=pol["mode"], topup_excluded_live=ex_live)
+            if aw:
+                P["grading"]["aplus_watch"] = aw
+            else:
+                P["grading"].pop("aplus_watch", None)
             if pol["note"]:
                 changes.append(pol["note"])
+            for n_, why_ in ex_live.items():
+                changes.append(f"{S.meta(n_, P)['label']} sends no top-ups for now: {why_}.")
+            if aw:
+                changes.append(aw["note"])
         except Exception as ex:
-            log(f"top-up record unavailable: {ex!r}")
+            log(f"grade records unavailable: {ex!r}")
+        og_, ng_ = oldP.get("grading") or {}, P["grading"]
+        if ng_.get("topup_ok") is False:
+            changes.append(ng_.get("topup_note") or "Weekly top-ups are off: no top-up rule cleared the floors.")
+        elif (og_.get("topup_floor"), og_.get("topup_pwin")) != (ng_.get("topup_floor"), ng_.get("topup_pwin")):
+            changes.append(f"Weekly top-up bar: score {og_.get('topup_floor')} -> {ng_.get('topup_floor')}, model win "
+                           f"{og_.get('topup_pwin', '-')} -> {ng_.get('topup_pwin')} (replayed top-ups won "
+                           f"{100 * (ng_.get('oos_topup_win_rate') or 0):.1f}% of {ng_.get('oos_topup_trades')} on 2022-now data).")
+        if set(og_.get("topup_excluded") or {}) != set(ng_.get("topup_excluded") or {}):
+            changes.append("Strategies that send no top-ups (their own top-ups trailed on 2022-now data): "
+                           + (", ".join(S.meta(n_, P)["label"] for n_ in ng_.get("topup_excluded") or {}) or "none") + ".")
         if oldP.get("live_adjust"):
             P["live_adjust"] = oldP["live_adjust"]  # keep what live trading has taught us
         for k in ("risk",):
@@ -621,6 +799,74 @@ def shadow_outcome(a: dict, ind: dict) -> dict:
     return {**res, "status": "open", "fill": fill, "last": C[-1], "held": held}
 
 
+def run_topups(data_dir, state_dir, out_dir, split="2022-01-01", log=print, now=None) -> dict:
+    """Re-tunes the weekly top-ups between recalibrations, with the live strategies and the live model:
+    replays every live strategy's signals since 2008 exactly as the scanner scores them, then runs the same
+    top-up calibration as the weekly recalibration and applies each grade's live record. Writes
+    doc_params.json (live params with the new top-up rule, for strategy/params) and topups_report.json."""
+    from .scan import load_params
+    from . import learnlog as LL
+    now = now or cal.now_pt()
+    out = pathlib.Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    state = load_state(state_dir)
+    P = load_params(state, None)
+    pm = (P.get("models") or {}).get("_pooled")
+    if not (pm and pm.get("kind") == "pooled"):
+        raise SystemExit("live params have no pooled model: run the weekly recalibration instead")
+    w = D.load_history(data_dir)
+    ind = I.compute(w, D.load_universe(data_dir))
+    plans = S.all_plans(ind, P)
+    trs = []
+    for name, sp in P["strategies"].items():
+        if not sp.get("enabled", True) or name not in plans:
+            continue
+        tr = B.simulate(plans[name], ind, P, include_unfilled=True)
+        log(f"  {name}: {len(tr)} signals")
+        if not tr.empty:
+            trs.append(tr)
+    t = pd.concat(trs, ignore_index=True)
+    p_, e_, ep_ = M.predict_pooled(pm, t[S.FEATURES], t["strategy"].values)
+    t["p"], t["score"] = p_, M.score_pooled(p_, ep_)
+    post = t[t["signal_date"] >= pd.Timestamp(split)]
+    G = P["grading"]
+    desk_min = int((state.get("settings") or {}).get("min_setups_week", 5))
+    old = {k: G.get(k) for k in ("topup_floor", "topup_pwin", "topup_excluded", "topup_mode", "oos_topup_win_rate")}
+    res = calibrate_topups(post, float(G["aplus_score"]), float(G["aplus_pwin"]), desk_min, CAL_END)
+    ap = _one_per_ticker(post)
+    ap = ap[(ap["score"] >= G["aplus_score"]) & (ap["p"] >= G["aplus_pwin"])]
+    res["aplus_check_live_model"] = {**_trade_stats(ap),  # the A+ bar in the same replay, for comparison
+                                     "by_year": [{"year": int(y), **_trade_stats(g)} for y, g in ap.groupby(ap["signal_date"].dt.year)]}
+    G.update(res)
+    st_ = ((state.get("learning") or {}).get("stats") or {}).get("doc")
+    pol = LL.topup_policy(st_, G)
+    G.update(topup_mode=pol["mode"], topup_excluded_live=LL.topup_strategy_exclusions(st_, G))
+    changes = []
+    if not res.get("topup_ok"):
+        changes.append(res.get("topup_note"))
+    else:
+        changes.append(
+            f"Weekly top-ups re-tuned on their own (live strategies and model, replaying the exact {desk_min}-a-week rule on "
+            f"{res['topup_by_year'][0]['year']}-now signals): bar score {old['topup_floor']} -> {res['topup_floor']}, "
+            f"model win {old['topup_pwin'] if old['topup_pwin'] is not None else 'not set'} -> {res['topup_pwin']:.2f}. "
+            f"Replayed top-ups won {100 * res['oos_topup_win_rate']:.1f}% of {res['oos_topup_trades']} (average "
+            f"{100 * res['oos_topup_avg_ret']:+.2f}%, profit factor {res['oos_topup_pf']}) and kept "
+            f"{100 * res['oos_weeks_at_min']:.0f}% of weeks at {desk_min}+ setups (A+ alone: "
+            f"{100 * (res['oos_weeks_at_min_aplus_only'] or 0):.0f}%).")
+        if res.get("topup_excluded"):
+            changes.append("No top-ups from: " + "; ".join(f"{S.meta(n, P)['label']} ({why})" for n, why in res["topup_excluded"].items()) + ".")
+    if pol["note"]:
+        changes.append(pol["note"])
+    P["version"] = int(time.time())
+    P["updated"] = now.isoformat(timespec="seconds")
+    (out / "doc_params.json").write_text(json.dumps({"params": P, "updated_at": now.isoformat(timespec="seconds"),
+                                                     "changelog_entry": changes}, default=str))
+    (out / "topups_report.json").write_text(json.dumps({"before": old, "after": res, "changes": changes}, indent=1, default=str))
+    return {"changes": changes, "topup_floor": res.get("topup_floor"), "topup_pwin": res.get("topup_pwin"),
+            "win_rate": res.get("oos_topup_win_rate"), "trades": res.get("oos_topup_trades"),
+            "weeks_at_min": res.get("oos_weeks_at_min"), "excluded": list((res.get("topup_excluded") or {}).keys())}
+
+
 def run_learning(data_dir, state_dir, out_dir, now=None) -> dict:
     now = now or cal.now_pt()
     out = pathlib.Path(out_dir)
@@ -643,7 +889,11 @@ def run_learning(data_dir, state_dir, out_dir, now=None) -> dict:
         closed["ret"] = closed["exit_price"].astype(float) / closed["entry_price"].astype(float) - 1
     from . import learnlog as LL
     prev_stats = ((state.get("learning") or {}).get("stats") or {}).get("doc")
-    stats = LL.stats_doc(prev_stats, alerts, shadow, closed_list, len(state["alerts"]) < 1000, now)
+    # the watchlist: next-best setups the scans listed but did not send, graded on paper
+    scans = [v["doc"] for v in (state.get("scans") or {}).values()]
+    watch = LL.watch_from_scans(scans, alerts)
+    wshadow = [shadow_outcome(a, ind) for a in watch]
+    stats = LL.stats_doc(prev_stats, alerts, shadow, closed_list, len(state["alerts"]) < 1000, now, watch, wshadow)
     by = {}
     changes, insights = [], []
     for name in P["strategies"]:
@@ -681,23 +931,58 @@ def run_learning(data_dir, state_dir, out_dir, now=None) -> dict:
                                                           f"{now.date().isoformat()}.")
                 changes.append(f"Paused {S.meta(name, P)['label']}: {wr:.0%} win rate over {n_eff} trades "
                                "is below the 50% floor. It will be re-tested at the weekly recalibration.")
-    # A+ setups and weekly top-ups are graded apart; the top-up rule follows its own record
+    # A+ setups, weekly top-ups and the watchlist are graded apart; each grade's rules follow its own record
     gs = stats.get("grade_summary") or {}
-    journal_grades = {g: {k: v.get(k) for k in ("n", "wins", "win_rate", "avg_ret", "live_n", "live_wins", "weighted_n",
-                                                "weighted_win_rate")} for g, v in gs.items()}
-    tu, apg = gs.get("topup") or {}, gs.get("aplus") or {}
-    if tu.get("n"):
-        insights.append(f"Weekly top-ups (grade A): {tu['wins']} of {tu['n']} graded won ({tu['win_rate']:.0%}, average "
-                        f"{100 * (tu.get('avg_ret') or 0):+.2f}%)"
-                        + (f" vs A+ {apg['wins']} of {apg['n']} ({apg['win_rate']:.0%}, {100 * (apg.get('avg_ret') or 0):+.2f}%)."
-                           if apg.get("n") else ".")
-                        + (f" The rule changes only after {LL.TOPUP_MIN_N} weighted results." if (tu.get("weighted_n") or 0) < LL.TOPUP_MIN_N else ""))
-    pol = LL.topup_policy(stats, P["grading"], now)
     G_ = P["grading"]
-    if (pol["mode"] != G_.get("topup_mode", "keep")) or (pol["mode"] != "keep" and abs(float(G_.get("topup_pwin", 0)) - pol["topup_pwin"]) > 1e-9):
-        was = G_.get("topup_mode", "keep")
-        G_["topup_mode"], G_["topup_pwin"], G_["topups_off"] = pol["mode"], pol["topup_pwin"], pol["topups_off"]
-        changes.append(pol["note"] or f"Weekly top-ups back to the normal rule (were '{was}'): their record recovered.")
+    exp_ap, exp_tu = G_.get("oos_aplus_win_rate"), LL._expected_topup(G_)
+
+    def _line(g, r, tested):
+        if not r.get("n") and not r.get("live_n"):
+            return None
+        bits = [f"{LL.GRADE_LABEL[g]}: {r['wins']} of {r['n']} graded won" + (f" ({r['win_rate']:.0%}, average {100 * (r['avg_ret'] or 0):+.2f}%)" if r.get("n") else "")]
+        if r.get("live_n"):
+            bits.append(f"your trades {r['live_wins']} of {r['live_n']}")
+        if tested:
+            bits.append(f"tested {tested:.0%}")
+        if (r.get("weighted_n") or 0) < (LL.APLUS_MIN_N if g == "aplus" else LL.TOPUP_MIN_N) and g != "watch":
+            bits.append("too few results yet for the record to change the rules")
+        return "; ".join(bits) + "."
+    for g, tested in (("aplus", exp_ap), ("topup", exp_tu if G_.get("topup_ok", True) else None), ("watch", None)):
+        ln = _line(g, gs.get(g) or {}, tested)
+        if ln:
+            insights.append(ln)
+    pol = LL.topup_policy(stats, G_)
+    old_mode = G_.get("topup_mode") if G_.get("topup_mode") in ("normal", "tight", "off") else "normal"
+    if pol["mode"] != old_mode:
+        G_["topup_mode"] = pol["mode"]
+        changes.append(pol["note"] or (f"Weekly top-ups back to their normal rule: their record recovered to "
+                                       f"{(pol['record'] or 0):.0%} over {pol['n']:.0f} weighted results."))
+    ex_live = LL.topup_strategy_exclusions(stats, G_)
+    old_ex = G_.get("topup_excluded_live") or {}
+    if set(ex_live) != set(old_ex):
+        G_["topup_excluded_live"] = ex_live
+        for n_ in set(ex_live) - set(old_ex):
+            changes.append(f"{S.meta(n_, P)['label']} sends no top-ups for now: {ex_live[n_]}.")
+        for n_ in set(old_ex) - set(ex_live):
+            changes.append(f"{S.meta(n_, P)['label']} can send top-ups again: its top-up record recovered.")
+    aw = LL.aplus_watch(stats, G_)
+    if bool(aw) != bool(G_.get("aplus_watch")):
+        if aw:
+            G_["aplus_watch"] = aw
+            changes.append(aw["note"])
+        else:
+            G_.pop("aplus_watch", None)
+            changes.append("A+ record back in line with its test: the A+ watch is lifted.")
+    journal_grades = {g: {k: v for k, v in (gs.get(g) or {}).items() if k not in ("exits",)} for g in LL.GRADES}
+    for g in journal_grades.values():
+        g["by_strategy"] = {n_: {k: r.get(k) for k in ("n", "wins", "win_rate", "avg_ret", "live_n", "live_wins")}
+                            for n_, r in (g.get("by_strategy") or {}).items()}
+    grade_rules = {"aplus_score": G_.get("aplus_score"), "aplus_pwin": G_.get("aplus_pwin"),
+                   "topup_floor": G_.get("topup_floor"), "topup_pwin": G_.get("topup_pwin"),
+                   "topup_mode": G_.get("topup_mode", "normal"), "topup_ok": G_.get("topup_ok", True),
+                   "topup_excluded": sorted((G_.get("topup_excluded") or {}).keys()),
+                   "topup_excluded_live": sorted((G_.get("topup_excluded_live") or {}).keys()),
+                   "aplus_watch": bool(G_.get("aplus_watch")), "tested_aplus": exp_ap, "tested_topup": exp_tu}
     # feature diagnostics on recent shadow results
     if not sh.empty and len(sh) >= 12:
         amap = {a.get("id"): a for a in alerts}
@@ -744,7 +1029,8 @@ def run_learning(data_dir, state_dir, out_dir, now=None) -> dict:
     day = now.date().isoformat()
     journal = {"id": day, "date": day, "created_at": now.isoformat(timespec="seconds"),
                "shadow": agg(sh), "live": agg(closed), "by_strategy": by, "worked": worked,
-               "didnt_work": didnt, "by_grade": journal_grades, "insights": insights or ["No statistically meaningful drift yet."],
+               "didnt_work": didnt, "by_grade": journal_grades, "grade_rules": grade_rules,
+               "insights": insights or ["No statistically meaningful drift yet."],
                "changes": changes or ["No parameter changes today."], "params_version": P.get("version")}
     writes = []
     jid = now.strftime("%Y-%m-%d-%H%M")
@@ -769,7 +1055,7 @@ def run_learning(data_dir, state_dir, out_dir, now=None) -> dict:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["backtest", "learn"])
+    ap.add_argument("cmd", choices=["backtest", "learn", "topups"])
     ap.add_argument("--data", required=True)
     ap.add_argument("--state", default=None)
     ap.add_argument("--out", required=True)
@@ -782,6 +1068,8 @@ def main():
         rep = run_backtest(a.data, a.out, a.split, a.only.split(",") if a.only else None, merge_state=a.merge_state,
                            cal_end=a.cal_end or None)
         print(json.dumps({k: v for k, v in rep.items() if k != "strategies"}, indent=1, default=str))
+    elif a.cmd == "topups":
+        print(json.dumps(run_topups(a.data, a.state, a.out, a.split), indent=1, default=str))
     else:
         print(json.dumps(run_learning(a.data, a.state, a.out), indent=1, default=str))
 
