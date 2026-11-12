@@ -31,7 +31,7 @@ from . import indicators as I
 from . import model as M
 from . import rules as R
 from . import strategies as S
-from .portfolio import load_state
+from .portfolio import load_collection, load_state
 
 GRIDS = {
     "MR_STRETCH": {
@@ -306,6 +306,8 @@ def simulate_topups(s: pd.DataFrame, sc: float, pw: float, floor: float, tpw: fl
     band = s[~ap & (s["score"] >= floor) & (s["p"] >= tpw)]
     if len(excluded):
         band = band[~band["strategy"].isin(list(excluded))]
+    if "entry_close" in band.columns:  # buy-at-the-close setups come from the pre-close scan, which never tops up
+        band = band[~band["entry_close"].fillna(False).astype(bool)]
     groups = {d: g for d, g in band.groupby("signal_date", sort=False)}
     picks, weeks, so_far, cur = [], {}, 0, None
     for d in sorted(s["signal_date"].unique()):
@@ -324,6 +326,14 @@ def simulate_topups(s: pd.DataFrame, sc: float, pw: float, floor: float, tpw: fl
         weeks[wk] = so_far
     pk = pd.concat(picks) if picks else s.iloc[0:0]
     return pk, pd.Series(weeks, dtype=float)
+
+
+def mark_entry(t: pd.DataFrame, P: dict) -> pd.DataFrame:
+    """Flags setups bought at the close (sent by the pre-close scan, so never a weekly top-up)."""
+    if t.empty or "strategy" not in t:
+        return t
+    close = {n for n, sp in (P.get("strategies") or {}).items() if (sp or {}).get("entry_kind") == "close"}
+    return t.assign(entry_close=t["strategy"].isin(close).values)
 
 
 def _trade_stats(df: pd.DataFrame) -> dict:
@@ -662,9 +672,18 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
         tr = tr.assign(p=M.predict(train_only, feats))
         rr = ((tr["target"] - tr["fill"]) / (tr["fill"] - tr["stop"])).where(tr["filled"],
               (tr["target"] - tr["limit"]) / (tr["limit"] - tr["stop"]))
-        tr = tr.assign(score=M.score(tr["p"].values, feats, train_only, rr.fillna(1).values))
+        tr = tr.assign(score=M.score(tr["p"].values, feats, train_only, rr.fillna(1).values),
+                       entry_close=(P["strategies"][name].get("entry_kind") == "close"))
         pooled.append(tr)
         enabled, checks, reason = S.enable_checks(st_train, st_test)
+        graded = bool(spec is not None and spec.get("graded"))
+        if graded and not enabled and all(c["ok"] for c in checks if c["key"] in ("train_win", "oos_pf", "oos_decay")):
+            # judged on its graded setups (research.GRADED): the research gate below replays the desk with and
+            # without it and keeps it only if the win rates hold and the account grows faster
+            enabled = True
+            reason = ("Active on its graded setups: its raw signals win often but with small gains, so only the ones that "
+                      "clear the A+ or weekly top-up bar are ever sent; every Saturday the desk is replayed with and without "
+                      "it, and it stays only if the win rates hold and the account grows faster.")
         oos_weeks = max(1.0, (ind["close"].index[-1] - split).days / 7.0)
         # honest per-strategy figures for display and the learning loop: out-of-sample
         if st_test.get("trades", 0) >= 100:
@@ -681,7 +700,7 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
         if spec is not None:
             rec.update(custom=True, about=spec.get("about"), source=spec.get("source"),
                        rules=R.describe({**spec, "params": res["variant"], "grid": {}}),
-                       market_conditions=list(spec.get("market_conditions") or []) or None)
+                       market_conditions=list(spec.get("market_conditions") or []) or None, graded=graded)
         report["strategies"][name] = rec
         log(f"  {name}: train win {st_train.get('win_rate')} avg {st_train.get('avg_ret')} PF "
             f"{st_train.get('profit_factor')} | OOS win {st_test.get('win_rate')} avg {st_test.get('avg_ret')} "
@@ -768,7 +787,32 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
             better = (not G0) or (a_win >= float(G0.get("oos_aplus_win_rate") or 0) - 0.005
                                   and float(G.get("oos_aplus_avg_ret") or 0) >= float(G0.get("oos_aplus_avg_ret") or 0) - 0.0005
                                   and float(G.get("oos_aplus_signals_per_week") or 0) >= 0.8 * float(G0.get("oos_aplus_signals_per_week") or 0))
-            drop = research_on if not better else weak
+            drop = research_on if not better else list(weak)
+            # graded research strategies: replay the desk recalibrated with and without each one (its raw signals are
+            # weak by design, so only the setups it would actually send, and what they do to the account, count)
+            graded_why = {}
+            g_on = [n for n in research_on if n not in drop
+                    and (((P.get("custom") or {}).get(n) or {}).get("spec") or {}).get("graded")]
+            if g_on:
+                names_now = [n for n in enabled_names if n not in drop]
+                en_w, _, G_w = (en, pm, G) if not drop else fit_and_grade(names_now)
+                for n in g_on:
+                    try:
+                        en_x, _, G_x = fit_and_grade([m for m in names_now if m != n])
+                        rw = desk_replay(en_w[en_w["signal_date"] >= split], G_w, desk_min, acct)
+                        rx = desk_replay(en_x[en_x["signal_date"] >= split], G_x, desk_min, acct)
+                        ok_g, ch_g = promote_gate(rx, rw, n)
+                    except Exception as ex:  # can't show it helps: it doesn't trade
+                        ok_g, ch_g = False, [{"key": "error", "label": f"replay failed: {ex!r}"[:200], "ok": False}]
+                    per[n]["graded_gate"] = {"ok": ok_g, "checks": ch_g}
+                    log(f"  graded gate {n}: {'kept' if ok_g else 'off'} " + "; ".join(
+                        f"{c['key']} {c.get('base')} -> {c.get('new') if c['key'] != 'own' else (c.get('new') or {}).get('win_rate')}"
+                        f"{'' if c['ok'] else ' FAIL'}" for c in ch_g))
+                    if not ok_g:
+                        drop.append(n)
+                        graded_why[n] = ("Off: it is judged on its graded setups, and replaying the desk with and without it "
+                                         "(both recalibrated) showed it would not help: " + "; ".join(
+                                             c["label"].lower() for c in ch_g if not c["ok"]) + " fell short.")
             gkeys = ("aplus_score", "aplus_pwin", "oos_aplus_win_rate", "oos_aplus_avg_ret", "oos_aplus_trades",
                      "oos_aplus_signals_per_week", "oos_weeks_with_min_setups", "topup_floor", "topup_pwin",
                      "oos_topup_win_rate", "oos_topup_avg_ret", "oos_topup_trades", "oos_weeks_at_min")
@@ -780,7 +824,7 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
                     "per_strategy": per, "dropped": drop}
             for n in drop:
                 pn = per.get(n) or {}
-                why = (f"Off: it passed every standalone check, but adding the research strategies didn't improve the A+ set "
+                why = graded_why.get(n) or (f"Off: it passed every standalone check, but adding the research strategies didn't improve the A+ set "
                        f"on unseen data ({100 * a_win:.1f}% wins with them vs {100 * float(G0.get('oos_aplus_win_rate') or 0):.1f}% without)."
                        if not better else
                        f"Off: it passed every standalone check, but its A+-grade trades won only {100 * (pn.get('aplus_win_oos') or 0):.1f}% "
@@ -1026,6 +1070,7 @@ def run_topups(data_dir, state_dir, out_dir, split="2022-01-01", log=print, now=
     t = pd.concat(trs, ignore_index=True)
     p_, e_, ep_ = M.predict_pooled(pm, t[S.FEATURES], t["strategy"].values)
     t["p"], t["score"] = p_, M.score_pooled(p_, ep_)
+    t = mark_entry(t, P)
     post = t[t["signal_date"] >= pd.Timestamp(split)]
     G = P["grading"]
     desk_min = int((state.get("settings") or {}).get("min_setups_week", 5))
@@ -1084,6 +1129,240 @@ def run_topups(data_dir, state_dir, out_dir, split="2022-01-01", log=print, now=
     return {"changes": changes, "topup_floor": res.get("topup_floor"), "topup_pwin": res.get("topup_pwin"),
             "win_rate": res.get("oos_topup_win_rate"), "trades": res.get("oos_topup_trades"),
             "weeks_at_min": res.get("oos_weeks_at_min"), "excluded": list((res.get("topup_excluded") or {}).keys())}
+
+
+# ----------------------------------------------------------------------------- daily promotion check
+# Nov 12, 2026: research found candidates every day but they waited for Saturday, so a strong idea found on a
+# Monday sat out the whole week. The daily promotion check puts a candidate live the next trading day when
+# replaying the desk with it (live model and bars unchanged, so nothing else about the alerts moves) keeps the
+# A+ and top-up win rates, keeps the weekly coverage and grows the simulated account faster. Win rate first:
+# any drop beyond half a point in a win rate blocks it, whatever the growth.
+PROMOTE = {"slack_win": 0.005, "slack_weeks": 0.005, "slack_dd": 0.02, "own_min": 30, "own_slack": 0.01, "max_per_day": 2}
+
+
+def desk_replay(post: pd.DataFrame, G: dict, min_week: int, acct: dict, cal_end=CAL_END) -> dict:
+    """The desk on 2022-now signals with fixed bars, the way the scanner sends: every A+ setup, plus the weekly
+    top-ups to the pace (best-scored first, excluded strategies never), sized like your account."""
+    from .research import graded_bars
+    s = _one_per_ticker(post)
+    sc, pw = float(G["aplus_score"]), float(G["aplus_pwin"])
+    ap = s[(s["score"] >= sc) & (s["p"] >= pw)]
+    floor, tpw, kind = graded_bars(G)
+    if kind == "topup" and not G.get("topups_off"):
+        if str(G.get("topup_mode") or "normal") == "tight":
+            floor, tpw = max(floor, sc - 8), max(tpw, pw)
+        excl = set((G.get("topup_excluded") or {}).keys()) | set((G.get("topup_excluded_live") or {}).keys())
+        pk, wk = simulate_topups(s, sc, pw, floor, tpw, min_week, sorted(excl))
+    else:  # A+ only: the same replay with no top-up band, for the weekly counts
+        pk, wk = simulate_topups(s, sc, pw, float("inf"), 1.0, min_week)
+    sent = pd.concat([ap, pk])
+    pf = B.portfolio(sent, 5000, int(acct["max_open"]), float(acct["risk_pct"]), float(acct["max_position_pct"]))
+    pf.pop("curve", None)
+    late = sent[sent["signal_date"] >= pd.Timestamp(cal_end)]
+    return {"aplus": _trade_stats(ap), "topups": _trade_stats(pk), "sent": _trade_stats(sent), "sent_late": _trade_stats(late),
+            "weeks_at_min": round(float((wk >= min_week).mean()), 4) if len(wk) else 0.0,
+            "setups_per_week": round(len(sent) / max(1, len(wk)), 2),
+            "account": {k: pf.get(k) for k in ("cagr", "max_dd", "win_rate", "trades", "final")},
+            "by_strategy": {n: _trade_stats(g) for n, g in sent.groupby("strategy")}}
+
+
+def promote_gate(base: dict, new: dict, name: str) -> tuple[bool, list]:
+    """Checks a replay with the candidate against the replay without it (see PROMOTE)."""
+    q = PROMOTE
+
+    def g(d, a, b):
+        return (d.get(a) or {}).get(b)
+
+    def no_drop(key, label, a, b, slack):
+        bv, nv = g(base, a, b), g(new, a, b)
+        ok = bv is None or (nv is not None and nv >= bv - slack)
+        return {"key": key, "label": label, "base": bv, "new": nv, "ok": bool(ok)}
+    own = new["by_strategy"].get(name) or {"trades": 0}
+    ref = g(base, "topups", "win_rate") or g(base, "sent", "win_rate") or 0.0
+    bc, nc = g(base, "account", "cagr"), g(new, "account", "cagr")
+    bd, nd = g(base, "account", "max_dd"), g(new, "account", "max_dd")
+    checks = [
+        no_drop("aplus_win", "A+ win rate 2022-now", "aplus", "win_rate", q["slack_win"]),
+        no_drop("topup_win", "Weekly top-up win rate 2022-now", "topups", "win_rate", q["slack_win"]),
+        no_drop("sent_win", "Win rate of every setup sent, 2022-now", "sent", "win_rate", q["slack_win"]),
+        no_drop("late_win", "Win rate of every setup sent, 2024-now", "sent_late", "win_rate", q["slack_win"]),
+        {"key": "weeks", "label": "Weeks reaching the weekly minimum", "base": base["weeks_at_min"], "new": new["weeks_at_min"],
+         "ok": new["weeks_at_min"] >= base["weeks_at_min"] - q["slack_weeks"]},
+        {"key": "growth", "label": "Simulated account growth a year", "base": bc, "new": nc,
+         "ok": nc is not None and (bc is None or nc > bc)},
+        {"key": "drawdown", "label": "Worst drawdown", "base": bd, "new": nd,
+         "ok": nd is not None and (bd is None or nd >= bd - q["slack_dd"])},
+        {"key": "own", "label": "Its own setups in the replay", "base": round(ref, 4), "new": own,
+         "ok": own.get("trades", 0) >= q["own_min"] and (own.get("win_rate") or 0) >= ref - q["own_slack"]
+         and (own.get("avg_ret") or 0) > 0},
+    ]
+    return all(c["ok"] for c in checks), checks
+
+
+def _score_live(t: pd.DataFrame, pm: dict, P_: dict) -> pd.DataFrame:
+    """Scores setups exactly as the scanner does (live pooled model with the live adjustments)."""
+    p_, e_, ep_ = M.predict_pooled(pm, t[S.FEATURES], t["strategy"].values, P_.get("live_adjust"))
+    return t.assign(p=p_, score=M.score_pooled(p_, ep_))
+
+
+def _pct(v, signed=False):
+    return "n/a" if v is None else (f"{100 * v:+.1f}%" if signed else f"{100 * v:.1f}%")
+
+
+def run_promote(data_dir, state_dir, out_dir, split="2022-01-01", log=print, now=None, ids=None) -> dict:
+    """Daily promotion check (see PROMOTE). Writes promote_report.json always, and doc_params.json (the live
+    params with the promoted strategies added, for strategy/params) only when a candidate passes."""
+    from .research import latest_results, load_ideas, load_results
+    from .scan import load_params
+    now = now or cal.now_pt()
+    out = pathlib.Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    state = load_state(state_dir)
+    P = load_params(state, None)
+    pm = (P.get("models") or {}).get("_pooled")
+    report = {"at": now.isoformat(timespec="seconds"), "promoted": [], "candidates": []}
+
+    def done(note):
+        report["note"] = note
+        (out / "promote_report.json").write_text(json.dumps(report, indent=1, default=str))
+        return report
+    if not (pm and pm.get("kind") == "pooled"):
+        return done("The live params have no pooled model yet, so promotion waits for the weekly recalibration.")
+    G = P["grading"]
+    st_ = state.get("settings") or {}
+    min_week = int(st_.get("min_setups_week", 5))
+    acct = {"max_open": int(st_.get("max_open_positions", P["risk"]["max_open"])),
+            "risk_pct": float(st_.get("risk_pct", P["risk"]["risk_pct"])),
+            "max_position_pct": float(st_.get("max_position_pct", P["risk"]["max_position_pct"]))}
+    ideas, latest = load_ideas(state_dir), latest_results(load_results(state_dir))
+    cands = []
+    for iid, r in latest.items():
+        if (ids and iid not in ids) or r.get("verdict") != "candidate" or iid in P["strategies"]:
+            continue
+        if not (ideas.get(iid) or {}).get("spec"):
+            continue
+        key = ((r.get("graded") or {}).get("periods", {}).get("oos", {}).get("win_rate") if r.get("graded_ok") else None) \
+            or (r.get("specialist") or {}).get("oos", {}).get("win_rate") or (r.get("oos") or {}).get("win_rate") or 0
+        cands.append((float(key), iid, r))
+    cands.sort(key=lambda x: -x[0])
+    if not cands:
+        return done("No research candidate is waiting.")
+    split = pd.Timestamp(split)
+    w = D.load_history(data_dir)
+    ind = I.compute(w, D.load_universe(data_dir))
+
+    def scored(t, P_):
+        return mark_entry(_score_live(t, pm, P_), P_)
+    plans = S.all_plans(ind, P)
+    live = [B.simulate(plans[n], ind, P, include_unfilled=True) for n, sp in P["strategies"].items()
+            if sp.get("enabled", True) and n in plans]
+    live = [x for x in live if not x.empty]
+    if not live:
+        return done("The live strategies produced no signals to replay, so nothing was promoted.")
+    t_live = scored(pd.concat(live, ignore_index=True), P)
+    post = t_live[t_live["signal_date"] >= split]
+    base = desk_replay(post, G, min_week, acct)
+    report["base"] = {k: v for k, v in base.items() if k != "by_strategy"}
+    log(f"desk replay without candidates: A+ {base['aplus']}, top-ups {base['topups']}, weeks at min {base['weeks_at_min']}, "
+        f"account {base['account']}")
+    P_new, changes, cards = copy.deepcopy(P), [], {}
+    for _, iid, r in cands:
+        if len(report["promoted"]) >= PROMOTE["max_per_day"]:
+            break
+        spec = dict(ideas[iid]["spec"])
+        variant = r.get("variant") or {}
+        if r.get("graded_ok"):
+            spec["graded"] = True
+            spec.pop("market_conditions", None)
+        elif r.get("market_conditions"):
+            spec["market_conditions"] = list(r["market_conditions"])
+        P_c = copy.deepcopy(P_new)
+        P_c.setdefault("custom", {})[iid] = {"spec": spec, "params": variant, "label": spec.get("label"),
+                                             "family": spec.get("family"), "about": spec.get("about"), "source": spec.get("source")}
+        P_c["strategies"][iid] = R.strategy_entry(spec, variant, True)
+        if spec.get("market_conditions"):
+            P_c["strategies"][iid]["market_conditions"] = list(spec["market_conditions"])
+        try:
+            pl = S.build(iid, ind, P_c)
+            tr = B.simulate(pl, ind, P_c, include_unfilled=True) if pl is not None else pd.DataFrame()
+        except Exception as ex:
+            report["candidates"].append({"id": iid, "ok": False, "note": f"could not build its rules: {ex!r}"[:300]})
+            continue
+        if tr.empty:
+            report["candidates"].append({"id": iid, "ok": False, "note": "no signals in the replay"})
+            continue
+        t_c = scored(tr, P_c)
+        post_c = pd.concat([post, t_c[t_c["signal_date"] >= split]], ignore_index=True)
+        new = desk_replay(post_c, G, min_week, acct)
+        ok, checks = promote_gate(base, new, iid)
+        lab = spec.get("label") or iid
+        rec = {"id": iid, "label": lab, "ok": ok, "graded": bool(spec.get("graded")),
+               "market_conditions": spec.get("market_conditions"), "checks": checks,
+               "with": {k: v for k, v in new.items() if k != "by_strategy"}, "own": new["by_strategy"].get(iid)}
+        report["candidates"].append(rec)
+        log(f"  {iid}: {'PROMOTE' if ok else 'not yet'} " + "; ".join(f"{c['key']} {c['base']} -> {c['new'] if c['key'] != 'own' else (c['new'] or {}).get('win_rate')} {'ok' if c['ok'] else 'FAIL'}" for c in checks))
+        if not ok:
+            continue
+        filled = tr[tr["filled"] & tr["ret"].notna()]
+        st_tr, st_te, st_all = B.stats(tr[tr["signal_date"] < split]), B.stats(tr[tr["signal_date"] >= split]), B.stats(tr)
+        mdl = M.fit(filled, split_date=split)
+        mdl["avg_hold"] = st_all.get("avg_hold")
+        if st_te.get("trades", 0) >= 100:
+            mdl["base_rate"] = st_te["win_rate"]
+            mdl["avg_win"], mdl["avg_loss"] = st_te["avg_win"], st_te["avg_loss"]
+        P_c.setdefault("models", {})[iid] = mdl
+        own = new["by_strategy"].get(iid) or {}
+        P_c["strategies"][iid]["promoted"] = {
+            "at": now.isoformat(timespec="seconds"), "by": "daily promotion check", "graded": bool(spec.get("graded")),
+            "research_result": r.get("id"), "replay_without": {k: base[k] for k in ("aplus", "topups", "sent", "weeks_at_min", "account")},
+            "replay_with": {k: new[k] for k in ("aplus", "topups", "sent", "weeks_at_min", "account")}, "own": own}
+        how = ("judged on its graded setups, the only ones the desk sends" if spec.get("graded") else
+               f"trading only in {' and '.join(S.CONDITION_PLURAL[c] for c in spec['market_conditions'])}"
+               if spec.get("market_conditions") else "passed every standalone check")
+        changes.append(
+            f"Promoted {lab} mid-week ({how}). Replaying the desk on 2022-now signals with the live model and bars, adding it: "
+            f"A+ win rate {_pct(base['aplus']['win_rate'])} -> {_pct(new['aplus']['win_rate'])}, weekly top-ups "
+            f"{_pct(base['topups']['win_rate'])} -> {_pct(new['topups']['win_rate'])}, every setup sent "
+            f"{_pct(base['sent']['win_rate'])} -> {_pct(new['sent']['win_rate'])}, weeks reaching {min_week}+ setups "
+            f"{_pct(base['weeks_at_min'])} -> {_pct(new['weeks_at_min'])}, simulated account growth "
+            f"{_pct(base['account']['cagr'])} -> {_pct(new['account']['cagr'])} a year (worst drawdown "
+            f"{_pct(base['account']['max_dd'])} -> {_pct(new['account']['max_dd'])}). Its own setups in the replay: "
+            f"{own.get('trades', 0)}, {_pct(own.get('win_rate'))} won, average {_pct(own.get('avg_ret'), True)}. "
+            "It trades from the next scan; Saturday's recalibration re-checks it with everything refit.")
+        report["promoted"].append({"id": iid, "label": lab, "graded": bool(spec.get("graded")),
+                                   "train": {k: st_tr.get(k) for k in ("trades", "win_rate", "avg_ret", "profit_factor")},
+                                   "oos": {k: st_te.get(k) for k in ("trades", "win_rate", "avg_ret", "profit_factor")}})
+        # its strategy card, so the Strategies tab shows it like every other live strategy until Saturday refits all
+        _, raw_checks, _ = S.enable_checks(st_tr, st_te)
+        gchk = [c for c in ((r.get("graded") or {}).get("checks") or []) if c["key"].startswith("g_")] if spec.get("graded") else []
+        cards[iid] = {"enabled": True, "variant": variant, "train": st_tr, "test_oos": st_te, "all": st_all,
+                      "yearly": B.yearly(tr).reset_index().to_dict("records"), "label": lab, "family": spec.get("family"),
+                      "checks": ([c for c in raw_checks if c["key"] in ("train_win", "oos_pf", "oos_decay")] + gchk) if spec.get("graded") else raw_checks,
+                      "status_reason": (f"Active since {now.strftime('%b %-d')} (daily promotion check): "
+                                        + ("judged on its graded setups, the only ones the desk sends. " if spec.get("graded") else "")
+                                        + f"Replaying the desk with it kept the A+ and top-up win rates and raised simulated "
+                                          f"account growth {_pct(base['account']['cagr'])} -> {_pct(new['account']['cagr'])} a year. "
+                                          "Saturday's recalibration re-checks it."),
+                      "custom": True, "about": spec.get("about"), "source": spec.get("source"), "graded": bool(spec.get("graded")),
+                      "rules": R.describe({**spec, "params": variant, "grid": {}}), "market_conditions": spec.get("market_conditions"),
+                      "promoted": {"at": now.isoformat(timespec="seconds"), "by": "daily promotion check"}}
+        P_new, post, base = P_c, post_c, new
+    if not report["promoted"]:
+        return done("No candidate passed the promotion check today: " + "; ".join(
+            f"{c.get('label', c['id'])} missed " + ", ".join(k["label"].lower() for k in c.get("checks", []) if not k["ok"])
+            if c.get("checks") else f"{c['id']}: {c.get('note')}" for c in report["candidates"]) + ".")
+    P_new["version"] = int(time.time())
+    P_new["updated"] = now.isoformat(timespec="seconds")
+    (out / "doc_params.json").write_text(json.dumps({"params": P_new, "updated_at": now.isoformat(timespec="seconds"),
+                                                     "changelog_entry": changes}, default=str))
+    bt_ = (load_collection(state_dir, "strategy").get("backtest") or {}).get("doc")
+    if bt_ and isinstance(bt_.get("strategies"), dict):  # the same document with the new cards added
+        bt_ = copy.deepcopy(bt_)
+        bt_["strategies"].update(cards)
+        bt_.setdefault("promotions", []).append({"at": now.isoformat(timespec="seconds"), "ids": list(cards), "changes": changes})
+        (out / "doc_backtest.json").write_text(json.dumps(bt_, default=str))
+    report["changes"] = changes
+    return done(" ".join(changes))
 
 
 def run_learning(data_dir, state_dir, out_dir, now=None) -> dict:
@@ -1315,7 +1594,8 @@ def run_learning(data_dir, state_dir, out_dir, now=None) -> dict:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["backtest", "learn", "topups"])
+    ap.add_argument("cmd", choices=["backtest", "learn", "topups", "promote"])
+    ap.add_argument("--ids", default=None, help="promote: comma list of research ideas to check (default: every candidate)")
     ap.add_argument("--data", required=True)
     ap.add_argument("--state", default=None)
     ap.add_argument("--out", required=True)
@@ -1330,6 +1610,9 @@ def main():
         print(json.dumps({k: v for k, v in rep.items() if k != "strategies"}, indent=1, default=str))
     elif a.cmd == "topups":
         print(json.dumps(run_topups(a.data, a.state, a.out, a.split), indent=1, default=str))
+    elif a.cmd == "promote":
+        rep = run_promote(a.data, a.state, a.out, a.split, ids=a.ids.split(",") if a.ids else None)
+        print(json.dumps({k: rep.get(k) for k in ("note", "promoted")}, indent=1, default=str))
     else:
         print(json.dumps(run_learning(a.data, a.state, a.out), indent=1, default=str))
 

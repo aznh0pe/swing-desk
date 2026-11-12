@@ -85,9 +85,13 @@ def candidate_specs(state_dir, old_params: dict | None = None, cap: int = 6, ext
     for iid, r in latest.items():
         if r.get("verdict") == "candidate" and iid in ideas and ideas[iid].get("spec") and iid not in pool:
             sp_ = dict(ideas[iid]["spec"])
-            if r.get("market_conditions"):  # a specialist: re-tested restricted to its market conditions
+            if r.get("graded_ok"):  # judged on its graded setups (see GRADED), in every market condition
+                sp_["graded"] = True
+                sp_.pop("market_conditions", None)
+            elif r.get("market_conditions"):  # a specialist: re-tested restricted to its market conditions
                 sp_["market_conditions"] = list(r["market_conditions"])
-            win_ = (r.get("specialist") or {}).get("oos", {}).get("win_rate") or (r.get("oos") or {}).get("win_rate") or 0
+            win_ = ((r.get("graded") or {}).get("periods", {}).get("oos", {}).get("win_rate") if r.get("graded_ok") else None) \
+                or (r.get("specialist") or {}).get("oos", {}).get("win_rate") or (r.get("oos") or {}).get("win_rate") or 0
             pool[iid] = (float(win_), sp_)
     ranked = sorted(pool.items(), key=lambda kv: -kv[1][0])[:cap]
     return {k: v[1] for k, v in ranked}
@@ -228,6 +232,96 @@ def grade_preview(tr: pd.DataFrame, P_live: dict, split) -> dict | None:
 SPECIALIST = {"train_n": 150, "oos_n": 100, "train_win": 0.62, "train_pf": 1.25, "oos_win": 0.66, "oos_pf": 1.30,
               "oos_avg": 0.0025}
 
+# Graded candidates (Nov 12, 2026). The desk never sends an idea's raw signals: it sends only the ones that clear
+# the A+ bar or the weekly top-up bar. An idea whose raw signals win often but with small gains can still be a
+# strong source of setups once graded, so it is judged on exactly the setups the desk would send, graded by the
+# live model it was never fit on. The bars: at least as good as the live weekly top-ups (the weakest grade the
+# desk sends) with the same profit bars the top-up rule itself must clear, in both halves of 2022-now, and on
+# 2008-2021 too; its raw rules must still not be broken (2008-2021 win rate, 2022-now profit factor, no decay).
+GRADED = {"oos_n": 150, "min_win": 0.66, "pf": 1.25, "avg": 0.004, "half_n": 50, "half_slack": 0.03,
+          "train_n": 150, "train_win": 0.64}
+GRADED_RAW = ("train_win", "oos_pf", "oos_decay")
+
+
+def _grp_stats(f: pd.DataFrame) -> dict:
+    if not len(f):
+        return {"trades": 0, "win_rate": None, "avg_ret": None, "profit_factor": None}
+    w = f["ret"] > 0
+    gl = -f.loc[~w, "ret"].sum()
+    return {"trades": int(len(f)), "win_rate": round(float(w.mean()), 4), "avg_ret": round(float(f["ret"].mean()), 5),
+            "profit_factor": round(float(f.loc[w, "ret"].sum() / gl), 3) if gl > 0 else None}
+
+
+def graded_bars(G: dict) -> tuple[float, float, str]:
+    """The lowest bar the desk sends at: the weekly top-up bar when top-ups are on, else the A+ bar."""
+    if G.get("topup_floor") is not None and G.get("topup_ok", True) is not False and G.get("topup_mode") != "off":
+        return float(G["topup_floor"]), float(G.get("topup_pwin") or 0), "topup"
+    return float(G["aplus_score"]), float(G["aplus_pwin"]), "aplus"
+
+
+def graded_check(tr: pd.DataFrame, P_live: dict, split, raw_checks: list, cal_end="2024-01-01") -> dict | None:
+    """Judges an idea on the setups the desk would send from it: every signal scored by the live pooled model
+    (which never saw this idea, so 2008-2021 is a fair test too) and kept only where it clears the lowest bar
+    the desk sends at. Returns the checks, the per-period results and the results by market condition."""
+    pm = (P_live.get("models") or {}).get("_pooled")
+    G = P_live.get("grading") or {}
+    if not (pm and pm.get("kind") == "pooled") or not G.get("aplus_score") or any(c not in tr for c in S.FEATURES):
+        return None
+    floor, tpw, kind = graded_bars(G)
+    p_, e_, ep_ = M.predict_pooled(pm, tr[S.FEATURES], ["__new__"] * len(tr))
+    t = tr.assign(p=p_, score=M.score_pooled(p_, ep_))
+    sent_sig = t[(t["score"] >= floor) & (t["p"] >= tpw)]
+    sent = sent_sig[sent_sig["filled"] & sent_sig["ret"].notna()]
+    split, ce = pd.Timestamp(split), pd.Timestamp(cal_end)
+    per = {"train": _grp_stats(sent[sent["signal_date"] < split]), "oos": _grp_stats(sent[sent["signal_date"] >= split]),
+           "early": _grp_stats(sent[(sent["signal_date"] >= split) & (sent["signal_date"] < ce)]),
+           "late": _grp_stats(sent[sent["signal_date"] >= ce])}
+    ref = G.get("oos_topup_win_rate") if kind == "topup" else G.get("oos_aplus_win_rate")
+    need = max(GRADED["min_win"], float(ref or 0))
+    o, tn, e, l_ = per["oos"], per["train"], per["early"], per["late"]
+    half_need = need - GRADED["half_slack"]
+    checks = [
+        {"key": "g_oos_n", "label": "Setups the desk would send, 2022-now", "value": o["trades"],
+         "need": f">= {GRADED['oos_n']}", "ok": o["trades"] >= GRADED["oos_n"]},
+        {"key": "g_oos_win", "label": "Their win rate 2022-now", "value": o["win_rate"],
+         "need": f">= {100 * need:.1f}% (the live {'weekly top-ups' if kind == 'topup' else 'A+ setups'}' tested win rate)",
+         "ok": (o["win_rate"] or 0) >= need},
+        {"key": "g_oos_pf", "label": "Their profit factor 2022-now", "value": o["profit_factor"], "need": f">= {GRADED['pf']:.2f}",
+         "ok": (o["profit_factor"] or 0) >= GRADED["pf"]},
+        {"key": "g_oos_avg", "label": "Their average trade 2022-now", "value": o["avg_ret"], "need": f">= +{100 * GRADED['avg']:.2f}%",
+         "ok": (o["avg_ret"] or 0) >= GRADED["avg"]},
+        {"key": "g_halves", "label": "Their win rate in 2022-23 and in 2024-now", "value": [e["win_rate"], l_["win_rate"]],
+         "need": f">= {100 * half_need:.1f}% in both, with a gain",
+         "ok": all(x["trades"] >= GRADED["half_n"] and (x["win_rate"] or 0) >= half_need and (x["avg_ret"] or 0) > 0 for x in (e, l_))},
+        {"key": "g_train", "label": "Same grading on 2008-2021", "value": tn["win_rate"],
+         "need": f">= {100 * GRADED['train_win']:.0f}% of {GRADED['train_n']}+, with a gain",
+         "ok": tn["trades"] >= GRADED["train_n"] and (tn["win_rate"] or 0) >= GRADED["train_win"] and (tn["avg_ret"] or 0) > 0},
+    ] + [c for c in raw_checks if c["key"] in GRADED_RAW]
+    o_sig = sent_sig[sent_sig["signal_date"] >= split]
+    weeks = max(1.0, (tr["signal_date"].max() - split).days / 7.0)
+    cond = S.condition_series(sent).values if len(sent) else []
+    bc = {}
+    if len(sent):
+        s2 = sent.assign(condition=cond)
+        for c_, g in s2[s2["signal_date"] >= split].groupby("condition"):
+            bc[c_] = _grp_stats(g)
+    return {"ok": all(c["ok"] for c in checks), "checks": checks, "bars": {"score": floor, "pwin": tpw, "kind": kind},
+            "need_win": round(need, 4), "periods": per, "by_condition": bc,
+            "per_week": round(len(o_sig) / weeks, 2), "share_of_signals": round(len(o_sig) / max(1, int((t["signal_date"] >= split).sum())), 4)}
+
+
+def graded_sentence(gc: dict, raw_oos: dict) -> str:
+    o, e, l_, tn = (gc["periods"][k] for k in ("oos", "early", "late", "train"))
+    b = gc["bars"]
+    return (f"Candidate on the setups the desk would send: graded by the live model (score {b['score']:.0f}+, model win "
+            f"{100 * b['pwin']:.0f}%+), {o['trades']} of its 2022-now setups qualify and {100 * o['win_rate']:.1f}% won "
+            f"(profit factor {o['profit_factor']:.2f}, average {100 * o['avg_ret']:+.2f}%): {100 * e['win_rate']:.0f}% in 2022-23, "
+            f"{100 * l_['win_rate']:.0f}% in 2024-now, and {100 * tn['win_rate']:.0f}% of {tn['trades']} on 2008-2021, which the "
+            f"model never saw. Its raw signals win {100 * (raw_oos.get('win_rate') or 0):.1f}% with small gains (profit factor "
+            f"{raw_oos.get('profit_factor') or 0:.2f}), and the desk never sends those: only the graded ones, about "
+            f"{gc['per_week']:.1f} a week. The daily promotion check replays the desk with it and puts it live only if the "
+            "A+ and top-up win rates hold and the account grows faster; Saturday's recalibration re-checks it.")
+
 
 def condition_breakdown(tr: pd.DataFrame, split) -> dict:
     """The idea's results in each market condition, 2008-2021 and 2022-now."""
@@ -306,7 +400,61 @@ def research_focus(state_dir) -> dict | None:
     if cov is not None and float(cov) < 0.6:
         return {"grade": "topup", "why": (f"only {100 * float(cov):.0f}% of weeks reach the {mn}-setup minimum with setups "
                                           f"that clear the bars (A+ alone {100 * float(ap or 0):.0f}%)"), "look_for": calm_hint}
-    return None
+    # Never without a focus: the desk always has a gap to close. Point at the live weekly shortfall first, then at
+    # the market condition where A+ setups are scarcest compared with how often it occurs.
+    live = live_week_gap(st, mn)
+    gap = condition_gap(pc_)
+    why = []
+    if live.get("this_week", 0) < live.get("pace", 0):
+        why.append(f"this week has sent {live['this_week']} of the {live['pace']} setups its pace needs by tonight")
+    if live.get("short_weeks"):
+        why.append(f"{live['short_weeks']} of the last {live['weeks']} weeks sent fewer than {mn} setups")
+    if gap:
+        why.append(f"A+ setups are scarcest in {S.CONDITION_PLURAL[gap['condition']]}: {100 * gap['share_days']:.0f}% of "
+                   f"2022-now trading days but {100 * gap['share_aplus']:.0f}% of A+ setups")
+    look = (calm_hint if (not gap or gap["condition"] == "bull_calm") else
+            f"high-win-rate setups for {S.CONDITION_PLURAL[gap['condition']]}, ideally all-weather")
+    return {"grade": "aplus" if gap else "topup",
+            "why": "; ".join(why) or "the weekly minimum depends on top-ups in quiet weeks",
+            "look_for": look + ". Prefer a new trigger (support holding, gap reversal, quiet pullback, relative strength) "
+                               "over another oversold filter: the oversold family is mostly redundant with the live book.",
+            "live": live, "condition_gap": gap}
+
+
+def live_week_gap(st: dict, mn: int, weeks: int = 4) -> dict:
+    """How many setups each recent week actually sent (A+ setups and weekly top-ups, by signal week)."""
+    import datetime as _dt
+    sent = {}
+    for v in (st.get("alerts") or {}).values():
+        d = v.get("doc") or {}
+        if d.get("type") != "entry" or not d.get("signal_date"):
+            continue
+        try:
+            day = _dt.date.fromisoformat(str(d["signal_date"])[:10])
+        except ValueError:
+            continue
+        wk = day - _dt.timedelta(days=day.weekday())
+        sent[wk] = sent.get(wk, 0) + 1
+    today = _dt.date.today()
+    this = today - _dt.timedelta(days=today.weekday())
+    past = [this - _dt.timedelta(weeks=i) for i in range(1, weeks + 1)]
+    short = sum(1 for w in past if sent.get(w, 0) < mn and w >= min(sent or {this: 0}))
+    pace = min(mn, today.weekday() + 1) if today.weekday() < 5 else mn
+    return {"weeks": weeks, "short_weeks": short, "this_week": sent.get(this, 0), "pace": pace,
+            "by_week": {str(w): sent.get(w, 0) for w in [this] + past}}
+
+
+def condition_gap(pc: dict) -> dict | None:
+    """The market condition with the biggest shortfall of A+ setups compared with how often it occurs."""
+    share = pc.get("share_of_days_oos") or pc.get("share_of_days") or {}
+    ap = pc.get("aplus") or {}
+    tot = sum(float((ap.get(c) or {}).get("trades") or 0) for c in S.CONDITIONS)
+    if not share or not tot:
+        return None
+    rows = [{"condition": c, "share_days": round(float(share.get(c) or 0), 3),
+             "share_aplus": round(float((ap.get(c) or {}).get("trades") or 0) / tot, 3)} for c in S.CONDITIONS]
+    best = max(rows, key=lambda r: r["share_days"] - r["share_aplus"])
+    return best if best["share_days"] - best["share_aplus"] > 0.05 else None
 
 
 def _compact(st: dict) -> dict:
@@ -358,8 +506,14 @@ def evaluate_spec(spec: dict, ind: dict, P: dict, P_live: dict, split, now, by="
     bc = condition_breakdown(tr, split)
     aw = S.all_weather(bc)
     spec_conds = list(spec.get("market_conditions") or [])
+    full_pass = ok_live and all(q_ok.values())
+    try:  # judged on the setups the desk would send (see GRADED)
+        gc = None if full_pass else graded_check(tr, P_live, split, checks)
+    except Exception as ex:  # a guide like the preview: never a reason to lose a test
+        gc = {"ok": False, "error": repr(ex)[:200]}
+    graded_ok = bool(gc and gc.get("ok")) and q_ok["overlap"] and not spec_conds
     special = None
-    if not spec_conds and not (ok_live and all(q_ok.values())) and not aw["all_weather"]:
+    if not spec_conds and not full_pass and not graded_ok and not aw["all_weather"]:
         # not good enough everywhere: is it a specialist for some market conditions? (an all-weather idea never is:
         # it holds up everywhere, so narrowing it would only throw good trades away)
         sc_ = specialist_conditions(bc)
@@ -376,7 +530,10 @@ def evaluate_spec(spec: dict, ind: dict, P: dict, P_live: dict, split, now, by="
             if ok_s and ov_s <= QUALITY["max_overlap"] and (st_te.get("trades") or 0) >= QUALITY["oos_trades"]:
                 special = {"conditions": sc_, "train": _compact(st_tr), "oos": _compact(st_te), "overlap": round(ov_s, 3),
                            "per_week": round(n_s / weeks, 2), "checks": checks_s}
-    if special:
+    if graded_ok:
+        verdict = "candidate"
+        summary = graded_sentence(gc, st_test) + f" {100 * overlap:.0f}% of its signals overlap the live strategies."
+    elif special:
         verdict = "candidate"
         labs = " and ".join(S.CONDITION_PLURAL[c] for c in special["conditions"])
         so = special["oos"]
@@ -430,10 +587,18 @@ def evaluate_spec(spec: dict, ind: dict, P: dict, P_live: dict, split, now, by="
     if verdict != "candidate":
         path = S.path_to_pass(st_train, st_test, weeks, extra_checks=q,
                               need={"oos_pf": QUALITY["oos_pf"], "oos_win": QUALITY["oos_win"], "oos_trades": QUALITY["oos_trades"]})
+    if gc and not graded_ok and verdict != "candidate" and "error" not in gc:
+        miss = [c for c in gc["checks"] if not c["ok"] and c["key"].startswith("g_")]
+        if miss:  # how close its graded setups came, so the next variant knows what to fix
+            o_ = gc["periods"]["oos"]
+            summary += (f" On the setups the desk would send ({o_['trades']} graded 2022-now, "
+                        + (f"{100 * o_['win_rate']:.1f}% won" if o_["win_rate"] is not None else "none filled")
+                        + "), it misses: " + "; ".join(c["label"].lower() + f" (needs {c['need']})" for c in miss[:3]) + ".")
     doc = {**base, "verdict": verdict, "summary": summary, "path": path, "checks": checks + q, "live_rule_ok": bool(ok_live),
            "live_reason": live_reason, "variant": variant, "rules": R.describe({**spec, "params": variant, "grid": {}}),
            "train": _compact(st_train), "oos": _compact(st_test), "overlap_live": round(overlap, 3),
            "oos_signals_per_week": round(per_week, 2), "grade_preview": gp, "by_condition": bc, "all_weather": aw,
+           "graded": gc, "graded_ok": graded_ok,
            **({"market_conditions": special["conditions"], "specialist": special} if special else
               ({"market_conditions": spec_conds} if spec_conds else {})),
            "yearly": B.yearly(tr).reset_index().to_dict("records")[-20:],

@@ -645,3 +645,148 @@ def test_a_plus_bar_is_chosen_by_account_growth_among_near_best_bars():
     assert best["account_cagr"] > other["account_cagr"] and "topup_rule" in best
     # without the columns a portfolio needs, the growth check steps aside (the coverage rule decides)
     assert CB._growth_pick(post.drop(columns=["stop"]), [c80, c86], c80, 5, None) == (None, [])
+
+
+def _desk_world(seed=11, extra=None):
+    """Synthetic 2022-2025 signals: strategy S sends A+ setups (score 90) on some days and top-up-band setups
+    (score 60) on others; `extra` adds a second strategy's rows."""
+    rng = np.random.default_rng(seed)
+    rows = []
+    for d in pd.bdate_range("2022-01-03", "2025-12-31"):
+        if rng.random() < 0.35:
+            win = rng.random() < 0.78
+            rows.append({"signal_date": d, "ticker": f"A{d.dayofyear % 9}", "strategy": "S", "score": 90.0, "p": 0.70,
+                         "filled": True, "ret": 0.03 if win else -0.03, "fill": 100.0, "stop": 94.0,
+                         "exit_date": d + pd.Timedelta(days=4)})
+        if rng.random() < 0.25:
+            win = rng.random() < 0.66
+            rows.append({"signal_date": d, "ticker": f"B{d.dayofyear % 9}", "strategy": "S", "score": 60.0, "p": 0.58,
+                         "filled": True, "ret": 0.02 if win else -0.025, "fill": 100.0, "stop": 94.0,
+                         "exit_date": d + pd.Timedelta(days=4)})
+        if extra:
+            r_ = extra(d, rng)
+            if r_:
+                rows.append(r_)
+    return pd.DataFrame(rows)
+
+
+G_TEST = {"aplus_score": 86, "aplus_pwin": 0.62, "topup_floor": 56, "topup_pwin": 0.54, "topup_ok": True}
+ACCT = {"max_open": 5, "risk_pct": 2.0, "max_position_pct": 25.0}
+
+
+def test_daily_promotion_needs_win_rates_to_hold_and_the_account_to_grow():
+    base = CB.desk_replay(_desk_world(), G_TEST, 5, ACCT)
+    assert base["aplus"]["trades"] > 100 and base["topups"]["trades"] > 50 and 0 < base["weeks_at_min"] < 1
+
+    def good(d, rng):  # a frequent source of strong top-up-band setups for the quiet days
+        if rng.random() < 0.6:
+            w = rng.random() < 0.80
+            return {"signal_date": d, "ticker": f"G{d.dayofyear % 9}", "strategy": "NEW", "score": 62.0, "p": 0.60,
+                    "filled": True, "ret": 0.025 if w else -0.025, "fill": 100.0, "stop": 94.0, "exit_date": d + pd.Timedelta(days=3)}
+
+    def bad(d, rng):  # just as frequent, but its setups mostly lose: fills the weeks and dilutes the win rate
+        if rng.random() < 0.6:
+            w = rng.random() < 0.45
+            return {"signal_date": d, "ticker": f"G{d.dayofyear % 9}", "strategy": "NEW", "score": 62.0, "p": 0.60,
+                    "filled": True, "ret": 0.025 if w else -0.025, "fill": 100.0, "stop": 94.0, "exit_date": d + pd.Timedelta(days=3)}
+    ok, checks = CB.promote_gate(base, CB.desk_replay(_desk_world(extra=good), G_TEST, 5, ACCT), "NEW")
+    assert ok, [c for c in checks if not c["ok"]]
+    ok_b, checks_b = CB.promote_gate(base, CB.desk_replay(_desk_world(extra=bad), G_TEST, 5, ACCT), "NEW")
+    failed = {c["key"] for c in checks_b if not c["ok"]}
+    assert not ok_b and {"topup_win", "own"} <= failed
+    # a strategy the scanner never tops up from adds nothing below the A+ bar
+    off = CB.desk_replay(_desk_world(extra=good), {**G_TEST, "topup_excluded": {"NEW": "test"}}, 5, ACCT)
+    assert "NEW" not in off["by_strategy"]
+    # with top-ups off, only A+ setups are sent
+    aplus_only = CB.desk_replay(_desk_world(extra=good), {**G_TEST, "topup_ok": False}, 5, ACCT)
+    assert aplus_only["topups"]["trades"] == 0 and aplus_only["sent"]["trades"] == aplus_only["aplus"]["trades"]
+
+
+def test_graded_ideas_are_judged_on_the_setups_the_desk_would_send():
+    # the lowest bar the desk sends at follows the live top-up state
+    assert RS.graded_bars(G_TEST) == (56.0, 0.54, "topup")
+    assert RS.graded_bars({**G_TEST, "topup_ok": False})[2] == "aplus"
+    assert RS.graded_bars({**G_TEST, "topup_mode": "off"})[2] == "aplus"
+    # every graded bar is in the checks, with the raw rules that must still hold
+    keys = {"g_oos_n", "g_oos_win", "g_oos_pf", "g_oos_avg", "g_halves", "g_train"}
+    src = pathlib.Path(RS.__file__).read_text()
+    for k in keys | set(RS.GRADED_RAW):
+        assert f'"{k}"' in src
+    # research: graded comes before the specialist path, and a graded candidate is flagged for the weekly run
+    assert "graded_ok = bool(gc and gc.get(\"ok\")) and q_ok[\"overlap\"]" in src
+    assert "not graded_ok and not aw[\"all_weather\"]" in src
+    assert 'sp_["graded"] = True' in src
+    # the weekly run lets a graded strategy into the fit on its raw sanity checks, then replays the desk with and
+    # without it (both recalibrated) and drops it unless the same promotion gate passes
+    csrc = pathlib.Path(CB.__file__).read_text()
+    assert 'if graded and not enabled and all(c["ok"] for c in checks if c["key"] in ("train_win", "oos_pf", "oos_decay"))' in csrc
+    assert "ok_g, ch_g = promote_gate(rx, rw, n)" in csrc
+
+
+def test_promotion_writes_the_params_and_the_strategy_card_together(tmp_path, monkeypatch):
+    """run_promote end to end on a tiny state: one graded candidate that passes the replay gate."""
+    st = tmp_path / "state"
+    for c in ("strategy", "research", "research_results", "config"):
+        (st / c).mkdir(parents=True)
+    P = S.params_with_defaults(None)
+    P["grading"].update(G_TEST)
+    P["models"] = {"_pooled": {"kind": "pooled"}}
+    P["strategies"]["S"] = {"enabled": True}
+    (st / "strategy" / "params.json").write_text(json.dumps({"params": P, "changelog_entry": []}, default=str))
+    (st / "strategy" / "backtest.json").write_text(json.dumps({"strategies": {"S": {"enabled": True, "label": "S"}}}))
+    (st / "config" / "settings.json").write_text(json.dumps({"min_setups_week": 5, "risk_pct": 2, "max_open_positions": 5,
+                                                              "max_position_pct": 25}))
+    spec = {"id": "R_NEW", "label": "New idea", "family": "Price action", "about": "x", "universe": "stock",
+            "conditions": ["close > open"], "entry": {"kind": "limit_next", "price": "close"}, "stop": {"atr": 3},
+            "target": {"atr": 1}, "max_hold": 5}
+    (st / "research" / "R_NEW.json").write_text(json.dumps({"id": "R_NEW", "spec": spec}))
+    (st / "research_results" / "R_NEW-20261112-1300.json").write_text(json.dumps(
+        {"id": "R_NEW-20261112-1300", "idea_id": "R_NEW", "verdict": "candidate", "graded_ok": True, "variant": {},
+         "tested_at": "2026-11-12T13:00:00-08:00",
+         "graded": {"checks": [{"key": "g_oos_win", "ok": True, "label": "x", "need": "y", "value": 0.8}],
+                    "periods": {"oos": {"win_rate": 0.8}}}}))
+
+    def good(d, rng):
+        if rng.random() < 0.6:
+            w = rng.random() < 0.80
+            return {"signal_date": d, "ticker": f"G{d.dayofyear % 9}", "strategy": "R_NEW", "score": 62.0, "p": 0.60,
+                    "filled": True, "ret": 0.025 if w else -0.025, "fill": 100.0, "stop": 94.0, "exit_date": d + pd.Timedelta(days=3)}
+    extra = {"reason": "target", "held": 3, "r_mult": 0.5, "limit": 100.0, **{f: 0.0 for f in S.FEATURES}}
+    world = _desk_world().assign(**extra)
+    new_rows = _desk_world(extra=good)
+    new_rows = new_rows[new_rows["strategy"] == "R_NEW"].assign(**extra)
+    monkeypatch.setattr(CB.D, "load_history", lambda d: {"close": pd.DataFrame()})
+    monkeypatch.setattr(CB.D, "load_universe", lambda d: {})
+    monkeypatch.setattr(CB.I, "compute", lambda w, u: {})
+    monkeypatch.setattr(CB.S, "all_plans", lambda ind, P_: {"S": {"name": "S"}})
+    monkeypatch.setattr(CB.S, "build", lambda name, ind, P_: {"name": name})
+    monkeypatch.setattr(CB.B, "simulate", lambda plan, ind, P_, include_unfilled=True: world if plan["name"] == "S" else new_rows)
+    monkeypatch.setattr(CB, "_score_live", lambda t, pm, P_: t)  # the synthetic rows carry their own score and p
+    rep = CB.run_promote("data", st, tmp_path / "out", now=pd.Timestamp("2026-11-12T13:00:00-08:00"))
+    assert [p["id"] for p in rep["promoted"]] == ["R_NEW"], rep.get("note")
+    doc = json.loads((tmp_path / "out" / "doc_params.json").read_text())
+    assert doc["params"]["strategies"]["R_NEW"]["enabled"] and doc["params"]["custom"]["R_NEW"]["spec"]["graded"]
+    assert doc["params"]["strategies"]["R_NEW"]["promoted"]["by"] == "daily promotion check"
+    assert "Promoted New idea mid-week" in doc["changelog_entry"][0]
+    bt = json.loads((tmp_path / "out" / "doc_backtest.json").read_text())
+    assert bt["strategies"]["R_NEW"]["enabled"] and "daily promotion check" in bt["strategies"]["R_NEW"]["status_reason"]
+    assert "S" in bt["strategies"] and bt["promotions"][0]["ids"] == ["R_NEW"]  # the rest of the document is kept
+    # a strategy already live is never promoted again, and nothing is written when no candidate waits
+    (st / "strategy" / "params.json").write_text(json.dumps(doc, default=str))
+    rep2 = CB.run_promote("data", st, tmp_path / "out2", now=pd.Timestamp("2026-11-13T13:00:00-08:00"))
+    assert rep2["promoted"] == [] and not (tmp_path / "out2" / "doc_params.json").exists()
+
+
+def test_close_entry_setups_never_count_as_weekly_topups():
+    """The pre-close scan buys at the close and never tops up; the replays must not either."""
+    def etf(d, rng):
+        if rng.random() < 0.9:
+            return {"signal_date": d, "ticker": f"E{d.dayofyear % 5}", "strategy": "ETFC", "score": 70.0, "p": 0.60,
+                    "filled": True, "ret": 0.01, "fill": 100.0, "stop": 97.0, "exit_date": d + pd.Timedelta(days=2)}
+    w = _desk_world(extra=etf)
+    P_ = {"strategies": {"S": {"entry_kind": "limit_next"}, "ETFC": {"entry_kind": "close"}}}
+    with_flag = CB.desk_replay(CB.mark_entry(w, P_), G_TEST, 5, ACCT)
+    assert "ETFC" not in with_flag["by_strategy"]
+    assert "ETFC" in CB.desk_replay(w, G_TEST, 5, ACCT)["by_strategy"]  # what the old replay wrongly counted
+    src = pathlib.Path(CB.__file__).read_text()
+    assert 'entry_close=(P["strategies"][name].get("entry_kind") == "close")' in src and "t = mark_entry(t, P)" in src
