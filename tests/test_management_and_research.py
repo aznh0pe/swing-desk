@@ -790,3 +790,25 @@ def test_close_entry_setups_never_count_as_weekly_topups():
     assert "ETFC" in CB.desk_replay(w, G_TEST, 5, ACCT)["by_strategy"]  # what the old replay wrongly counted
     src = pathlib.Path(CB.__file__).read_text()
     assert 'entry_close=(P["strategies"][name].get("entry_kind") == "close")' in src and "t = mark_entry(t, P)" in src
+
+
+def test_the_weekly_run_always_retests_every_promoted_strategy_and_new_candidates(tmp_path):
+    """Nov 12, 2026: a cap of six covered promoted strategies and new candidates together, so with six promoted no
+    candidate was ever tested on Saturday, and a seventh promoted strategy would have silently left the params."""
+    st = tmp_path / "state"
+    (st / "research").mkdir(parents=True)
+    (st / "research_results").mkdir()
+    spec = lambda i: {"id": i, "label": i, "family": "x", "about": "x", "conditions": ["close > open"],
+                      "entry": {"kind": "limit_next", "price": "close"}, "stop": {"atr": 3}, "target": {"atr": 1}}
+    old = {"custom": {f"R_P{k}": {"spec": spec(f"R_P{k}")} for k in range(7)}}
+    for k, w in enumerate((0.70, 0.66, 0.72)):
+        i = f"R_C{k}"
+        (st / "research" / f"{i}.json").write_text(json.dumps({"id": i, "spec": spec(i)}))
+        (st / "research_results" / f"{i}-1.json").write_text(json.dumps(
+            {"id": f"{i}-1", "idea_id": i, "verdict": "candidate", "tested_at": "2026-11-12T13:00:00-08:00",
+             "oos": {"win_rate": w}, **({"graded_ok": True, "graded": {"periods": {"oos": {"win_rate": w}}}} if k == 2 else {})}))
+    got = RS.candidate_specs(st, old)
+    assert set(old["custom"]) <= set(got)                     # all seven promoted, none dropped
+    assert {"R_C0", "R_C1", "R_C2"} <= set(got)                # and the new candidates still get their test
+    assert got["R_C2"].get("graded") is True                    # a graded candidate is tested as graded
+    assert len(RS.candidate_specs(st, old, cap=1)) == 8 and "R_C2" in RS.candidate_specs(st, old, cap=1)

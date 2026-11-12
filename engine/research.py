@@ -73,17 +73,18 @@ def retest_specs(state_dir, cap: int = 12) -> list[dict]:
 
 
 def candidate_specs(state_dir, old_params: dict | None = None, cap: int = 6, extra_results: list | None = None) -> dict:
-    """Specs the weekly recalibration should evaluate: research candidates plus strategies promoted earlier."""
+    """Specs the weekly recalibration should evaluate: every strategy promoted earlier (always, never capped:
+    one left out would silently drop out of the live params) plus up to `cap` new research candidates, best
+    first. Nov 12, 2026: the cap used to cover both, so once six strategies had been promoted no new candidate
+    was ever tested on Saturday, and a seventh promoted strategy would have been dropped without a word."""
     ideas, results = load_ideas(state_dir), load_results(state_dir)
     for r in extra_results or []:
         results[r["id"]] = r
     latest = latest_results(results)
+    keep = {iid: cu["spec"] for iid, cu in ((old_params or {}).get("custom") or {}).items() if cu.get("spec")}
     pool = {}
-    for iid, cu in ((old_params or {}).get("custom") or {}).items():
-        if cu.get("spec"):
-            pool[iid] = (1.0, cu["spec"])  # already promoted: always re-tested
     for iid, r in latest.items():
-        if r.get("verdict") == "candidate" and iid in ideas and ideas[iid].get("spec") and iid not in pool:
+        if r.get("verdict") == "candidate" and iid in ideas and ideas[iid].get("spec") and iid not in keep:
             sp_ = dict(ideas[iid]["spec"])
             if r.get("graded_ok"):  # judged on its graded setups (see GRADED), in every market condition
                 sp_["graded"] = True
@@ -94,7 +95,7 @@ def candidate_specs(state_dir, old_params: dict | None = None, cap: int = 6, ext
                 or (r.get("specialist") or {}).get("oos", {}).get("win_rate") or (r.get("oos") or {}).get("win_rate") or 0
             pool[iid] = (float(win_), sp_)
     ranked = sorted(pool.items(), key=lambda kv: -kv[1][0])[:cap]
-    return {k: v[1] for k, v in ranked}
+    return {**keep, **{k: v[1] for k, v in ranked}}
 
 
 def _write(out: pathlib.Path, writes: list, coll: str, did: str, doc: dict):
