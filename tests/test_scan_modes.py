@@ -325,3 +325,41 @@ def test_later_scans_refresh_or_supersede_open_exit_alerts():
     assert not {"x_2026-11-11_tP_TARGET_HIT", "x_2026-11-11_tZ_EXIT_RULE", "e_2026-11-11_ABC_S"} & set(ups)
     # and they travel in the scan's alert_updates, which the dashboard applies (newest scan wins)
     assert scan.build_overlay({}, [], {"position_alert_updates": ups})["x_2026-11-11_tI_EXIT_RULE"]["status"] == "superseded"
+
+
+def test_topups_count_only_what_is_sent_and_a_rerun_never_double_counts(synth, tmp_path, monkeypatch):
+    """Nov 12: the post-close scan counted two top-ups, then dropped one at the earnings / reward-to-risk check, so
+    the week stayed one short while the email said two were added. And a Scan now the same evening counted
+    tonight's setups twice (in the week so far and again as new), so it could not add the missing one."""
+    base = {"aplus_score": 999, "aplus_pwin": 0.99, "topup_floor": 0, "topup_pwin": 0.0, "topup_ok": True,
+            "oos_topup_win_rate": 0.70, "oos_topup_trades": 600, "oos_topup_avg_ret": 0.01, "oos_aplus_win_rate": 0.76}
+    doc, _ = _run_with_grading(synth, tmp_path / "a", base)
+    tops = [e for e in doc["entries"] if e.get("topup_note")]
+    assert len(tops) >= 2 and doc["scan"]["topup_pace"]["sent"] == len(tops)
+    # the best one has an earnings report inside its hold: it is skipped and the next one takes its place
+    first = tops[0]["ticker"]
+    real = scan.earnings_conflict
+    monkeypatch.setattr(scan, "earnings_conflict", lambda tk, e, d, h: (True, "2026-11-07") if tk == first else real(tk, e, d, h))
+    doc_b, digest_b = _run_with_grading(synth, tmp_path / "b", base)
+    tops_b = [e for e in doc_b["entries"] if e.get("topup_note")]
+    assert first not in {e["ticker"] for e in tops_b}
+    assert len(tops_b) == len(tops) == doc_b["scan"]["topup_pace"]["sent"]
+    assert f"{len(tops_b)} weekly top-up(s) added" in digest_b
+    monkeypatch.setattr(scan, "earnings_conflict", real)
+    # a second run the same evening: tonight's top-ups count once, and the slot one of them leaves is filled anew
+    now = dt.datetime(2026, 11, 5, 14, 40, tzinfo=cal.PT)
+    st = tmp_path / "a" / "state"
+    keep = tops[:-1]  # pretend the last one never went out (say the news check dropped it)
+    for e in keep:
+        (st / "alerts" / f"{e['id']}.json").write_text(json.dumps({**e, "status": "new"}))
+    out = tmp_path / "a" / "out2"
+    scan.run("postclose", str(synth), str(st), str(out), now=now)
+    doc2 = json.loads((out / "scan.json").read_text())
+    digest2 = (out / "digest.md").read_text()
+    pace2 = doc2["scan"]["topup_pace"]
+    assert pace2["week_so_far"] == len(keep) and pace2["sent"] == pace2["behind"] == len(tops) - len(keep)
+    new_ids = {w["doc_id"] for ch in json.loads((out / "writes.json").read_text()) for w in ch if w["collection"] == "alerts"}
+    assert not ({e["id"] for e in keep} & new_ids)  # nothing re-sent as new
+    assert doc2["scan"]["counts"]["sent_earlier"] == len(keep) and doc2["scan"]["counts"]["topups"] == len(tops) - len(keep)
+    assert digest2.count("ALREADY SENT") == len(keep)
+    assert f"{len(keep)} sent earlier tonight" in scan.email_headline(doc2["scan"])

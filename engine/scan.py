@@ -263,7 +263,21 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
     wk_start = (asof - dt.timedelta(days=asof.weekday())).isoformat()
     week_so_far = sum(1 for v in state["alerts"].values() if v["doc"].get("type") == "entry"
                       and str(v["doc"].get("signal_date", "")) >= wk_start)
-    n_aplus = sum(1 for cd in ranked if cd["grade"] == "A+")
+
+    def sendable(cd) -> bool:
+        # the same two checks the setup list below applies: a setup that fails them is never sent, so it must
+        # neither count toward the week's pace nor use up a top-up slot (Nov 12: a top-up dropped here after
+        # being counted left the week one short while the email said two were added)
+        conflict, _ = earnings_conflict(cd["ticker"], earnings, session_day, int(cd["sp"]["max_hold"]))
+        return not conflict and cd["rr"] >= 0.2
+    # setups an earlier run already sent for today's signals (a Scan now after the post-close scan) are counted in
+    # week_so_far; counting them again here would leave the week short, so they never use up the pace twice
+    prior = {}
+    for v in state["alerts"].values():
+        d_ = v["doc"]
+        if d_.get("type") == "entry" and str(d_.get("signal_date", "")) == str(asof) and d_.get("status") != "withdrawn":
+            prior[d_.get("ticker")] = d_.get("grade_kind") or ("aplus" if d_.get("grade") == "A+" else "topup")
+    n_aplus = sum(1 for cd in ranked if cd["grade"] == "A+" and sendable(cd) and cd["ticker"] not in prior)
     # paced through the week (1 by Monday night, 2 by Tuesday, min_week from Wednesday on) so a calm week
     # doesn't leave you without setups until Wednesday; A+ setups always count first
     wmin = week_min(settings)
@@ -286,15 +300,19 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
         need = 0
     tw, tn = G.get("oos_topup_win_rate"), int(G.get("oos_topup_trades") or 0)
     for cd in ranked:
-        if need <= 0:
-            break
         mp = cd.get("model_p", cd["p"])  # the model's own win estimate, as in the backtest replay
-        if cd["grade"] != "A+" and cd["score"] >= floor and mp >= top_p and cd["name"] not in no_topup:
+        ok_ = (not off and cd["grade"] != "A+" and cd["score"] >= floor and mp >= top_p and cd["name"] not in no_topup
+               and sendable(cd))
+        if ok_ and prior.get(cd["ticker"]) == "topup":
+            cd["grade"], cd["topup"] = "A", True  # sent earlier tonight: still a top-up, already counted
+        elif ok_ and need > 0 and cd["ticker"] not in prior:
             cd["grade"], cd["topup"] = "A", True
-            if tw and tn:  # shown win %: how this exact top-up rule's picks actually did, not the score band's average
-                cd["p"] = (float(tw) * tn + mp * 30) / (tn + 30)
             need -= 1
             TOPUP_STATE["sent"] += 1
+        else:
+            continue
+        if tw and tn:  # shown win %: how this exact top-up rule's picks actually did, not the score band's average
+            cd["p"] = (float(tw) * tn + mp * 30) / (tn + 30)
     out, near = [], []
     cap_left = int(settings.get("max_open_positions", P["risk"]["max_open"])) - f["open_count"]
     cash_left = f["cash"]
@@ -356,7 +374,7 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
             "size_note": size["note"], "earnings_next": e_next,
             "last_close": _r(cd["close"]), "atr": _r(cd["atr"]),
             "signal_date": str(asof), "news_check": "pending", "news_note": None,
-            "why": why_text(cd),
+            "why": why_text(cd, meta.get("about") or ""),
             "features": {k: _r(v, 4) for k, v in cd["feats"].items()},
             "partial_bar": bool(partial_bar),
         }
@@ -387,6 +405,8 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
                                  f"each weekday). It is the best setup below the A+ bar that clears the top-up bar (score "
                                  f"{floor:.0f}+, model win {100 * top_p:.0f}%+).{tested}")
         doc["sector_key"] = sector_of(cd["ticker"])
+        if cd["ticker"] in prior:
+            doc["sent_earlier"] = True  # an earlier run tonight already sent it: same order, place it once
         if cd["grade"] == "A+" or cd.get("topup"):
             sc = doc["sector_key"]
             held_sec = sec_count.get(sc, 0) if sc else 0
@@ -415,11 +435,13 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
     return out, near
 
 
-def why_text(cd) -> list[str]:
+def why_text(cd, about: str = "") -> list[str]:
     f = cd["feats"]
     w = []
+    if about:  # the setup's own trigger first (not every strategy is an oversold dip)
+        w.append("Setup: " + about.strip().rstrip("."))
     if f.get("rsi2") is not None and f["rsi2"] == f["rsi2"]:
-        w.append(f"RSI(2) {f['rsi2']:.1f}: short-term oversold")
+        w.append(f"RSI(2) {f['rsi2']:.1f}" + (": short-term oversold" if f["rsi2"] < 20 else ""))
     if f.get("dist200") == f.get("dist200") and f.get("dist200") is not None:
         w.append(f"{100 * f['dist200']:+.1f}% vs 200-day average (long-term uptrend)")
     if f.get("rs_pct") is not None and f.get("is_etf", 0) < 0.5:
@@ -530,6 +552,8 @@ def headline(scan_doc: dict) -> str:
         bits.append(f"{n_ap} A+ setup{'s' if n_ap != 1 else ''}")
     if n_top:
         bits.append(f"{n_top} grade-A weekly top-up{'s' if n_top != 1 else ''}")
+    if c.get("sent_earlier"):
+        bits.append(f"{c['sent_earlier']} sent earlier tonight")
     if c.get("exit_alerts"):
         bits.append(f"{c['exit_alerts']} exit alert{'s' if c['exit_alerts'] != 1 else ''}")
     if c.get("stop_raises"):
@@ -776,7 +800,9 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
                  "intraday_asof": meta.get("intraday_asof"), "partial_bar": partial,
                  "tickers": int(ind["close"].shape[1])},
         "market": regime_summary(ind), "funds": f,
-        "counts": {"aplus": len(entries), "topups": sum(1 for e in entries if e.get("topup_note")), "near_misses": len(near), **signal_counts(positions),
+        "counts": {"aplus": sum(1 for e in entries if not e.get("sent_earlier")),
+                   "topups": sum(1 for e in entries if e.get("topup_note") and not e.get("sent_earlier")),
+                   "sent_earlier": sum(1 for e in entries if e.get("sent_earlier")), "near_misses": len(near), **signal_counts(positions),
                    "orders_to_record": sum(1 for c in fill_checks if c.get("filled")),
                    "orders_to_check": sum(1 for c in fill_checks if c.get("status") == "placed"
                                           and (c.get("filled") is None or c.get("touched"))),
@@ -1188,6 +1214,8 @@ def setup_block(e: dict, rank) -> list[str]:
     grade = "Weekly top-up (below A+)" if e.get("topup_note") else e.get("grade", "A+")
     out = ["", f"{head}{e['ticker']} | {e['name']} | {e['strategy_label']} | {grade} | score {e['score']} | win est. {e['win_pct']}%"
                 f" | exp. {e.get('exp_return_pct', '')}% per trade"]
+    if e.get("sent_earlier"):
+        out.append("   ALREADY SENT  in an earlier email tonight: the same order, so place it only once.")
     frac = " (FRACTIONAL: market hours only)" if e.get("fractional") else ""
     out.append(f"   ORDER    {e['order']}")
     out.append(f"   BRACKET  Stop ${e['stop']} ({_pct(e['stop'], e['entry'])}) | Target ${e['target']} ({_pct(e['target'], e['entry'])}) | "
