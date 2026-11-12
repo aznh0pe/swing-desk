@@ -1068,7 +1068,7 @@ def run_topups(data_dir, state_dir, out_dir, split="2022-01-01", log=print, now=
         if not tr.empty:
             trs.append(tr)
     t = pd.concat(trs, ignore_index=True)
-    p_, e_, ep_ = M.predict_pooled(pm, t[S.FEATURES], t["strategy"].values)
+    p_, e_, ep_ = M.predict_pooled(pm, t[S.FEATURES], t["strategy"].values, M.grading_offsets(P.get("live_adjust")))
     t["p"], t["score"] = p_, M.score_pooled(p_, ep_)
     t = mark_entry(t, P)
     post = t[t["signal_date"] >= pd.Timestamp(split)]
@@ -1200,8 +1200,8 @@ def promote_gate(base: dict, new: dict, name: str) -> tuple[bool, list]:
 
 
 def _score_live(t: pd.DataFrame, pm: dict, P_: dict) -> pd.DataFrame:
-    """Scores setups exactly as the scanner does (live pooled model with the live adjustments)."""
-    p_, e_, ep_ = M.predict_pooled(pm, t[S.FEATURES], t["strategy"].values, P_.get("live_adjust"))
+    """Scores setups exactly as the scanner grades them (live pooled model; live adjustments only where they make grading stricter)."""
+    p_, e_, ep_ = M.predict_pooled(pm, t[S.FEATURES], t["strategy"].values, M.grading_offsets(P_.get("live_adjust")))
     return t.assign(p=p_, score=M.score_pooled(p_, ep_))
 
 

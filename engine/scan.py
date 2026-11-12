@@ -149,6 +149,7 @@ def exit_signal_text(plan_name, sp, dyn, target, stop, hold, earnings_next):
 
 CONDITION_STATE: dict = {}  # today's market condition and the strategies paused in it, from the last build_entries call
 TOPUP_STATE: dict = {}  # how far the week is behind pace and what the top-up rule did, from the last build_entries call
+BELOW_BAR: dict = {}  # this run's signals that clear no bar, for accurate withdrawal reasons
 HELD_SECTORS: dict = {}  # open positions per sector bucket from the last build_entries call (saved in ctx)
 
 
@@ -176,9 +177,11 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
                 continue
             sp = P["strategies"][name]
             mdl = P.get("models", {}).get(name)
-            off = float(P.get("live_adjust", {}).get(name, {}).get("offset", 0.0))
+            off_full = float(P.get("live_adjust", {}).get(name, {}).get("offset", 0.0))
+            off = min(0.0, off_full)  # grading uses only adjustments that make it stricter (M.grading_offsets)
             feats = S.features_at(ind, np.full(len(js), T), js)
             p = M.predict(mdl, feats, off)
+            p_full = M.predict(mdl, feats, off_full) if off_full != off else p
             for k, j in enumerate(js):
                 tk = c.columns[j]
                 try:
@@ -202,7 +205,7 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
                         target = entry + tg["mult"] * atr
                     rr = (target - entry) / max(entry - stop, 1e-6)
                     cands.append({"name": name, "j": int(j), "ticker": tk, "entry": entry,
-                                  "stop": stop, "target": target, "rr": rr, "p": float(p[k]),
+                                  "stop": stop, "target": target, "rr": rr, "p": float(p[k]), "live_p": float(p_full[k]),
                                   "atr": atr, "close": close, "feats": feats.iloc[k].to_dict(),
                                   "model": mdl, "sp": sp, "plan": plan})
                 except Exception as e:
@@ -217,10 +220,14 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
         fdf = pd.DataFrame([cd["feats"] for cd in cands])
         names = [cd["name"] for cd in cands]
         try:
-            p_, e_, ep_ = M.predict_pooled(pm, fdf, names, P.get("live_adjust"))
+            adj = P.get("live_adjust") or {}
+            # grade on the tested win odds (live adjustments may only make grading stricter, see M.grading_offsets);
+            # the full adjustment shows in the win estimate
+            p_, e_, ep_ = M.predict_pooled(pm, fdf, names, M.grading_offsets(adj))
             sc_ = M.score_pooled(p_, ep_)
-            for cd, pv, ev, epv, scv in zip(cands, p_, e_, ep_, sc_):
-                cd.update(p=float(pv), exp_ret=float(ev), e_pct=float(epv), score=float(scv))
+            p_live = M.predict_pooled(pm, fdf, names, adj)[0] if adj else p_
+            for cd, pv, ev, epv, scv, plv in zip(cands, p_, e_, ep_, sc_, p_live):
+                cd.update(p=float(pv), exp_ret=float(ev), e_pct=float(epv), score=float(scv), live_p=float(plv))
         except Exception as e:
             errors.append(f"pooled model failed, using per-strategy scores: {e!r}"[:200])
             pm = None
@@ -231,10 +238,11 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
     for cd in cands:
         cd["grade"] = M.grade(cd["score"], cd["p"], P["grading"])
         cd["model_p"] = cd["p"]
+        cd["p"] = shown = cd.get("live_p", cd["model_p"])  # the win estimate carries the live record in full
         for row in table:  # Win % = how often past setups with this score actually won
             if row["lo"] <= cd["score"] < row["hi"]:
                 n = row["n"]
-                cd["p"] = (row["win"] * n + cd["model_p"] * 30) / (n + 30)
+                cd["p"] = (row["win"] * n + shown * 30) / (n + 30)
                 cd["band_avg"] = row["avg"]
                 break
     # market conditions: a strategy paused in today's condition (validated on 2022-now data, or by its own
@@ -261,8 +269,6 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
     # setups with the best grade-A candidates (clearly labelled as such)
     G = P["grading"]
     wk_start = (asof - dt.timedelta(days=asof.weekday())).isoformat()
-    week_so_far = sum(1 for v in state["alerts"].values() if v["doc"].get("type") == "entry"
-                      and str(v["doc"].get("signal_date", "")) >= wk_start)
 
     def sendable(cd) -> bool:
         # the same two checks the setup list below applies: a setup that fails them is never sent, so it must
@@ -270,19 +276,6 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
         # being counted left the week one short while the email said two were added)
         conflict, _ = earnings_conflict(cd["ticker"], earnings, session_day, int(cd["sp"]["max_hold"]))
         return not conflict and cd["rr"] >= 0.2
-    # setups an earlier run already sent for today's signals (a Scan now after the post-close scan) are counted in
-    # week_so_far; counting them again here would leave the week short, so they never use up the pace twice
-    prior = {}
-    for v in state["alerts"].values():
-        d_ = v["doc"]
-        if d_.get("type") == "entry" and str(d_.get("signal_date", "")) == str(asof) and d_.get("status") != "withdrawn":
-            prior[d_.get("ticker")] = d_.get("grade_kind") or ("aplus" if d_.get("grade") == "A+" else "topup")
-    n_aplus = sum(1 for cd in ranked if cd["grade"] == "A+" and sendable(cd) and cd["ticker"] not in prior)
-    # paced through the week (1 by Monday night, 2 by Tuesday, min_week from Wednesday on) so a calm week
-    # doesn't leave you without setups until Wednesday; A+ setups always count first
-    wmin = week_min(settings)
-    pace = min(wmin, asof.weekday() + 1)  # one more each night: 1 by Monday ... 5 by Friday
-    need = max(0, pace - week_so_far - n_aplus) if mode == "postclose" else 0
     # the top-up rule is tuned on its own (weekly recalibration, replaying this exact rule) and follows the
     # top-ups' own live record: normal, tight (must also clear the A+ win estimate) or off
     tmode = str(G.get("topup_mode") or "normal")
@@ -293,26 +286,61 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
         top_p = max(top_p, float(G.get("aplus_pwin", 0.62)))
     no_topup = set((G.get("topup_excluded") or {}).keys()) | set((G.get("topup_excluded_live") or {}).keys())
     off = tmode == "off" or bool(G.get("topups_off")) or G.get("topup_ok") is False
+
+    def topup_ok(cd) -> bool:
+        mp = cd.get("model_p", cd["p"])  # the model's own win estimate, as in the backtest replay
+        return (not off and cd["grade"] != "A+" and cd["score"] >= floor and mp >= top_p and cd["name"] not in no_topup
+                and sendable(cd))
+    # The week so far counts setups that are still live: never one a later scan withdrew. Setups an earlier run of
+    # this same scan sent for today's signals (a Scan now after the post-close scan) count once, and only while
+    # they still qualify; this run withdraws the ones that no longer do (Nov 12).
+    ov = current_overlay(state)
+    pre_kind = mode == "preclose"
+    week_prev, prior = 0, {}
+    for aid, v in state["alerts"].items():
+        d_ = v["doc"]
+        sd = str(d_.get("signal_date", ""))
+        if (d_.get("type") != "entry" or sd < wk_start or d_.get("status") == "withdrawn"
+                or (ov.get(aid) or {}).get("withdrawn")):
+            continue
+        if sd == str(asof) and str(d_.get("scan_id", "")).endswith("preclose") == pre_kind:
+            prior[d_.get("ticker")] = d_.get("grade_kind") or ("aplus" if d_.get("grade") == "A+" else "topup")
+        else:
+            week_prev += 1
+    kept = {cd["ticker"] for cd in ranked if cd["ticker"] in prior
+            and ((cd["grade"] == "A+" and sendable(cd)) or topup_ok(cd))}
+    week_so_far = week_prev + len(kept)
+    n_aplus = sum(1 for cd in ranked if cd["grade"] == "A+" and sendable(cd) and cd["ticker"] not in prior)
+    # paced through the week (1 by Monday night, 2 by Tuesday, min_week from Wednesday on) so a calm week
+    # doesn't leave you without setups until Wednesday; A+ setups always count first
+    wmin = week_min(settings)
+    pace = min(wmin, asof.weekday() + 1)  # one more each night: 1 by Monday ... 5 by Friday
+    behind = max(0, pace - week_so_far - n_aplus) if mode == "postclose" else 0
+    need = 0 if off else behind
     TOPUP_STATE.clear()
-    TOPUP_STATE.update(behind=need, pace=pace, week_so_far=week_so_far + n_aplus, floor=floor, top_p=top_p,
+    TOPUP_STATE.update(behind=behind, pace=pace, week_so_far=week_so_far + n_aplus, floor=floor, top_p=top_p,
                        mode="off" if off else tmode, ok=G.get("topup_ok", True), sent=0)
-    if off:
-        need = 0
     tw, tn = G.get("oos_topup_win_rate"), int(G.get("oos_topup_trades") or 0)
     for cd in ranked:
-        mp = cd.get("model_p", cd["p"])  # the model's own win estimate, as in the backtest replay
-        ok_ = (not off and cd["grade"] != "A+" and cd["score"] >= floor and mp >= top_p and cd["name"] not in no_topup
-               and sendable(cd))
-        if ok_ and prior.get(cd["ticker"]) == "topup":
-            cd["grade"], cd["topup"] = "A", True  # sent earlier tonight: still a top-up, already counted
-        elif ok_ and need > 0 and cd["ticker"] not in prior:
+        if not topup_ok(cd):
+            continue
+        if cd["ticker"] in prior:
+            cd["grade"], cd["topup"] = "A", True  # sent earlier tonight and still qualifies: counted once already
+        elif need > 0:
             cd["grade"], cd["topup"] = "A", True
             need -= 1
             TOPUP_STATE["sent"] += 1
         else:
             continue
+        mp = cd.get("live_p", cd.get("model_p", cd["p"]))  # the live record shows in the estimate, never in grading
         if tw and tn:  # shown win %: how this exact top-up rule's picks actually did, not the score band's average
             cd["p"] = (float(tw) * tn + mp * 30) / (tn + 30)
+    BELOW_BAR.clear()
+    for cd in ranked:
+        if cd["grade"] != "A+" and not cd.get("topup"):
+            BELOW_BAR[cd["ticker"]] = {"score": float(cd["score"]), "model_p": float(cd.get("model_p", cd["p"])),
+                                       "floor": floor, "top_p": top_p, "aplus_score": float(G.get("aplus_score", 0)),
+                                       "aplus_pwin": float(G.get("aplus_pwin", 0))}
     out, near = [], []
     cap_left = int(settings.get("max_open_positions", P["risk"]["max_open"])) - f["open_count"]
     cash_left = f["cash"]
@@ -529,9 +557,14 @@ def build_overlay(scan_doc: dict, entries: list, ctx: dict) -> dict:
         if aid in live:
             continue
         tk = a.get("ticker")
+        bb = BELOW_BAR.get(tk)
         reason = (f"Dropped by the {ctx.get('when')} scan's news check: {dropped[tk]}" if tk in dropped else
-                  f"No longer qualifies in the {ctx.get('when')} scan (price or indicators moved, or a stronger setup "
-                  "on the same ticker replaced it).")
+                  (f"No longer clears the bar in the {ctx.get('when')} scan: score {bb['score']:.1f}, model win "
+                   f"{100 * bb['model_p']:.0f}% (weekly top-up bar: score {bb['floor']:.0f}+ and model win "
+                   f"{100 * bb['top_p']:.0f}%+; A+ bar: score {bb['aplus_score']:.0f}+ and {100 * bb['aplus_pwin']:.0f}%+)."
+                   if bb else
+                   f"No longer qualifies in the {ctx.get('when')} scan (price or indicators moved, or a stronger setup "
+                   "on the same ticker replaced it)."))
         ups[aid] = {"withdrawn": True, "withdrawn_reason": reason, "rank": None, "ticker": tk}
     for c in scan_doc.get("premarket_checks") or []:
         if c.get("verdict") == "cancel" and c.get("alert_id"):
@@ -788,8 +821,13 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
             _write(out, writes, "set", "alerts", did, doc)
     ctx["position_alert_updates"] = position_alert_updates(existing, positions, scan_id, ctx.get("when") or "")
     week_start = today - dt.timedelta(days=today.weekday())
-    this_week = [v["doc"] for v in existing.values() if v["doc"].get("type") == "entry"
-                 and str(v["doc"].get("signal_date", "")) >= str(week_start)]
+    # setups withdrawn by an earlier scan or by this one are not part of the week (the pace counts them the same way)
+    ov_prev = current_overlay(state)
+    live_ids = {e.get("id") for e in entries}
+    wd_now = {aid for aid in (ctx.get("window") or {}) if aid not in live_ids}
+    this_week = [v["doc"] for aid, v in existing.items() if v["doc"].get("type") == "entry"
+                 and str(v["doc"].get("signal_date", "")) >= str(week_start) and v["doc"].get("status") != "withdrawn"
+                 and not (ov_prev.get(aid) or {}).get("withdrawn") and aid not in wd_now]
     new_ids = {w_["doc_id"] for w_ in writes if w_["collection"] == "alerts" and w_["doc_id"].startswith("e_")}
     this_week += [e for e in entries if e.get("id") in new_ids]
     week_topups = sum(1 for d in this_week if d.get("topup_note"))

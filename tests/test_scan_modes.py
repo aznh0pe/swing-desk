@@ -363,3 +363,52 @@ def test_topups_count_only_what_is_sent_and_a_rerun_never_double_counts(synth, t
     assert doc2["scan"]["counts"]["sent_earlier"] == len(keep) and doc2["scan"]["counts"]["topups"] == len(tops) - len(keep)
     assert digest2.count("ALREADY SENT") == len(keep)
     assert f"{len(keep)} sent earlier tonight" in scan.email_headline(doc2["scan"])
+
+
+def test_live_boosts_never_loosen_grading_and_withdrawn_setups_never_count(synth, tmp_path):
+    """Nov 12: positive live adjustments (from a short winning streak) let setups clear the A+ and top-up bars that
+    the tested model would not send; replayed on 2022-now they more than doubled A+ setups and cut its win rate.
+    Grading now uses only the adjustments that make it stricter; a boost shows in the win estimate alone. And a
+    setup a later scan withdrew no longer counts toward the week's pace."""
+    from engine import model as M
+    adj = {"A": {"offset": 0.4, "wins": 12, "n": 12}, "B": {"offset": -0.3}}
+    g = M.grading_offsets(adj)
+    assert g["A"]["offset"] == 0.0 and g["B"]["offset"] == -0.3 and g["A"]["wins"] == 12
+    base = {"aplus_score": 35, "aplus_pwin": 0.55, "topup_floor": 0, "topup_pwin": 0.0, "topup_ok": True,
+            "oos_topup_win_rate": 0.70, "oos_topup_trades": 600, "oos_topup_avg_ret": 0.01, "oos_aplus_win_rate": 0.76}
+
+    def run(sub, live_adjust, alerts=()):
+        now = dt.datetime(2026, 11, 5, 14, 10, tzinfo=cal.PT)
+        st = _state(tmp_path / sub)
+        (st / "strategy").mkdir()
+        models = {n: {"kind": "base", "base_rate": 0.62, "avg_win": 0.025, "avg_loss": -0.035}
+                  for n in S.params_with_defaults(None)["strategies"]}
+        (st / "strategy" / "params.json").write_text(json.dumps({"params": {"grading": base, "live_adjust": live_adjust,
+                                                                             "models": models}}))
+        for a in alerts:
+            (st / "alerts" / f"{a['id']}.json").write_text(json.dumps(a))
+        out = tmp_path / sub / "out"
+        scan.run("postclose", str(synth), str(st), str(out), now=now)
+        return json.loads((out / "scan.json").read_text())
+    plain = run("a", {})
+    names = {e["strategy"] for e in plain["entries"]}
+    boosted = run("b", {n: {"offset": 0.6} for n in names})
+    key = lambda d: sorted((e["ticker"], e["grade_kind"], e["score"]) for e in d["entries"])
+    assert key(boosted) == key(plain)  # same setups, same grades, same scores
+    assert any(b["win_pct"] > p["win_pct"] for b, p in zip(sorted(boosted["entries"], key=lambda e: e["ticker"]),
+                                                          sorted(plain["entries"], key=lambda e: e["ticker"])))
+    cut = run("c", {n: {"offset": -0.6} for n in names})
+    assert len([e for e in cut["entries"] if e["grade_kind"] == "aplus"]) < len([e for e in plain["entries"] if e["grade_kind"] == "aplus"])
+    # a setup withdrawn by a later scan earlier this week does not count toward the pace
+    wd = [{"id": f"e_old{k}", "type": "entry", "status": "new", "ticker": f"Z{k}", "signal_date": "2026-11-03",
+           "valid_for": "2026-11-04", "scan_id": "20261103-1405-postclose"} for k in range(2)]
+    st_dir = tmp_path / "d"
+    doc_kept = run("d", {}, wd)
+    sdir = st_dir / "state" / "scans"
+    sdir.mkdir()
+    (sdir / "s1.json").write_text(json.dumps({"id": "s1", "started_at": "2026-11-04T05:50:00-08:00",
+                                               "alert_updates": {"e_old0": {"withdrawn": True}}}))
+    out = tmp_path / "d" / "out2"
+    scan.run("postclose", str(synth), str(st_dir / "state"), str(out), now=dt.datetime(2026, 11, 5, 14, 10, tzinfo=cal.PT))
+    doc_wd = json.loads((out / "scan.json").read_text())
+    assert doc_wd["scan"]["topup_pace"]["week_so_far"] == doc_kept["scan"]["topup_pace"]["week_so_far"] - 1

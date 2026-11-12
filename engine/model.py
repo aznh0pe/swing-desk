@@ -215,6 +215,16 @@ def fit_pooled(trades: pd.DataFrame, strat_names: list[str], split, cal_end=None
     return m
 
 
+def grading_offsets(live_adjust: dict | None) -> dict:
+    """The live win-probability adjustments as they apply to grading: only the ones that make a strategy's
+    setups harder to send. The A+ and top-up bars are chosen on the model's tested win odds; a positive
+    adjustment from a short live streak would let more setups clear them than were tested (Nov 12, 2026: today's
+    +0.26 / +0.14 adjustments, from 12 and 6 wins in one correlated rebound, more than doubled the A+ setups in a
+    replay of 2022-now, A+ win rate 76.9% -> 74.1%, account growth 26.3% -> 18.5% a year, drawdown -8.6% ->
+    -14.2%). A positive adjustment still shows in the win estimate; the weekly recalibration decides the rest."""
+    return {k: {**(v or {}), "offset": min(0.0, float((v or {}).get("offset", 0.0)))} for k, v in (live_adjust or {}).items()}
+
+
 def predict_pooled(m: dict, feats: pd.DataFrame, strategies, offsets: dict | None = None):
     X = pooled_frame(feats, strategies, m["strategies"])
     Z = np.column_stack([(X[c].values - m["mean"][c]) / (m["std"][c] or 1) for c in m["features"]])
