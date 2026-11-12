@@ -218,6 +218,7 @@ td .t { font-family: var(--f-display); font-stretch: 85%; font-weight: 700; font
 .banner.warn { background: var(--warn-bg); color: var(--warn); }
 .banner.info { background: var(--info-bg); color: var(--info); }
 .banner.crit { background: var(--crit-bg); color: var(--crit); }
+.banner.fixed { background: var(--good-bg, var(--info-bg)); color: var(--good, var(--info)); }
 
 /* charts */
 .chart { position: relative; width: 100%; }
@@ -723,12 +724,19 @@ function attentionBanner() {
   const h = runHealth(), res = orderResolutions().filter((r) => r.kind !== "ask" || r.fc);
   let out = h.bad.length ? `<div class="banner crit" style="margin-bottom:12px"><b>${h.bad.map((i) => esc(i.label)).join(", ")} didn't run today.</b> The backup check couldn't recover ${h.bad.length === 1 ? "it" : "them"} either. <button class="btn small" type="button" data-tab="scans">See today's runs</button></div>` : "";
   // problems inside a run that still finished (a failed step, a fallback, a fix): shown until the next clean run
-  const lastRun = S.scans.find((x) => x.status !== "closed"), ri = lastRun?.run_issues || [];
+  // a problem Claude has fixed is recorded on the run as resolved: it then shows as fixed (with the fix), not as open
+  const openOf = (list, doc) => { const rs = Array.isArray(doc?.issues_resolved) ? doc.issues_resolved : []; return [list.filter((t) => !rs.some((r) => r.issue === t)), rs]; };
+  const fixedNote = (rs, what) => rs.length ? `<div class="banner fixed" style="margin-bottom:12px"><b>Fixed: the problem in the last ${what}.</b> ${rs.map((r) => esc(r.fix || "")).join(" ")}</div>` : "";
+  const lastRun = S.scans.find((x) => x.status !== "closed");
+  const [ri, rsScan] = openOf(lastRun?.run_issues || [], lastRun);
   if (ri.length || lastRun?.status === "failed") out += `<div class="banner crit" style="margin-bottom:12px"><b>Problem in the last scan (${dtShort(lastRun.started_at)}):</b> ${lastRun.status === "failed" ? "the scan failed. " : ""}${ri.map((t) => esc(t)).join(" ")} ${lastRun.status === "failed" ? "" : "The scan still finished and its results are complete. "}Tell Claude in the Swing Desk chat so it gets fixed.</div>`;
+  else out += fixedNote(rsScan, "scan");
   // problems in the daily learning review or the weekly recalibration: shown until that job's next clean run
   for (const [weekly, name] of [[false, "daily learning review"], [true, "weekly recalibration"]]) {
-    const j = S.journal.find((x) => String(x.id).endsWith("-weekly") === weekly), ji = Array.isArray(j?.issues) ? j.issues : [];
+    const j = S.journal.find((x) => String(x.id).endsWith("-weekly") === weekly);
+    const [ji, rs] = openOf(Array.isArray(j?.issues) ? j.issues : [], j);
     if (ji.length) out += `<div class="banner crit" style="margin-bottom:12px"><b>Problem in the last ${name} (${j.date ? dShort(j.date) : "latest"}):</b> ${ji.map((t) => esc(t)).join(" ")} Tell Claude in the Swing Desk chat so it gets fixed.</div>`;
+    else out += fixedNote(rs, `${name} (${j?.date ? dShort(j.date) : "latest"})`);
   }
   if (res.length) out += `<div class="banner info" style="margin-bottom:12px"><b>${res.map((r) => esc(r.a.ticker)).join(", ")}: ${res.length === 1 ? "did this order fill?" : "did these orders fill?"}</b> ${res.some((r) => r.kind !== "ask") ? "The day's low traded below the limit, so it probably filled. " : ""}Record it so the scans watch the position. <button class="btn small" type="button" data-tab="alerts">Answer</button></div>`;
   return out;
