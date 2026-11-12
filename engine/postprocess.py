@@ -86,6 +86,8 @@ def apply(out_dir: str, news: list[str], state_dir: str | None = None, issues: l
     state = load_state(state_dir) if state_dir else None
     P = load_params(state, None) if state else None
     cutoff = (P or {}).get("grading", {}).get("aplus_score", 80) if P else scan.get("aplus_cutoff", 80)
+    # a weekly top-up is judged against its own bar (it sits below the A+ bar by design)
+    tu_floor = float(((P or {}).get("grading") or {}).get("topup_floor") or (scan.get("topup_pace") or {}).get("floor") or 0)
     verdicts = _verdicts(news)
     # a later check of the same session never softens an earlier caution or avoid (win rate first)
     kept_prior = []
@@ -101,14 +103,18 @@ def apply(out_dir: str, news: list[str], state_dir: str | None = None, issues: l
             kept.append(e)
             continue
         kind, note = v
+        is_tu = bool(e.get("topup_note")) or e.get("grade_kind") == "topup"
         if kind == "avoid":
-            dropped.append({"ticker": e["ticker"], "reason": note or "news risk"})
+            dropped.append({"ticker": e["ticker"], "reason": note or "news risk", "topup": is_tu})
             continue
         if kind == "caution":
             e["news_check"], e["news_note"] = "caution", note
             e["score"] = round(float(e["score"]) - 8, 1)
-            if e["score"] < cutoff:
-                dropped.append({"ticker": e["ticker"], "reason": f"score fell below A+ after news caution: {note}"})
+            bar = tu_floor if is_tu else cutoff
+            if e["score"] < bar:
+                dropped.append({"ticker": e["ticker"], "topup": is_tu, "reason":
+                                (f"score fell below the weekly top-up bar after news caution: {note}" if is_tu
+                                 else f"score fell below A+ after news caution: {note}")})
                 continue
         else:
             e["news_check"], e["news_note"] = "clean", note
@@ -181,7 +187,22 @@ def apply(out_dir: str, news: list[str], state_dir: str | None = None, issues: l
     # scan doc, overlay for alerts that already exist, digest
     scan["counts"]["aplus"] = len(kept)
     scan["counts"]["topups"] = sum(1 for e in kept if e.get("topup_note"))
-    scan["news_dropped"] = dropped
+    # setups the news check dropped tonight no longer count toward the week (they were counted when the scan ran)
+    new_drop = [e for e in entries if e["id"] in drop_ids and e["id"] not in set(scan.get("news_dropped_ids") or [])]
+    d_tu = sum(1 for e in new_drop if e.get("topup_note") or e.get("grade_kind") == "topup")
+    d_ap = len(new_drop) - d_tu
+    if d_tu or d_ap:
+        c_ = scan["counts"]
+        c_["week_topups"] = max(0, int(c_.get("week_topups") or 0) - d_tu)
+        c_["week_aplus"] = max(0, int(c_.get("week_aplus") or 0) - d_ap)
+        tp_ = scan.get("topup_pace")
+        if tp_ and d_tu:
+            tp_["sent"] = max(0, int(tp_.get("sent") or 0) - d_tu)
+            tp_["dropped_by_news"] = int(tp_.get("dropped_by_news") or 0) + d_tu
+        scan["news_dropped_ids"] = sorted(set(scan.get("news_dropped_ids") or []) | {e["id"] for e in new_drop})
+    # a second run on the same output (for example to add a run problem) keeps what the first one dropped
+    seen_ = {d["ticker"] for d in dropped}
+    scan["news_dropped"] = [d for d in (scan.get("news_dropped") or []) if d.get("ticker") not in seen_] + dropped
     scan["news_checked"] = sorted(verdicts)
     scan["news_rules"] = NEWS_RULES
     # anything that went wrong in the run itself (a step that failed and needed a fallback or a retry, a fix
@@ -202,8 +223,8 @@ def apply(out_dir: str, news: list[str], state_dir: str | None = None, issues: l
     P2 = P or {"risk": {"max_open": scan.get("funds", {}).get("max_open", 5)}, "grading": {"min_week": 3}}
     digest = make_digest(scan, kept, scan.get("positions", []), scan.get("near_misses", []),
                          scan.get("premarket_checks", []), scan["counts"].get("week_aplus", len(kept)), P2, now)
-    if dropped:
-        digest += "\n\nDropped after news check: " + "; ".join(f"{d['ticker']} ({d['reason']})" for d in dropped)
+    if scan["news_dropped"]:
+        digest += "\n\nDropped after news check: " + "; ".join(f"{d['ticker']} ({d['reason']})" for d in scan["news_dropped"])
     digest = mark_caution(digest)
     scan["digest"] = digest
     (out / "docs" / "scans" / f"{scan['id']}.json").write_text(json.dumps(scan, default=str))

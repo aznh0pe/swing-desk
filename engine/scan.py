@@ -1117,6 +1117,11 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
         if not tp.get("ok", True) or tp.get("mode") == "off":
             msg = ("Weekly top-ups are switched off right now (their own record or test fell below the bar), so the week stays "
                    f"{short} setup(s) behind its pace of {tp.get('pace')} by tonight.")
+        elif short > 0 and tp.get("dropped_by_news"):
+            msg = (f"This week is {short} setup(s) behind its pace of {tp.get('pace')} by tonight"
+                   + (f" after {added} weekly top-up(s)" if added else "")
+                   + f": {tp['dropped_by_news']} top-up(s) that cleared the bar ({rule}) were dropped by the news check (below). "
+                   "The next scans make up the shortfall with the best setups that clear the bar; none is forced.")
         elif short > 0:
             msg = (f"This week is {short} setup(s) behind its pace of {tp.get('pace')} by tonight"
                    + (f" after {added} weekly top-up(s)" if added else "")

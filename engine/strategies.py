@@ -259,7 +259,10 @@ def all_weather_sentence(aw: dict | None, label: str = "It") -> str:
         return f"{label} is all-weather: it held up in every market condition{span}."
     if aw.get("weak"):
         det = aw.get("weak_detail") or {}
-        return (f"{label} is condition-dependent: weaker in "
+        good = [c for c in aw["tested"] if c not in aw["weak"]]
+        if not good:
+            return f"{label} held up in no market condition{span}."
+        return (f"{label} is condition-dependent: it holds up in {' and '.join(CONDITION_PLURAL[c] for c in good)}, and is weaker in "
                 + " and ".join(CONDITION_PLURAL[c] + (f" ({det[c]})" if det.get(c) else "") for c in aw["weak"]) + f"{span}.")
     return ""
 

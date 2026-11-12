@@ -261,3 +261,31 @@ def test_alerts_say_how_their_strategy_does_in_todays_market_condition(synth, tm
     assert all(e.get("all_weather") and "is all-weather" in e["condition_note"] and "64-75%" in e["condition_note"] for e in aw)
     assert not any(e.get("all_weather") for e in t2 if e["strategy"] != aw_name)
     assert "all-weather (hold up in any market)" in (out / "digest.md").read_text() or not d2["scan"]["market"].get("condition")
+
+
+def test_news_check_judges_top_ups_against_their_own_bar_and_recounts_the_week(synth, tmp_path):
+    from engine import postprocess
+    base = {"aplus_score": 999, "aplus_pwin": 0.99, "topup_floor": 0, "topup_pwin": 0.0, "topup_ok": True,
+            "oos_topup_win_rate": 0.70, "oos_topup_trades": 649, "oos_topup_avg_ret": 0.011, "oos_aplus_win_rate": 0.76}
+    doc, _ = _run_with_grading(synth, tmp_path / "a", base)
+    out = tmp_path / "a" / "out"
+    tops = [e for e in doc["entries"] if e.get("topup_note")]
+    assert tops and doc["scan"]["topup_pace"]["sent"] == len(tops)
+    st = tmp_path / "a" / "state"
+    # a caution costs 8 points: a top-up that still clears the top-up bar stays (flagged), it is not judged against A+
+    r = postprocess.apply(str(out), [f"{tops[0]['ticker']}=caution:Analyst downgrade"], str(st))
+    after = json.loads((out / "scan.json").read_text())
+    assert not r["dropped"] and any(e["ticker"] == tops[0]["ticker"] and e["news_check"] == "caution" for e in after["entries"])
+    # avoid drops it, and the week's count, the pace and the email all say so
+    week_before = after["scan"]["counts"]["week_topups"]
+    r2 = postprocess.apply(str(out), [f"{tops[0]['ticker']}=avoid:Agreed to be acquired"], str(st))
+    sc = json.loads((out / "scan.json").read_text())["scan"]
+    assert r2["dropped"] and sc["counts"]["week_topups"] == week_before - 1
+    assert sc["topup_pace"]["dropped_by_news"] == 1 and sc["topup_pace"]["sent"] == len(tops) - 1
+    dg = (out / "digest.md").read_text()
+    assert "dropped by the news check" in dg and f"{tops[0]['ticker']} (Agreed to be acquired)" in dg
+    # running it again (say, to add a run problem) neither double-counts nor forgets the drop
+    postprocess.apply(str(out), [], str(st), ["a test problem"])
+    sc2 = json.loads((out / "scan.json").read_text())["scan"]
+    assert sc2["counts"]["week_topups"] == week_before - 1 and sc2["topup_pace"]["dropped_by_news"] == 1
+    assert "Dropped after news check" in (out / "digest.md").read_text()
