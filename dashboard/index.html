@@ -1570,6 +1570,7 @@ function journalEntry(j) {
     ${j.didnt_work?.length ? `<div class="small"><b>Didn't work:</b><ul style="margin:2px 0 0;padding-left:18px">${li(j.didnt_work)}</ul></div>` : ""}
     <div class="small"><b>Insights:</b><ul style="margin:2px 0 0;padding-left:18px">${li(j.insights)}</ul></div>
     <div class="small"><b>Changes:</b><ul style="margin:2px 0 0;padding-left:18px">${li(j.changes)}</ul></div>
+    ${j.promotion ? `<div class="small"><b>Promotion check:</b> ${esc(j.promotion)}</div>` : ""}
     ${j.notes ? `<div class="small muted">${esc(j.notes)}</div>` : ""}</article>`;
 }
 
