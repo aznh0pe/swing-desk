@@ -463,6 +463,34 @@ def overlay_ctx(state, mode, session_day, today, now) -> dict:
     return {"existing_entry_ids": existing, "window": window, "when": now.strftime("%-I:%M %p").lower()}
 
 
+def position_alert_updates(existing: dict, positions: list, scan_id: str, when: str) -> dict:
+    """This scan's view of the exit and stop alerts earlier scans left open. Each open position has one current
+    instruction: the one this scan just worked out. An open alert for a position this scan re-checked is either
+    refreshed (the same signal today: new wording, price, P&L and day count) or superseded (the signal no longer
+    applies, or today's alert replaces an older day's). The dashboard and every count then follow the latest scan."""
+    cur = {}
+    for pos in positions:
+        sigs = {sg["code"]: sg for sg in pos.get("signals", [])
+                if sg["level"] in ("alert", "good", "info") or sg["code"] in CHECK_CODES}
+        cur[pos["trade_id"]] = (pos, sigs)
+    ups = {}
+    for aid, v in existing.items():
+        d = v["doc"]
+        if d.get("type") not in ("exit", "adjust") or d.get("status") != "new" or d.get("trade_id") not in cur:
+            continue
+        pos, sigs = cur[d["trade_id"]]
+        sg = sigs.get(d.get("code"))
+        if sg is not None and aid == f"x_{pos['asof']}_{pos['trade_id']}_{sg['code']}":
+            ups[aid] = {"action": sg["action"], "urgency": sg["urgency"], "text": sg["text"], "new_stop": sg.get("new_stop"),
+                        "last": pos["last"], "unrealized": pos["unrealized"], "days_held": pos["days_held"],
+                        "days_left": pos["days_left"], "refreshed_by": scan_id}
+        else:
+            lbl = (pos.get("status") or {}).get("label") or "no action needed"
+            ups[aid] = {"status": "superseded", "superseded_by": scan_id,
+                        "superseded_note": f"Re-checked by the {when} scan: {lbl.lower()}."}
+    return ups
+
+
 def build_overlay(scan_doc: dict, entries: list, ctx: dict) -> dict:
     ups = {}
     live = {e["id"] for e in entries}
@@ -487,6 +515,7 @@ def build_overlay(scan_doc: dict, entries: list, ctx: dict) -> dict:
         if c.get("verdict") == "cancel" and c.get("alert_id"):
             ups[c["alert_id"]] = {"withdrawn": True, "withdrawn_reason": f"Pre-market check: {c.get('text')}", "rank": None,
                                   "ticker": c.get("ticker")}
+    ups.update(ctx.get("position_alert_updates") or {})
     return ups
 
 
@@ -723,7 +752,7 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
                 continue
             did = f"x_{pos['asof']}_{pos['trade_id']}_{sg['code']}"
             if did in existing:
-                continue
+                continue  # refreshed below through alert_updates (alerts are never overwritten)
             # a stop that already filled is an exit to record, not a stop to move
             is_exit = sg["code"] in EXIT_CODES or sg["code"] in FILL_CODES or sg["code"] in CHECK_CODES
             doc = {"id": did, "type": "exit" if is_exit else "adjust",
@@ -733,6 +762,7 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
                    "unrealized": pos["unrealized"], "days_held": pos["days_held"],
                    "days_left": pos["days_left"], "created_at": ts, "scan_id": scan_id}
             _write(out, writes, "set", "alerts", did, doc)
+    ctx["position_alert_updates"] = position_alert_updates(existing, positions, scan_id, ctx.get("when") or "")
     week_start = today - dt.timedelta(days=today.weekday())
     this_week = [v["doc"] for v in existing.values() if v["doc"].get("type") == "entry"
                  and str(v["doc"].get("signal_date", "")) >= str(week_start)]

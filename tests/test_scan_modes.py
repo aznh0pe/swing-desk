@@ -289,3 +289,39 @@ def test_news_check_judges_top_ups_against_their_own_bar_and_recounts_the_week(s
     sc2 = json.loads((out / "scan.json").read_text())["scan"]
     assert sc2["counts"]["week_topups"] == week_before - 1 and sc2["topup_pace"]["dropped_by_news"] == 1
     assert "Dropped after news check" in (out / "digest.md").read_text()
+
+
+def test_later_scans_refresh_or_supersede_open_exit_alerts():
+    # the 12:26 pre-close scan left "sell at close" alerts open for PSX and ILMN; at 2:07 the post-close scan
+    # says PSX: sell at the open (same exit rule, new wording), ILMN: keep holding (no signal any more)
+    old = {
+        "x_2026-11-11_tP_EXIT_RULE": {"doc": {"type": "exit", "status": "new", "trade_id": "tP", "code": "EXIT_RULE",
+                                             "action": "SELL AT CLOSE", "text": "before the 1:00 PM PT close today"}},
+        "x_2026-11-11_tI_EXIT_RULE": {"doc": {"type": "exit", "status": "new", "trade_id": "tI", "code": "EXIT_RULE"}},
+        "x_2026-11-10_tP_RAISE_STOP": {"doc": {"type": "adjust", "status": "new", "trade_id": "tP", "code": "RAISE_STOP"}},
+        "x_2026-11-11_tP_TARGET_HIT": {"doc": {"type": "exit", "status": "done", "trade_id": "tP", "code": "TARGET_HIT"}},
+        "x_2026-11-11_tZ_EXIT_RULE": {"doc": {"type": "exit", "status": "new", "trade_id": "tZ", "code": "EXIT_RULE"}},
+        "e_2026-11-11_ABC_S": {"doc": {"type": "entry", "status": "new"}},
+    }
+    positions = [
+        {"trade_id": "tP", "ticker": "PSX", "asof": "2026-11-11", "last": 258.68, "unrealized": 11.64, "days_held": 4,
+         "days_left": 4, "status": {"label": "SELL AT THE OPEN: EXIT RULE MET"},
+         "signals": [{"code": "EXIT_RULE", "level": "alert", "action": "SELL AT OPEN", "urgency": "next",
+                      "text": "take the gain at the next open"}]},
+        {"trade_id": "tI", "ticker": "ILMN", "asof": "2026-11-11", "last": 212.93, "unrealized": -1.10, "days_held": 2,
+         "days_left": 6, "status": {"label": "KEEP HOLDING"}, "signals": []},
+    ]
+    ups = scan.position_alert_updates(old, positions, "20261111-1407-postclose", "2:07 pm")
+    # same signal, same day: refreshed to the latest wording, price and P&L
+    p = ups["x_2026-11-11_tP_EXIT_RULE"]
+    assert p["action"] == "SELL AT OPEN" and p["text"] == "take the gain at the next open" and p["last"] == 258.68
+    assert "status" not in p
+    # no signal any more: superseded, with what the latest scan says instead
+    i = ups["x_2026-11-11_tI_EXIT_RULE"]
+    assert i["status"] == "superseded" and "keep holding" in i["superseded_note"]
+    # an older day's alert the latest scan no longer repeats is superseded too
+    assert ups["x_2026-11-10_tP_RAISE_STOP"]["status"] == "superseded"
+    # alerts you already acted on, positions this scan didn't check, and entry alerts are left alone
+    assert not {"x_2026-11-11_tP_TARGET_HIT", "x_2026-11-11_tZ_EXIT_RULE", "e_2026-11-11_ABC_S"} & set(ups)
+    # and they travel in the scan's alert_updates, which the dashboard applies (newest scan wins)
+    assert scan.build_overlay({}, [], {"position_alert_updates": ups})["x_2026-11-11_tI_EXIT_RULE"]["status"] == "superseded"

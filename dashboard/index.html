@@ -496,7 +496,7 @@ function statsOf(list) {
 // ---------------------------------------------------------------- render shell
 function renderTabs() {
   const newEntries = S.alerts.filter((a) => entryLive(a) && a.status === "new").length + orderResolutions().length;
-  const actions = S.alerts.filter((a) => (a.type === "exit" || a.type === "adjust") && a.status === "new").length;
+  const actions = positionActions().length;
   $("#tabs").innerHTML = TABS.map(([k, l]) => {
     const c = k === "alerts" && (newEntries + actions) ? `<span class="count">${newEntries + actions}</span>` : "";
     return `<button role="tab" type="button" id="tab-${k}" aria-selected="${S.tab === k}" data-tab="${k}">${l}${c}</button>`;
@@ -919,8 +919,7 @@ function drawMonthly() {
 // ---------------------------------------------------------------- alerts tab
 function viewAlerts() {
   const st = settings(); const f = funds(); const today = todayPT();
-  const actions = S.alerts.filter((a) => (a.type === "exit" || a.type === "adjust") && a.status === "new")
-    .filter((a) => S.trades.some((t) => t.id === a.trade_id && t.status === "open"));
+  const actions = positionActions();
   const entries = S.alerts.filter(entryLive)
     .sort((a, b) => (b.valid_for || "").localeCompare(a.valid_for || "") || (num(b.score) || 0) - (num(a.score) || 0));
   const capLeft = Number(st.max_open_positions) - f.open.length;
@@ -928,7 +927,7 @@ function viewAlerts() {
   let html = res.length ? `<section class="section"><div class="section-head"><h2>Did these orders fill?</h2><span class="meta">Their sessions are over · one tap records the result</span></div>
     <div class="grid">${res.map(resolveCard).join("")}</div></section>` : "";
   html += `<section class="section"><div class="section-head"><h2>Action needed on open positions</h2><span class="meta">Exit early, raise a stop, or confirm a fill</span></div>`;
-  html += actions.length ? `<div class="grid">${actions.map(actionCard).join("")}</div>` : `<div class="empty">No exit or stop alerts right now. The pre-close scan (12:25 PM PT) and post-close scan (2:05 PM PT) check every open position.</div>`;
+  html += actions.length ? `<div class="grid">${actions.map(posActionCard).join("")}</div>` : `<div class="empty">No open position needs action right now: the latest scan says keep holding. The pre-close scan (12:25 PM PT) and post-close scan (2:05 PM PT) re-check every open position.</div>`;
   html += `</section><section class="section"><div class="section-head"><h2>New A+ opportunities</h2>
     <span class="meta">${capLeft > 0 ? `${capLeft} of ${esc(st.max_open_positions)} position slots free · ${money(f.cash)} cash` : `All ${esc(st.max_open_positions)} slots are in use; setups still listed so you can swap into a stronger one`}</span></div>`;
   const featured = entries.filter((a) => !a.also_qualified).sort((a, b) => (num(a.rank) ?? 99) - (num(b.rank) ?? 99) || (num(b.score) || 0) - (num(a.score) || 0));
@@ -1061,6 +1060,25 @@ function deriveStatus(t, m) {
   const lead = !m.scan_at ? "The next scan marks this position and checks its exits. " : by.MARKET_STRESS ? `${by.MARKET_STRESS.text} Otherwise nothing to do. ` : "Nothing to do today. ";
   return S("HOLD", "KEEP HOLDING", "hold", "none", lead + planText(t, m));
 }
+// One instruction per open position, everywhere: the latest scan's status for it (positionStatus). The Overview
+// cards, the Alerts tab's "Action needed" list, the tab badge and the cards on both tabs all read this, so they
+// can never disagree. Stored exit alerts are only a log: a later scan supersedes them.
+function positionActions() {
+  const marks = latestMarks();
+  return openPositions().map((t) => { const m = marks[t.id] || {}; return { t, m, st: positionStatus(t, m) }; })
+    .filter(({ st }) => st.code !== "HOLD");
+}
+function posActionCard({ t, m, st }) {
+  const lvl = st.tone === "good" ? "good" : st.tone === "act" ? "info" : "alert";
+  const held = heldDays(t), maxH = num(t.max_hold) || 7, pnl = posPnl(t, m);
+  const btn = st.code === "RAISE_STOP" && st.new_stop != null
+    ? `<button class="btn primary small" type="button" data-act="cardstop" data-tid="${esc(t.id)}" data-px="${st.new_stop.toFixed(2)}">Stop moved to ${px(st.new_stop)}</button>`
+    : `<button class="btn primary small" type="button" data-act="gopos" data-tid="${esc(t.id)}">Record the sale</button>`;
+  return `<div class="act ${lvl}" data-pos-action="${esc(t.id)}"><div class="tk">${esc(t.ticker)}</div><div><div class="what">${esc(st.label)}</div>
+    ${st.detail ? `<div class="why">${hiCaution(st.detail)}</div>` : ""}${st.note ? `<div class="why"><b>${esc(st.note)}</b></div>` : ""}
+    <div class="small muted">${m.scan_at ? `${esc(modeLabel(m.scan_mode))} scan ${dtShort(m.scan_at)}` : "Not scanned yet"} · last ${px(m.last)} · P&L ${pnl !== null ? pnlHtml(pnl) : "–"} · day ${esc(Math.min(held, maxH))} of ${esc(maxH)}</div></div>
+    <div class="btns">${btn}</div></div>`;
+}
 function positionStatus(t, m) {
   let st = m.status ? { ...m.status } : deriveStatus(t, m);
   st.detail = String(st.detail || "").replace(/record the sale on its dashboard card/g, "record the sale below").replace("press Stop moved on the dashboard", "press Stop moved");
@@ -1121,7 +1139,7 @@ function positionCard(t, m) {
   const chip = (label, v, why) => v === null ? "" : `<button type="button" class="chip" data-act="sellfill" data-tid="${esc(id)}" data-px="${v.toFixed(2)}" data-why="${esc(why)}">${label} ${px(v)}</button>`;
   const lvl = (lbl, v, sub) => `<div><div class="k">${lbl}</div><div class="v">${v}</div><div class="s">${sub || "&nbsp;"}</div></div>`;
   const today = todayPT(), entryDay = String(t.entry_date || "").slice(0, 10);
-  return `<article class="pos-card" aria-label="${esc(t.ticker)} position">
+  return `<article class="pos-card" id="pos-${k}" aria-label="${esc(t.ticker)} position">
     <div class="pc-head"><div class="pc-title"><div class="tk">${esc(t.ticker)}</div>${t.name ? `<div class="nm" title="${esc(t.name)}">${esc(t.name)}</div>` : ""}
       <div class="st">${gchip(gradeOfTrade(t))}${esc(t.strategy_label || t.strategy || "Manual")} · entered ${dShort(t.entry_date)}${num(t.sold_shares) ? ` · ${shareStr(t.sold_shares)} sh sold so far` : ""}</div></div>
       <div class="pc-pnl"><div class="lbl">Open P&L</div><div class="big">${pnl !== null ? pnlHtml(pnl) : "–"}</div><div class="lbl">${pnlPct !== null ? `${pnlPctHtml(pnl, pnlPct)} · last ${px(last)}` : "no mark yet"}</div></div></div>
@@ -1767,6 +1785,10 @@ document.addEventListener("click", async (e) => {
     else if (act === "cancelled" && a) { await updDoc("alerts/" + a.id, { status: "cancelled", cancelled_at: nowIso() }); toast(`${a.ticker}: order recorded as cancelled.`); }
     else if (act === "copy" && a) copyOrder(a);
     else if (act === "dismiss" && a) { await updDoc("alerts/" + a.id, { status: "dismissed", done_at: nowIso() }); }
+    else if (act === "gopos" && t) {
+      const card = document.getElementById("pos-" + kid(t.id)); if (card) card.scrollIntoView({ behavior: "smooth", block: "start" });
+      const inp = document.getElementById("sp-" + kid(t.id)); if (inp) setTimeout(() => inp.focus({ preventScroll: true }), 350);
+    }
     else if (act === "cardstop" && t) {
       const ns = num(btn.dataset.px); if (!ns) return;
       await updDoc("trades/" + t.id, { stop: ns });
