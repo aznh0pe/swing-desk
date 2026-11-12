@@ -1428,6 +1428,11 @@ function viewLab() {
       html += `<div class="banner warn"><b>Honesty check, year by year.</b> A+ results cluster in market selloffs and vary a lot by year: ${yrs}.${split} Expect bear-market stretches where A+ setups win closer to two in three and earn little.</div>`;
     }
   }
+  if (bt?.adoption && bt.adoption.adopted === false) {
+    const pc = (v) => (v == null ? "–" : pct(100 * v));
+    const rows = (bt.adoption.checks || []).map((c) => `${esc(c.label)}: ${pc(c.live)} live, ${pc(c.new)} recalibrated${c.ok ? "" : " ✗"}`).join("; ");
+    html += `<div class="banner warn"><b>This week's recalibration was not adopted: the live setup stays.</b> Replaying the desk on 2022–now signals, the recalibrated setup did not match the live one (${rows}). The strategy cards below show this week's test results with the live on/off status.</div>`;
+  }
   html += `<div class="banner info"><b>Why some strategies are Active and others Off.</b> A strategy trades live only while it clears five checks on 18 years of data: at least 58% winners and a profit factor of 1.30 or better on 2008–2021, an average trade above +0.20%, a profit factor of at least 1.05 on unseen 2022–now data, and a win rate that drops no more than 8 points on that unseen data. The daily review also pauses any strategy whose live record falls below 50% wins. Every Saturday all of them are re-tested on fresh data and switch on or off by themselves; each card says exactly which check decided it. <b>Graded</b> strategies from research are the one exception: their raw signals win often but with small gains, so they are judged on the setups the desk actually sends from them, and they stay on only while replaying the desk with them keeps the win rates and grows the account.</div>`;
   const strat = bt?.strategies || {};
   const names = Object.keys(strat).sort((a, b) => (strat[b].enabled ? 1 : 0) - (strat[a].enabled ? 1 : 0) || (strat[b].custom ? 0 : 1) - (strat[a].custom ? 0 : 1));

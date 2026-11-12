@@ -949,6 +949,49 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
         if og and (og.get("aplus_score") != ng.get("aplus_score") or og.get("aplus_pwin") != ng.get("aplus_pwin")):
             changes.append(f"A+ cut-offs: score {og.get('aplus_score')} -> {ng.get('aplus_score')}, "
                            f"win {og.get('aplus_pwin')} -> {ng.get('aplus_pwin')}.")
+    # Champion / challenger (Nov 12, 2026): the recalibrated setup replaces the live one only if replaying the desk
+    # with it on the same 2022-now signals keeps the win rates, the weekly coverage, the growth and the drawdown.
+    # A dry run on Nov 12 would have cut the weeks reaching 5 setups from 78% to 32% and growth from 25% to 19% a
+    # year, through steps that each looked fine on their own.
+    if merge_state and not strategies and not allp.empty and (oldP.get("models") or {}).get("_pooled") \
+            and (oldP.get("grading") or {}).get("aplus_score") and (P.get("models") or {}).get("_pooled"):
+        try:
+            P_old = S.params_with_defaults(copy.deepcopy(oldP))
+            champ = live_replay(ind, P_old, split, desk_min, acct)
+            ch_t = mark_entry(_score_live(allp.copy(), P["models"]["_pooled"], P), P)
+            chall = desk_replay(ch_t[ch_t["signal_date"] >= split], P["grading"], desk_min, acct)
+            ok_a, checks_a = adoption_gate(champ, chall)
+            keys_ = ("aplus", "topups", "sent", "sent_late", "weeks_at_min", "setups_per_week", "account")
+            report["adoption"] = {"adopted": ok_a, "checks": checks_a, "live": {k: champ[k] for k in keys_},
+                                  "recalibrated": {k: chall[k] for k in keys_}}
+            log("adoption: " + ("recalibrated setup adopted" if ok_a else "live setup kept") + " | " + "; ".join(
+                f"{c['key']} {c['live']} -> {c['new']}{'' if c['ok'] else ' FAIL'}" for c in checks_a))
+            if not ok_a:
+                miss = [c for c in checks_a if not c["ok"]]
+                keep = (f"Weekly recalibration ran on fresh data, but its setup did not beat the live one when the desk was "
+                        f"replayed on 2022-now signals with each: " + "; ".join(
+                            f"{c['label']} {_pct(c['live'])} live vs {_pct(c['new'])}" for c in miss)
+                        + ". The live setup stays (Saturday's run tries again next week; the daily promotion check can "
+                          "still add single strategies that help).")
+                would = [c_ for c_ in changes if c_ not in pre_changes][:6]
+                changes = [keep] + (["Not adopted, for the record: " + " | ".join(would)] if would else [])
+                for n_, rec_ in report["strategies"].items():
+                    live_on = bool(((P_old.get("strategies") or {}).get(n_) or {}).get("enabled", False)) and n_ in (P_old.get("strategies") or {})
+                    if bool(rec_.get("enabled")) != live_on:
+                        rec_["status_reason"] = (("Active: the live setup is kept this week (the recalibrated setup did not beat it), "
+                                                  "so it keeps trading. " if live_on else
+                                                  "Off: the live setup is kept this week (the recalibrated setup did not beat it). ")
+                                                 + "This week's test: " + str(rec_.get("status_reason") or ""))
+                        rec_["enabled"] = live_on
+                report["grading_recalibrated"] = report.get("grading")
+                report["grading"] = P_old.get("grading")
+                P_old["version"], P_old["updated"] = P["version"], P["updated"]
+                P_old["source"] = "backtest (live setup kept)"
+                P = P_old
+        except Exception as ex:  # the check must never stop the weekly run; say so instead
+            log(f"champion/challenger check failed: {ex!r}")
+            report["adoption"] = {"adopted": True, "error": repr(ex)[:300]}
+            changes.append(f"The live-vs-recalibrated replay could not run ({ex!r}"[:200] + "), so the recalibrated setup was adopted unchecked.")
     report["changes"] = changes
     (out / "params.json").write_text(json.dumps(P, indent=1, default=str))
     (out / "backtest_report.json").write_text(json.dumps(report, indent=1, default=str))
@@ -1164,6 +1207,38 @@ def desk_replay(post: pd.DataFrame, G: dict, min_week: int, acct: dict, cal_end=
             "setups_per_week": round(len(sent) / max(1, len(wk)), 2),
             "account": {k: pf.get(k) for k in ("cagr", "max_dd", "win_rate", "trades", "final")},
             "by_strategy": {n: _trade_stats(g) for n, g in sent.groupby("strategy")}}
+
+
+ADOPT = {"slack_win": 0.005, "slack_growth": 0.005, "slack_weeks": 0.02, "slack_dd": 0.02}
+
+
+def live_replay(ind: dict, P_live: dict, split, min_week: int, acct: dict) -> dict:
+    """The desk as it stands (live params, model and bars) replayed on 2022-now signals."""
+    pm = P_live["models"]["_pooled"]
+    plans = S.all_plans(ind, P_live)
+    trs = [B.simulate(plans[n], ind, P_live, include_unfilled=True) for n, sp in P_live["strategies"].items()
+           if sp.get("enabled", True) and n in plans]
+    trs = [x for x in trs if not x.empty]
+    t = mark_entry(_score_live(pd.concat(trs, ignore_index=True), pm, P_live), P_live)
+    return desk_replay(t[t["signal_date"] >= pd.Timestamp(split)], P_live["grading"], min_week, acct)
+
+
+def adoption_gate(live: dict, new: dict) -> tuple[bool, list]:
+    """Does the recalibrated setup (new) do at least as well as the live one on the same signals? Win rates first
+    (A+, every setup sent, and 2024-now), then the weekly coverage, the growth and the drawdown (see ADOPT)."""
+    q = ADOPT
+
+    def row(key, label, a, b, slack):
+        lv, nv = (live.get(a) or {}).get(b) if b else live.get(a), (new.get(a) or {}).get(b) if b else new.get(a)
+        return {"key": key, "label": label, "live": lv, "new": nv,
+                "ok": bool(lv is None or (nv is not None and nv >= lv - slack))}
+    checks = [row("aplus_win", "A+ win rate", "aplus", "win_rate", q["slack_win"]),
+              row("sent_win", "win rate of every setup sent", "sent", "win_rate", q["slack_win"]),
+              row("late_win", "win rate of every setup sent, 2024-now", "sent_late", "win_rate", q["slack_win"]),
+              row("weeks", "weeks reaching the weekly minimum", "weeks_at_min", None, q["slack_weeks"]),
+              row("growth", "simulated account growth a year", "account", "cagr", q["slack_growth"]),
+              row("drawdown", "worst drawdown", "account", "max_dd", q["slack_dd"])]
+    return all(c["ok"] for c in checks), checks
 
 
 def promote_gate(base: dict, new: dict, name: str) -> tuple[bool, list]:

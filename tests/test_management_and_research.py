@@ -812,3 +812,19 @@ def test_the_weekly_run_always_retests_every_promoted_strategy_and_new_candidate
     assert {"R_C0", "R_C1", "R_C2"} <= set(got)                # and the new candidates still get their test
     assert got["R_C2"].get("graded") is True                    # a graded candidate is tested as graded
     assert len(RS.candidate_specs(st, old, cap=1)) == 8 and "R_C2" in RS.candidate_specs(st, old, cap=1)
+
+
+def test_a_recalibration_replaces_the_live_setup_only_if_it_does_at_least_as_well():
+    """Nov 12, 2026: a dry run of Saturday's job would have cut the weeks reaching 5 setups from 78% to 32% and
+    growth from 25% to 19% a year. The recalibrated setup is now adopted only if a replay on the same signals keeps
+    the win rates, coverage, growth and drawdown of the live one."""
+    live = {"aplus": {"win_rate": 0.767}, "sent": {"win_rate": 0.744}, "sent_late": {"win_rate": 0.817},
+            "weeks_at_min": 0.779, "account": {"cagr": 0.252, "max_dd": -0.086}}
+    worse = {"aplus": {"win_rate": 0.755}, "sent": {"win_rate": 0.757}, "sent_late": {"win_rate": 0.82},
+             "weeks_at_min": 0.316, "account": {"cagr": 0.194, "max_dd": -0.077}}
+    ok, checks = CB.adoption_gate(live, worse)
+    assert not ok and {c["key"] for c in checks if not c["ok"]} == {"aplus_win", "weeks", "growth"}
+    same = {**live, "account": {"cagr": 0.250, "max_dd": -0.09}}  # within the slack on every line
+    assert CB.adoption_gate(live, same)[0]
+    src = pathlib.Path(CB.__file__).read_text()
+    assert "ok_a, checks_a = adoption_gate(champ, chall)" in src and 'P_old["source"] = "backtest (live setup kept)"' in src

@@ -412,3 +412,16 @@ def test_live_boosts_never_loosen_grading_and_withdrawn_setups_never_count(synth
     scan.run("postclose", str(synth), str(st_dir / "state"), str(out), now=dt.datetime(2026, 11, 5, 14, 10, tzinfo=cal.PT))
     doc_wd = json.loads((out / "scan.json").read_text())
     assert doc_wd["scan"]["topup_pace"]["week_so_far"] == doc_kept["scan"]["topup_pace"]["week_so_far"] - 1
+
+
+def test_a_withdrawal_says_which_bar_the_setup_now_misses_even_after_the_news_check():
+    """Nov 12: the news-check step rebuilds the alert updates in a separate process, where the scan's record of
+    setups below the bar was gone, so IFF's withdrawal read 'price or indicators moved' instead of the real reason."""
+    scan.BELOW_BAR.clear()  # as in the news-check process
+    sd = {"below_bar": {"IFF": {"score": 55.9, "model_p": 0.66, "floor": 56.0, "top_p": 0.54, "aplus_score": 86.0,
+                                "aplus_pwin": 0.62}}}
+    ctx = {"window": {"e_x_IFF": {"ticker": "IFF", "status": "new"}, "e_y_ABC": {"ticker": "ABC", "status": "new"}},
+           "when": "2:42 pm", "existing_entry_ids": ["e_x_IFF", "e_y_ABC"]}
+    ups = scan.build_overlay(sd, [], ctx)
+    assert "No longer clears the bar" in ups["e_x_IFF"]["withdrawn_reason"] and "score 55.9" in ups["e_x_IFF"]["withdrawn_reason"]
+    assert "No longer qualifies" in ups["e_y_ABC"]["withdrawn_reason"]  # not a signal at all any more

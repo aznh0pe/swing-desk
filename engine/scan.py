@@ -557,7 +557,7 @@ def build_overlay(scan_doc: dict, entries: list, ctx: dict) -> dict:
         if aid in live:
             continue
         tk = a.get("ticker")
-        bb = BELOW_BAR.get(tk)
+        bb = (scan_doc.get("below_bar") or BELOW_BAR).get(tk)
         reason = (f"Dropped by the {ctx.get('when')} scan's news check: {dropped[tk]}" if tk in dropped else
                   (f"No longer clears the bar in the {ctx.get('when')} scan: score {bb['score']:.1f}, model win "
                    f"{100 * bb['model_p']:.0f}% (weekly top-up bar: score {bb['floor']:.0f}+ and model win "
@@ -857,6 +857,7 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
                        if errors else []),
         "session_day": str(session_day), "engine": engine_version.info(),
     }
+    scan_doc["below_bar"] = dict(BELOW_BAR)  # kept with the scan so a later news check explains withdrawals the same way
     scan_doc["alert_updates"] = build_overlay(scan_doc, entries, ctx)
     digest = make_digest(scan_doc, entries, positions, near, pm_checks, week_aplus, P, now)
     scan_doc["digest"] = digest
