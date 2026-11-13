@@ -459,4 +459,30 @@ def test_position_news_from_an_earlier_check_shows_in_every_later_scan(synth, tm
     assert [(x["ticker"], x["verdict"]) for x in doc.get("position_news") or []] == [("S01", "caution")]
     digest = (tmp_path / "o" / "digest.md").read_text()
     assert "S01 · 🔴 **CAUTION** · **Doesn't break the trade: the plan is unchanged.**" in digest
-    assert "What the 6:22 AM news check found: A director kept selling." in digest and "S99" not in digest
+    assert "What the Thu Nov 5, 6:22 AM news check found: A director kept selling." in digest and "S99" not in digest
+
+
+def test_position_news_stays_into_the_next_session_until_a_check_looks_again(synth, tmp_path):
+    """Nov 13: the 2:07 PM post-close scan belongs to the next session and news-checked only new setups, so the
+    morning's ILMN caution dropped out. It now stays until a news check looks at the stock again."""
+    from engine import postprocess as pp
+    st = _state(tmp_path)
+    (st / "scans").mkdir()
+    (st / "scans" / "am.json").write_text(json.dumps(
+        {"id": "20261105-0622-premarket", "mode": "premarket", "status": "ok", "session_day": "2026-11-05",
+         "started_at": "2026-11-05T06:22:00-08:00", "news_rules": pp.NEWS_RULES, "news_checked": ["S01"],
+         "position_news": [{"ticker": "S01", "verdict": "caution", "reason": "a director kept selling"}]}))
+    (st / "scans" / "pc.json").write_text(json.dumps(
+        {"id": "20261105-1407-postclose", "mode": "postclose", "status": "ok", "session_day": "2026-11-06",
+         "started_at": "2026-11-05T14:07:00-08:00", "news_rules": pp.NEWS_RULES, "news_checked": ["S05"]}))
+    got = pp.carried_position_news(scan.load_state(str(st)) if hasattr(scan, "load_state") else pp.load_state(str(st)), ["S01"])
+    assert [(x["ticker"], x["verdict"], x["found_at"]) for x in got] == [("S01", "caution", "2026-11-05T06:22:00-08:00")]
+    now = dt.datetime(2026, 11, 5, 14, 30, tzinfo=cal.PT)
+    scan.run("postclose", str(synth), str(st), str(tmp_path / "o"), now=now)
+    digest = (tmp_path / "o" / "digest.md").read_text()
+    assert "S01 · 🔴 **CAUTION**" in digest and "What the Thu Nov 5, 6:22 AM news check found" in digest
+    # the next pre-market check looks at S01 again and finds nothing: it goes
+    (st / "scans" / "next.json").write_text(json.dumps(
+        {"id": "20261106-0518-premarket", "mode": "premarket", "status": "ok", "session_day": "2026-11-06",
+         "started_at": "2026-11-06T05:18:00-08:00", "news_rules": pp.NEWS_RULES, "news_checked": ["S01"]}))
+    assert pp.carried_position_news(pp.load_state(str(st)), ["S01"]) == []

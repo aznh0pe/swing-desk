@@ -77,9 +77,53 @@ def prior_verdicts(state: dict | None, session_day) -> dict:
                 found.append((x["ticker"], x["verdict"], x.get("reason") or "notable news"))
         for tk, kind, note in found:
             tk = str(tk).upper()
-            note = _FROM.sub("", str(note or "")).strip() or "notable news"
+            note = str(note or "").strip() or "notable news"
+            first = _FROM.search(note)  # keep the check that first found it when it was carried before
+            note = (_FROM.sub("", note).strip() or "notable news") + (first.group(0) if first else f" (from the {when} news check)")
             if tk not in out or SEVERITY[kind] > SEVERITY[out[tk][0]]:
-                out[tk] = (kind, f"{note} (from the {when} news check)")
+                out[tk] = (kind, note)
+    return out
+
+
+def _scans_newest_first(state):
+    return sorted((v["doc"] for v in ((state or {}).get("scans") or {}).values()),
+                  key=lambda d: str(d.get("started_at", "")), reverse=True)
+
+
+def carried_position_news(state: dict | None, held) -> list[dict]:
+    """News on positions still held, from the newest scan that news-checked each one (or carries news on it).
+
+    A caution or avoid stays until a later news check looks at that stock again: the next pre-market check
+    re-judges every open position. Nov 13: the 2:07 PM post-close scan (Monday's session) checked only new
+    setups, so a same-session rule dropped Friday's ILMN caution although nothing had re-checked ILMN."""
+    held = {str(t).upper() for t in held or []}
+    scans = [sc for sc in _scans_newest_first(state) if sc.get("status") not in ("failed", "closed")]
+    out, done = [], set()
+    for sc in scans:
+        pn = {str(x.get("ticker", "")).upper(): x for x in sc.get("position_news") or []}
+        checked = {str(t).upper() for t in sc.get("news_checked") or []} if int(sc.get("news_rules") or 1) >= NEWS_RULES else set()
+        for tk in sorted(held - done):
+            x = pn.get(tk)
+            if not x and tk not in checked:
+                continue
+            done.add(tk)
+            if not x or x.get("verdict") not in ("caution", "avoid"):
+                continue  # re-checked and nothing found
+            reason = str(x.get("reason") or "notable news").strip()
+            found_at = x.get("found_at")
+            if not found_at:  # older scans: the first check of that session that flagged it
+                found_at = sc.get("started_at")
+                for o in reversed(scans):
+                    y = next((z for z in o.get("position_news") or [] if str(z.get("ticker", "")).upper() == tk), None)
+                    if str(o.get("session_day")) == str(sc.get("session_day")) and y and y.get("verdict") == x.get("verdict"):
+                        found_at = o.get("started_at")
+                        break
+            if not _FROM.search(reason):
+                try:
+                    reason += f" (from the {dt.datetime.fromisoformat(found_at).strftime('%-I:%M %p').lower()} news check)"
+                except Exception:
+                    pass
+            out.append({"ticker": tk, "verdict": x["verdict"], "reason": reason, "found_at": found_at})
     return out
 
 
@@ -133,12 +177,19 @@ def apply(out_dir: str, news: list[str], state_dir: str | None = None, issues: l
             c.update(verdict="cancel", text=f"News: {note or 'material news'}. Cancel today's order.")
         elif c.get("verdict") != "cancel":
             c.update(verdict="caution", text=f"News: {note or 'notable news'}. Check it before letting the order fill.")
+    carried = {str(x.get("ticker", "")).upper(): x for x in scan.get("position_news") or []}
     pos_news = []
     for pos in scan.get("positions") or []:
-        v = verdicts.get(str(pos.get("ticker", "")).upper())
+        tk = str(pos.get("ticker", "")).upper()
+        v = verdicts.get(tk)
         if v and v[0] in ("avoid", "caution"):
-            pos_news.append({"ticker": pos["ticker"], "verdict": v[0], "reason": v[1] or "material news"})
-    if pos_news:
+            old = carried.get(tk)
+            found_at = old.get("found_at") if old and old.get("verdict") == v[0] else None
+            pos_news.append({"ticker": pos["ticker"], "verdict": v[0], "reason": v[1] or "material news",
+                             "found_at": found_at or scan.get("started_at")})
+        elif v is None and tk in carried:
+            pos_news.append(carried[tk])  # not checked in this run: what an earlier check found stays
+    if pos_news or carried:
         scan["position_news"] = pos_news
     # re-rank on the news-adjusted scores. Every kept setup competes for the top 8 again, so a setup that was
     # only "also qualified" (sector cap or outside the top 8) moves up when the news check drops one ahead of it.

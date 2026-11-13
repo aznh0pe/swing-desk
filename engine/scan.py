@@ -867,12 +867,10 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
         "session_day": str(session_day), "engine": engine_version.info(),
     }
     scan_doc["below_bar"] = dict(BELOW_BAR)  # kept with the scan so a later news check explains withdrawals the same way
-    # news an earlier check of this session flagged on a position still held stays in every later scan, news check
-    # or not (Nov 13: the 6:22 AM ILMN caution was missing from the 7:01 AM scan, which had nothing to news-check)
-    from .postprocess import prior_verdicts  # late import: postprocess imports this module
-    held = {str(p.get("ticker", "")).upper() for p in positions}
-    pn = [{"ticker": tk, "verdict": v[0], "reason": v[1]} for tk, v in prior_verdicts(state, session_day).items()
-          if tk in held and v[0] in ("caution", "avoid")]
+    # news a check found on a position still held stays in every later scan until a news check looks at that stock
+    # again (Nov 13: the 7:01 AM and 2:07 PM scans, which news-checked nothing or only new setups, left it out)
+    from .postprocess import carried_position_news  # late import: postprocess imports this module
+    pn = carried_position_news(state, [p.get("ticker") for p in positions])
     if pn:
         scan_doc["position_news"] = pn
     scan_doc["alert_updates"] = build_overlay(scan_doc, entries, ctx)
@@ -1021,6 +1019,10 @@ def news_lines(x: dict) -> list[str]:
     reason = str(x.get("reason") or "notable news").strip()
     m = _NEWS_FROM.search(reason)
     when = m.group(1).replace(" am", " AM").replace(" pm", " PM") + " news check" if m else "news check"
+    try:  # the day too, so news carried into a later session says when it was found
+        when = dt.datetime.fromisoformat(x["found_at"]).strftime("%a %b %-d, %-I:%M %p") + " news check"
+    except Exception:
+        pass
     core = _NEWS_FROM.sub("", reason).rstrip(". ") or "notable news"
     core = core[0].upper() + core[1:]
     if x.get("verdict") == "avoid":
