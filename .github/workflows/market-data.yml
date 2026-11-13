@@ -5,8 +5,10 @@ name: market-data
 # so both daylight-saving regimes are covered.
 on:
   schedule:
-    # GitHub runs scheduled workflows late or skips some at busy times (about one run an hour got
-    # through at 30-minute spacing), so ask every 15 minutes, off the busy top of the hour.
+    # GitHub runs scheduled workflows late or skips some at busy times: about one run an hour gets through,
+    # however often it is asked. So these only start the day: on a trading day a run that starts between
+    # 6:30 AM ET and 40 minutes after the close keeps going and refreshes every 10 minutes itself
+    # (pipeline/refresh_loop.sh), handing over to a new run before GitHub's 6-hour job limit.
     - cron: "4,19,34,49 11-23 * * 1-5"   # ~3-4 AM to 3-4 PM Pacific, weekdays (both DST regimes)
     - cron: "17 13 * * 6"                # Saturday history rebuild for the weekly recalibration (+ keepalive)
     - cron: "41 1 * * 2-6"               # late-evening safety pass (catches a missed post-close run)
@@ -25,11 +27,12 @@ concurrency:
 
 permissions:
   contents: write
+  actions: write   # the refresh loop starts its own next run (pipeline/refresh_loop.sh)
 
 jobs:
   fetch:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 350   # the market-day refresh loop runs up to 5.5 hours, then hands over
     steps:
       - uses: actions/checkout@v4
 
@@ -50,15 +53,6 @@ jobs:
           fi
           ls -la out
 
-      - name: Fetch market data
-        env:
-          MODE: ${{ github.event_name == 'push' && 'all' || github.event.inputs.mode || (github.event.schedule == '17 13 * * 6' && 'history') || 'auto' }}
-        run: |
-          for attempt in 1 2 3; do
-            python pipeline/fetch_data.py --mode "$MODE" --out out && break
-            echo "attempt $attempt failed, retrying in 30s"; sleep 30
-          done
-
       - name: Keep the schedule alive (GitHub pauses schedules after 60 days without commits)
         if: github.event.schedule == '17 13 * * 6'
         run: |
@@ -72,16 +66,10 @@ jobs:
             git push "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:main || true
           fi
 
-      - name: Publish data branch (one squashed commit, no history bloat)
-        run: |
-          cd out
-          rm -rf .git
-          git init -q -b data
-          git config user.name "swing-desk-bot"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -qm "market data $(date -u +%Y-%m-%dT%H:%MZ)"
-          for attempt in 1 2 3; do
-            git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" data:data && break
-            sleep 10
-          done
+      - name: Fetch and publish (every 10 minutes through a market day)
+        env:
+          MODE: ${{ github.event_name == 'push' && 'all' || github.event.inputs.mode || (github.event.schedule == '17 13 * * 6' && 'history') || 'auto' }}
+          PUSH_URL: https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: bash pipeline/refresh_loop.sh
