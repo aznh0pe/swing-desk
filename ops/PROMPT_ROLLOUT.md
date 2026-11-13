@@ -35,3 +35,6 @@ build_prompts.py), so a run that starts late after a backup or a dashboard catch
 - [x] premarket         trig_01BC6UyGsrA3mesQsU6pFbRP  5:17 AM PT (was 5:50), prompt regenerated
 - [x] backup premarket  trig_01WA17hiGscrK1sLsnnpwjEW  5:47 AM PT (was 6:02), prompt regenerated
 Other prompts are unchanged.
+Same day, the pre-close scan got the same "already done?" step (`PRECLOSE_GUARD`, from 12:15 PM), schedule unchanged:
+- [x] preclose          trig_015vu682N2v147NyT2kAdSLJ  12:25 PM PT, prompt regenerated
+- [x] backup preclose   trig_01G67H8Efdaw2V1wPGevQH4X  12:38 PM PT, prompt regenerated

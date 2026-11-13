@@ -116,3 +116,54 @@ def test_after_the_open_a_missing_check_is_reported_as_missed():
     assert BANNER not in overview
     assert "Pre-market check didn't run today" in overview
     assert "Missed" in row["text"] and row["runNow"]
+
+
+def visit_day(fx, day, clock):
+    """Same as visit(), on any date (for the pre-close checks and half days)."""
+    html = "<!doctype html><html><head><meta charset='utf-8'></head><body>" + (ROOT / "dashboard" / "index.html").read_text()
+    with pw.sync_playwright() as p:
+        try:
+            b = p.chromium.launch()
+        except Exception as e:  # no browser on this machine
+            pytest.skip(f"chromium unavailable: {e}")
+        ctx = b.new_context(viewport={"width": 1180, "height": 900}, timezone_id="America/Los_Angeles")
+        page = ctx.new_page()
+        errs = []
+        page.on("pageerror", lambda e: errs.append(str(e)))
+        page.add_init_script(f"window.__DATA = {json.dumps(fx)};" + MOCK)
+        page.clock.set_fixed_time(dt.datetime.fromisoformat(f"{day}T{clock}:00-08:00"))
+        page.route("http://dash.test/", lambda r: r.fulfill(status=200, content_type="text/html", body=html))
+        page.goto("http://dash.test/")
+        page.wait_for_timeout(700)
+        page.click("#tab-overview")
+        page.wait_for_timeout(200)
+        overview = page.evaluate("() => document.querySelector('#main').innerText")
+        b.close()
+    assert not errs, errs
+    return overview
+
+
+PRECLOSE = "Today's pre-close exit scan hasn't come in yet"
+
+
+def test_a_late_pre_close_scan_offers_run_now_before_the_close():
+    fx = fixture(premarket_at="05:19")
+    assert PRECLOSE not in visit_day(fx, "2026-11-13", "12:30")       # not late yet
+    ov = visit_day(fx, "2026-11-13", "12:40")
+    assert PRECLOSE in ov and "before the 1:00 PM close" in ov
+    assert PRECLOSE not in visit_day(fx, "2026-11-13", "12:57")       # too late to help: the backup / missed path
+
+
+def test_a_pre_close_scan_that_came_in_clears_it():
+    fx = fixture(premarket_at="05:19")
+    fx["scans"].insert(0, {"id": "20261113-1227-preclose", "mode": "preclose", "started_at": "2026-11-13T12:27:00-08:00",
+                           "status": "ok", "session_day": "2026-11-13", "run_issues": [], "positions": []})
+    assert PRECLOSE not in visit_day(fx, "2026-11-13", "12:40")
+
+
+def test_half_day_pre_close_catch_up_uses_the_early_close():
+    fx = fixture()
+    fx["scans"].insert(0, {"id": "20261127-0518-premarket", "mode": "premarket", "started_at": "2026-11-27T05:18:00-08:00",
+                           "status": "ok", "session_day": "2026-11-27", "run_issues": [], "positions": []})
+    ov = visit_day(fx, "2026-11-27", "09:35")
+    assert PRECLOSE in ov and "before the 10:00 AM close" in ov

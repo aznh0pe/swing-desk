@@ -324,8 +324,8 @@ const RUN_STEPS = [
 const RUN_STALE_MS = 7 * 60000, RUN_SHOW_DONE_MS = 15 * 60000;
 const TABS = [["overview", "Overview"], ["alerts", "Alerts"], ["log", "Trade log"], ["funds", "Funds & income"], ["scans", "Scans"], ["lab", "Strategy lab"]];
 const SCHEDULE = [
-  { when: "5:17 AM PT", backup: "5:47 AM", days: "Mon–Fri", what: "Pre-market check", detail: "Re-checks today's orders against overnight news and pre-market gaps; warns before the 6:30 open. Scheduled early so a late start by the scheduler still lands before the open; if it hasn't come in by 5:29, a Run it now button appears here and on the Overview." },
-  { when: "12:25 PM PT", backup: "12:38 PM", days: "Mon–Fri", what: "Pre-close exit scan", detail: "Live prices 35 min before the close: exit-at-close signals, time stops, earnings risk, buy-at-close setups." },
+  { when: "5:17 AM PT", backup: "5:47 AM", days: "Mon–Fri", what: "Pre-market check", detail: "Re-checks today's orders against overnight news and pre-market gaps; warns before the 6:30 open. Scheduled early so a late start by the scheduler still lands before the open; if it hasn't come in by 5:29, a Run now button appears here and on the Overview." },
+  { when: "12:25 PM PT", backup: "12:38 PM", days: "Mon–Fri", what: "Pre-close exit scan", detail: "Live prices 35 min before the close: exit-at-close signals, time stops, earnings risk, buy-at-close setups. If it hasn't come in by 12:35, a Run now button appears here and on the Overview until 12:55." },
   { when: "2:05 PM PT", backup: "2:53 PM", days: "Mon–Fri", what: "Post-close setup scan", detail: "Final daily bars: tomorrow's A+ setups with limit entry, stop and target to place tonight." },
   { when: "3:12 PM PT", backup: "4:23 PM", days: "Mon–Fri", what: "Daily learning + strategy research", detail: "Grades every alert against what the market did, updates win-rate estimates and writes the journal; then researches and backtests a new strategy idea for the Strategy lab." },
   { when: "10:14 AM PT", backup: "Sun 10:23 AM", days: "Saturday", what: "Weekly recalibration", detail: "Re-runs every backtest on fresh history, re-tests Off strategies, promotes research candidates that pass, and re-fits the win-probability models." },
@@ -346,7 +346,8 @@ const RUN_PLAN = [
   // catchup: from `after` minutes past its time until `until`, a run that hasn't come in offers Run now (the scheduler can start
 // runs late: Fri Nov 13 2026 the 5:50 AM check and its 6:02 AM backup were both still waiting to start at 6:26 AM)
   { key: "premarket", label: "Pre-market check", at: "05:17", from: "05:05", backup: "05:47", dur: 20, modes: ["premarket"], catchup: { after: 12, until: "06:30" } },
-  { key: "preclose", label: "Pre-close exit scan", at: "12:25", from: "12:20", backup: "12:38", dur: 20, modes: ["preclose", "postclose"], half: { at: "09:20", from: "09:15" } },
+  { key: "preclose", label: "Pre-close exit scan", at: "12:25", from: "12:20", backup: "12:38", dur: 20, modes: ["preclose", "postclose"], half: { at: "09:20", from: "09:15" },
+    catchup: { after: 10, until: "12:55", halfUntil: "09:55" } },
   { key: "postclose", label: "Post-close setup scan", at: "14:05", from: "13:55", backup: "14:53", dur: 45, modes: ["postclose"], half: { from: "10:55" } },
   { key: "learning", label: "Daily learning + research", at: "15:12", backup: "16:23", dur: 50, journal: true },
 ];
@@ -653,7 +654,7 @@ function judgeRun(p, at, hit, failed, now, backupLabel) {
   const cu = p.catchup;  // time-critical run: offer Run now as soon as it is clearly late, not only after the backup failed
   if (cu && now >= addMin(at, cu.after) && now < cu.until)
     return { state: "late", pill: "warn", text: "Not in yet", runNowOk: true,
-      note: `It was due at ${to12(at)}; the scheduler sometimes starts runs late. Press Run now to have it before the 6:30 open (a scheduled run that starts later sees it's done and stops).` };
+      note: `It was due at ${to12(at)}; the scheduler sometimes starts runs late. Press Run now to have it before the ${p.key === "premarket" ? "6:30 open" : "close"} (a scheduled run that starts later sees it's done and stops).` };
   if (now < addMin(at, p.dur)) return { state: "running", pill: "info", text: "Waiting for results", note: `Scheduled ${to12(at)}; results usually arrive within ${p.dur} minutes.` };
   if (now < bk) return { state: "late", pill: "warn", text: "Not in yet", note: `If it doesn't arrive, the backup check at ${backupLabel} runs it.` };
   if (now < addMin(bk, p.dur)) return { state: "retry", pill: "warn", text: "Backup running", note: `It didn't arrive, so the ${backupLabel} backup check is running it now.` };
@@ -671,7 +672,8 @@ function runHealth() {
       const t = ptParts(sc.started_at); if (!t || t.day !== day || t.hm < from || !p.modes.includes(sc.mode)) continue;
       if (sc.status === "failed") { if (!failed || t.hm < failed) failed = t.hm; } else if (!hit || t.hm < hit) hit = t.hm;
     }
-    out.items.push({ ...p, at, ...judgeRun(p, at, hit, failed, now, to12(p.backup)) });
+    const cu = p.catchup && { ...p.catchup, until: (out.half && p.catchup.halfUntil) || p.catchup.until };
+    out.items.push({ ...p, at, ...judgeRun({ ...p, catchup: cu }, at, hit, failed, now, to12(p.backup)) });
   }
   if (wd === 6 || wd === 0) {  // this weekend's recalibration (Saturday, backup check Sunday)
     const sat = wd === 6 ? day : addDays(day, -1);
@@ -728,8 +730,8 @@ function healthPanel() {
 }
 function attentionBanner() {
   const h = runHealth(), res = orderResolutions().filter((r) => r.kind !== "ask" || r.fc);
-  const pm = h.items.find((i) => i.key === "premarket" && i.runNowOk);
-  let out = pm ? `<div class="banner crit" style="margin-bottom:12px"><b>This morning's pre-market check hasn't come in yet</b> (it was due at ${to12(pm.at)}; the scheduler sometimes starts runs late). <button class="btn small" type="button" data-act="runnow" data-run="premarket">Run it now</button> It takes about 5 minutes and is emailed to you like the scheduled one.</div>` : "";
+  // a time-critical run (pre-market check, pre-close scan) that is late: one tap starts it before the open or the close
+  let out = h.items.filter((i) => i.runNowOk).map((i) => `<div class="banner crit" style="margin-bottom:12px"><b>${i.key === "premarket" ? "This morning's pre-market check" : "Today's pre-close exit scan"} hasn't come in yet</b> (it was due at ${to12(i.at)}; the scheduler sometimes starts runs late). <button class="btn small" type="button" data-act="runnow" data-run="${i.key}">Run it now</button> It takes about 5 minutes and is emailed to you like the scheduled one${i.key === "premarket" ? "" : `; it must finish before the ${h.half ? "10:00 AM" : "1:00 PM"} close`}.</div>`).join("");
   out += h.bad.length ? `<div class="banner crit" style="margin-bottom:12px"><b>${h.bad.map((i) => esc(i.label)).join(", ")} didn't run today.</b> The backup check couldn't recover ${h.bad.length === 1 ? "it" : "them"} either. <button class="btn small" type="button" data-tab="scans">See today's runs</button></div>` : "";
   // problems inside a run that still finished (a failed step, a fallback, a fix): shown until the next clean run
   // a problem Claude has fixed is recorded on the run as resolved: it then shows as fixed (with the fix), not as open
@@ -1295,7 +1297,7 @@ function viewScans() {
   <div class="tbl-wrap"><table><thead><tr><th>Time</th><th>Days</th><th>Scan</th><th>What it does</th><th>Backup check</th></tr></thead><tbody>
   ${SCHEDULE.map((s) => `<tr><td class="num" style="white-space:nowrap">${s.when}</td><td>${s.days}</td><td><b>${s.what}</b></td><td class="small">${s.detail}</td><td class="small" style="white-space:nowrap">${s.backup || "–"}</td></tr>`).join("")}
   </tbody></table></div>
-  <div class="small muted">Each backup check confirms its run saved results and, if it failed or never ran, runs it again on the spot (re-run scans email you the full alert digest). The pre-market check runs early (5:17 AM) so a late start by the scheduler still lands before the 6:30 open; if it hasn't come in 12 minutes after it was due, <b>Run now</b> appears here and on the Overview. On half days (the day after Thanksgiving, Christmas Eve) the pre-close scan runs at 9:20 AM. Prices refresh about every 15 minutes, 3 AM to 4 PM PT on weekdays, through your GitHub data feed. ${st.manual_trigger_id ? "Use <b>Scan now</b> at the top for an extra scan at any time." : "The Scan now button activates once the scans are scheduled."}</div></section>`;
+  <div class="small muted">Each backup check confirms its run saved results and, if it failed or never ran, runs it again on the spot (re-run scans email you the full alert digest). The pre-market check runs early (5:17 AM) so a late start by the scheduler still lands before the 6:30 open; if it hasn't come in 12 minutes after it was due, <b>Run now</b> appears here and on the Overview (the pre-close scan gets the same from 12:35 PM until 12:55 PM). On half days (the day after Thanksgiving, Christmas Eve) the pre-close scan runs at 9:20 AM. Prices refresh about every 15 minutes, 3 AM to 4 PM PT on weekdays, through your GitHub data feed. ${st.manual_trigger_id ? "Use <b>Scan now</b> at the top for an extra scan at any time." : "The Scan now button activates once the scans are scheduled."}</div></section>`;
   html += `<section class="section"><div class="section-head"><h2>Scan history</h2><span class="meta">${S.scans.length} most recent</span></div>`;
   html += S.scans.length ? `<div class="tbl-wrap"><table><thead><tr><th>Ran</th><th>Scan</th><th>Status</th><th>Data</th><th class="n">A+ setups</th><th class="n">Exit alerts</th><th>Details</th></tr></thead><tbody>
     ${S.scans.map((s) => `<tr><td style="white-space:nowrap">${dtShort(s.started_at)}</td><td>${esc(modeLabel(s.mode))}</td><td><span class="pill ${s.status === "ok" ? "good" : s.status === "failed" ? "crit" : s.status === "closed" ? "neutral" : "warn"}">${esc(s.status === "closed" ? "market closed" : (s.status || "").replace(/_/g, " "))}</span></td>

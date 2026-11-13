@@ -89,6 +89,14 @@ PREMARKET_GUARD = (
     "or after 5:05 AM and status \"ok\", \"ok_with_warnings\" or \"closed\", this run started late and the check is already "
     "done (by its backup check or a catch-up from the dashboard): end with exactly one line, \"No action needed: today's "
     "pre-market check already ran at <its start time, e.g. 5:19 AM PT>.\", and nothing else. Otherwise carry on with step 1.\n")
+# same for the pre-close scan, which also has a hard deadline (the 1:00 PM PT close)
+PRECLOSE_GUARD = (
+    '0. Already done? Load ArtifactData with ToolSearch if needed, then ArtifactData action "query" on url {ARTIFACT}, '
+    'collection "scans", query {"order_by": {"field": "started_at", "direction": "desc"}, "limit": 4}, out_dir "/tmp/g" '
+    "(the documents are large, so keep them on disk). If one of them has mode \"preclose\", a started_at today (Pacific) at "
+    "or after 12:15 PM and status \"ok\", \"ok_with_warnings\" or \"closed\", this run started late and the scan is already "
+    "done (by its backup check or a catch-up from the dashboard): end with exactly one line, \"No action needed: today's "
+    "pre-close scan already ran at <its start time, e.g. 12:31 PM PT>.\", and nothing else. Otherwise carry on with step 1.\n")
 
 MODES = {
     "premarket": {
@@ -99,7 +107,7 @@ MODES = {
         "MODE": "preclose", "MODE_LABEL": "pre-close exit scan (35 minutes before the 1:00 PM PT close)",
         "FRESHNESS_RULE": "intraday_asof should be within the last 45 minutes. If it is older, re-clone the data branch once after 5 minutes, then continue with what you have and mention the data time in the digest.",
         "NEWS_STEP": "If $W/out/scan.json lists entries (buy-at-close setups), run the news check. " + NEWS_ENTRIES,
-        "PROGRESS_BLOCK": "", "SCAN_ARGS": ""},
+        "PROGRESS_BLOCK": "", "SCAN_ARGS": "", "START_GUARD": PRECLOSE_GUARD},
     # one-off runs on half days (close 10:00 AM PT), when the regular 12:25 PM run would come after the close
     "preclose_halfday": {
         "MODE": "preclose", "MODE_LABEL": "pre-close exit scan for today's half day (40 minutes before the 10:00 AM PT early close)",
