@@ -73,6 +73,10 @@ def prior_verdicts(state: dict | None, session_day) -> dict:
                     found.append((tk, "caution", u.get("news_note") or "notable news"))
         # news on open positions too (Nov 13: the 6:22 AM check flagged ILMN, the 6:27 AM re-run dropped it)
         for x in sc.get("position_news") or []:
+            # only news found in this session: a post-close scan (next session) carries the day's news forward until
+            # the next pre-market check re-judges it, and that carried copy must not stop the re-check clearing it
+            if str(x.get("found_session") or sc.get("session_day")) != str(session_day):
+                continue
             if x.get("ticker") and x.get("verdict") in ("caution", "avoid"):
                 found.append((x["ticker"], x["verdict"], x.get("reason") or "notable news"))
         for tk, kind, note in found:
@@ -110,7 +114,7 @@ def carried_position_news(state: dict | None, held) -> list[dict]:
             if not x or x.get("verdict") not in ("caution", "avoid"):
                 continue  # re-checked and nothing found
             reason = str(x.get("reason") or "notable news").strip()
-            found_at = x.get("found_at")
+            found_at, found_session = x.get("found_at"), x.get("found_session")
             if not found_at:  # older scans: the first check of that session that flagged it
                 found_at = sc.get("started_at")
                 for o in reversed(scans):
@@ -118,12 +122,14 @@ def carried_position_news(state: dict | None, held) -> list[dict]:
                     if str(o.get("session_day")) == str(sc.get("session_day")) and y and y.get("verdict") == x.get("verdict"):
                         found_at = o.get("started_at")
                         break
+            found_session = found_session or sc.get("session_day")
             if not _FROM.search(reason):
                 try:
                     reason += f" (from the {dt.datetime.fromisoformat(found_at).strftime('%-I:%M %p').lower()} news check)"
                 except Exception:
                     pass
-            out.append({"ticker": tk, "verdict": x["verdict"], "reason": reason, "found_at": found_at})
+            out.append({"ticker": tk, "verdict": x["verdict"], "reason": reason, "found_at": found_at,
+                        "found_session": str(found_session)})
     return out
 
 
@@ -184,9 +190,10 @@ def apply(out_dir: str, news: list[str], state_dir: str | None = None, issues: l
         v = verdicts.get(tk)
         if v and v[0] in ("avoid", "caution"):
             old = carried.get(tk)
-            found_at = old.get("found_at") if old and old.get("verdict") == v[0] else None
+            same = old if old and old.get("verdict") == v[0] else {}
             pos_news.append({"ticker": pos["ticker"], "verdict": v[0], "reason": v[1] or "material news",
-                             "found_at": found_at or scan.get("started_at")})
+                             "found_at": same.get("found_at") or scan.get("started_at"),
+                             "found_session": str(same.get("found_session") or scan.get("session_day"))})
         elif v is None and tk in carried:
             pos_news.append(carried[tk])  # not checked in this run: what an earlier check found stays
     if pos_news or carried:
