@@ -487,24 +487,24 @@ function latestMarks() {
   for (const sc of S.scans) { for (const p of sc.positions || []) { if (!out[p.trade_id]) out[p.trade_id] = { ...p, scan_at: sc.started_at, scan_mode: sc.mode }; } }
   return out;
 }
-// News a scan's news check found on an open position (caution or avoid). Every check of the same session counts and
-// a later one never softens an earlier one, as in the emails. Shown on the position's card and in Action needed.
+// News a scan's news check found on an open position (caution or avoid). It stays up until a later news check
+// looks at that stock again: the newest scan that checked the ticker (or carries news on it) decides. Within one
+// session a later check never softens an earlier one (the engine carries it), and the next pre-market check
+// re-judges every open position. (Nov 13: the 2:07 PM post-close scan belongs to Monday's session and checked only
+// new setups, so a same-session rule hid Friday's ILMN caution although nothing had re-checked ILMN.)
 const NEWS_SEV = { caution: 1, avoid: 2 };
 const NEWS_FROM = /\s*\(from the [^()]* news check\)\s*$/;
-function positionNews(t, m) {
-  const day = m.scan_at ? (S.scans.find((sc) => sc.started_at === m.scan_at) || {}).session_day : null;
-  if (!day) return null;
-  let best = null;
-  for (const sc of [...S.scans].reverse()) {  // oldest first: the first check that flagged it is its source
-    if (String(sc.session_day) !== String(day) || sc.status === "failed") continue;
-    for (const n of sc.position_news || []) {
-      const sev = NEWS_SEV[n.verdict];
-      if (!sev || String(n.ticker || "").toUpperCase() !== String(t.ticker || "").toUpperCase()) continue;
-      const r = String(n.reason || "").replace(NEWS_FROM, "").replace(/\.$/, "") || "notable news";
-      if (!best || sev > best.sev) best = { sev, verdict: n.verdict, reason: r.charAt(0).toUpperCase() + r.slice(1), at: sc.started_at };
-    }
-  }
-  return best;
+function positionNews(t) {
+  const tk = String(t.ticker || "").toUpperCase(), of = (sc) => (sc.position_news || []).find((n) => String(n.ticker || "").toUpperCase() === tk);
+  const live = S.scans.filter((sc) => sc.status !== "failed" && sc.status !== "closed");  // newest first
+  const d = live.find((sc) => of(sc) || (sc.news_checked || []).map((x) => String(x).toUpperCase()).includes(tk));
+  const n = d && of(d);
+  if (!n || !NEWS_SEV[n.verdict]) return null;
+  // when it was found: stored on newer scans; on older ones, the first check of that session that flagged it
+  let at = n.found_at || null;
+  if (!at) for (const sc of [...live].reverse()) { const x = of(sc); if (String(sc.session_day) === String(d.session_day) && x && x.verdict === n.verdict) { at = sc.started_at; break; } }
+  const r = String(n.reason || "").replace(NEWS_FROM, "").replace(/\.$/, "") || "notable news";
+  return { sev: NEWS_SEV[n.verdict], verdict: n.verdict, reason: r.charAt(0).toUpperCase() + r.slice(1), at: at || d.started_at };
 }
 // The news on a position, laid out to be read at a glance: the verdict, then what it means for the trade, then why.
 const NV_ICON = {
@@ -1131,7 +1131,7 @@ function deriveStatus(t, m) {
 // can never disagree. Stored exit alerts are only a log: a later scan supersedes them.
 function positionActions() {
   const marks = latestMarks();
-  return openPositions().map((t) => { const m = marks[t.id] || {}; return { t, m, st: positionStatus(t, m), news: positionNews(t, m) }; })
+  return openPositions().map((t) => { const m = marks[t.id] || {}; return { t, m, st: positionStatus(t, m), news: positionNews(t) }; })
     .filter(({ st, news }) => st.code !== "HOLD" || news);
 }
 function posActionCard({ t, m, st, news }) {
@@ -1203,7 +1203,7 @@ function positionCard(t, m) {
     + `<div class="small muted">${m.scan_at ? `Status from the ${dtShort(m.scan_at)} scan; the next scan updates it.` : "No scan has marked this position yet."}</div>`;
   const stBtn = st.code === "RAISE_STOP" && st.new_stop
     ? `<div class="pc-st-act"><button class="btn primary small" type="button" data-act="cardstop" data-tid="${esc(id)}" data-px="${st.new_stop.toFixed(2)}">Stop moved to ${px(st.new_stop)}</button><span class="small muted">Press after you change it in your brokerage.</span></div>` : "";
-  const news = positionNews(t, m);
+  const news = positionNews(t);
   const newsHtml = news ? newsBlock(news, false) : "";
   const statusHtml = `<div class="pc-status st-${esc(st.tone || "hold")}" role="status"><div class="k">Status · what to do now</div><div class="lbl">${esc(st.label)}</div>${st.detail ? `<div class="det">${hiCaution(st.detail)}</div>` : ""}${st.note ? `<div class="note">${esc(st.note)}</div>` : ""}${stBtn}</div>`;
   const chip = (label, v, why) => v === null ? "" : `<button type="button" class="chip" data-act="sellfill" data-tid="${esc(id)}" data-px="${v.toFixed(2)}" data-why="${esc(why)}">${label} ${px(v)}</button>`;

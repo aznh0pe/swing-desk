@@ -227,6 +227,20 @@ def test_news_on_an_open_position_shows_on_its_card_and_in_action_needed():
     assert v["badge"] == "1"
 
 
-def test_news_from_an_earlier_session_is_not_shown():
-    v = _views(_pos_fixture(news_day="2026-11-12"), "07:10")
+def test_news_stays_until_a_later_news_check_looks_at_the_stock_again():
+    """Nov 13: the 2:07 PM post-close scan belongs to Monday's session and news-checked only new setups, and the
+    dashboard (same-session rule) hid Friday's ILMN caution. It stays until a check re-judges ILMN."""
+    fx = _pos_fixture()
+    pos = fx["scans"][0]["positions"][0]
+    post = {"id": "20261113-1407-postclose", "mode": "postclose", "started_at": "2026-11-13T14:07:00-08:00", "status": "ok",
+            "session_day": "2026-11-16", "run_issues": [], "positions": [pos], "news_checked": ["MRNA", "UAL"]}
+    fx["scans"].insert(0, post)
+    v = _views(fx, "15:05")
+    assert len(v["overview"]["card"]) == 1 and "6:22" in v["overview"]["card"][0]   # found by the 6:22 AM check
+    assert len(v["alerts"]["act"]) == 1 and v["badge"] == "1"
+    # Monday's pre-market check looks at ILMN again and finds nothing: the caution goes
+    fx["scans"].insert(0, {"id": "20261116-0518-premarket", "mode": "premarket", "started_at": "2026-11-16T05:18:00-08:00",
+                           "status": "ok", "session_day": "2026-11-16", "run_issues": [], "positions": [pos],
+                           "news_checked": ["ILMN"]})
+    v = _views(fx, "15:05")
     assert v["overview"]["card"] == [] and v["alerts"]["act"] == [] and v["badge"] == ""
