@@ -167,3 +167,66 @@ def test_half_day_pre_close_catch_up_uses_the_early_close():
                            "status": "ok", "session_day": "2026-11-27", "run_issues": [], "positions": []})
     ov = visit_day(fx, "2026-11-27", "09:35")
     assert PRECLOSE in ov and "before the 10:00 AM close" in ov
+
+
+def _pos_fixture(news_day="2026-11-13"):
+    fx = fixture()
+    fx["trades"] = [{"id": "t_ilmn", "status": "open", "ticker": "ILMN", "strategy": "R_PCTB_3DAY", "entry_price": 214.03,
+                     "entry_date": "2026-11-10", "shares": 1, "stop": 163.4, "target": 239.34, "max_hold": 8}]
+    hold = {"code": "HOLD", "label": "KEEP HOLDING", "tone": "hold", "when": "none", "detail": "Nothing to do today."}
+    pos = {"trade_id": "t_ilmn", "ticker": "ILMN", "last": 209.55, "signals": [], "status": hold}
+    fx["scans"] = [
+        {"id": "20261113-0701-preclose", "mode": "preclose", "started_at": "2026-11-13T07:01:00-08:00", "status": "ok",
+         "session_day": "2026-11-13", "run_issues": [], "positions": [pos]},  # no news check of its own
+        {"id": "20261113-0622-premarket", "mode": "premarket", "started_at": "2026-11-13T06:22:00-08:00", "status": "ok",
+         "session_day": news_day, "run_issues": [], "positions": [pos],
+         "position_news": [{"ticker": "ILMN", "verdict": "caution",
+                            "reason": "a director kept selling shares (from the 6:22 am news check)"}]},
+    ]
+    return fx
+
+
+def _views(fx, clock):
+    html = "<!doctype html><html><head><meta charset='utf-8'></head><body>" + (ROOT / "dashboard" / "index.html").read_text()
+    with pw.sync_playwright() as p:
+        try:
+            b = p.chromium.launch()
+        except Exception as e:  # no browser on this machine
+            pytest.skip(f"chromium unavailable: {e}")
+        page = b.new_context(viewport={"width": 1180, "height": 900}, timezone_id="America/Los_Angeles").new_page()
+        errs = []
+        page.on("pageerror", lambda e: errs.append(str(e)))
+        page.add_init_script(f"window.__DATA = {json.dumps(fx)};" + MOCK)
+        page.clock.set_fixed_time(dt.datetime.fromisoformat(f"2026-11-13T{clock}:00-08:00"))
+        page.route("http://dash.test/", lambda r: r.fulfill(status=200, content_type="text/html", body=html))
+        page.goto("http://dash.test/")
+        page.wait_for_timeout(700)
+        out = {}
+        for tab in ("overview", "alerts"):
+            page.click(f"#tab-{tab}")
+            page.wait_for_timeout(200)
+            out[tab] = page.evaluate("""() => ({ text: document.querySelector('#main').innerText,
+              card: [...document.querySelectorAll('.pos-card [data-pos-news]')].map((e) => e.innerText),
+              act: [...document.querySelectorAll('[data-pos-action] [data-pos-news]')].map((e) => e.innerText) })""")
+        out["badge"] = page.evaluate("() => document.querySelector('#tab-alerts .count')?.innerText || ''")
+        b.close()
+    assert not errs, errs
+    return out
+
+
+def test_news_on_an_open_position_shows_on_its_card_and_in_action_needed():
+    v = _views(_pos_fixture(), "07:10")
+    # the 7:01 scan had no news check; the 6:22 caution still shows, once, with where it came from
+    card = v["overview"]["card"]
+    assert len(card) == 1 and "caution" in card[0].lower() and "A director kept selling shares" in card[0]
+    assert "6:22" in card[0] and "from the 6:22 am news check" not in card[0]
+    assert "plan is unchanged" in card[0]
+    act = v["alerts"]["act"]
+    assert len(act) == 1 and "A director kept selling shares" in act[0]
+    assert "KEEP HOLDING · CHECK THE NEWS" in v["alerts"]["text"]
+    assert v["badge"] == "1"
+
+
+def test_news_from_an_earlier_session_is_not_shown():
+    v = _views(_pos_fixture(news_day="2026-11-12"), "07:10")
+    assert v["overview"]["card"] == [] and v["alerts"]["act"] == [] and v["badge"] == ""

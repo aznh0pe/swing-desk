@@ -207,6 +207,10 @@ td .t { font-family: var(--f-display); font-stretch: 85%; font-weight: 700; font
 .pc-status.st-sell { background: var(--crit-bg); border-left-color: var(--crit); } .pc-status.st-sell .lbl { color: var(--crit); }
 .pc-status.st-good { background: var(--good-bg); border-left-color: var(--good); } .pc-status.st-good .lbl { color: var(--good); }
 .pc-status.st-act { background: var(--warn-bg); border-left-color: var(--warn); } .pc-status.st-act .lbl { color: var(--warn); }
+.pc-news { padding: 8px 14px 9px; border-bottom: 1px solid var(--line); border-left: 4px solid var(--warn); background: var(--warn-bg); font-size: 13px; color: var(--ink-2); line-height: 1.4; display: grid; gap: 3px; }
+.pc-news.nv-avoid { border-left-color: var(--crit); background: var(--crit-bg); }
+.pc-news .k { font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); }
+.act .news { margin-top: 3px; font-size: 13px; color: var(--ink-2); }
 .pc-st-act { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 5px; }
 .linklike { background: none; border: 0; padding: 0; margin: 0; font: inherit; color: var(--info); text-decoration: underline; cursor: pointer; }
 @media (max-width: 480px) { .pc-levels { grid-template-columns: repeat(2, minmax(0, 1fr)); } .pc-levels > div:nth-child(2) { border-right: 0; } .pc-levels > div:nth-child(-n+2) { border-bottom: 1px solid var(--line); } }
@@ -469,6 +473,29 @@ function latestMarks() {
   const out = {};
   for (const sc of S.scans) { for (const p of sc.positions || []) { if (!out[p.trade_id]) out[p.trade_id] = { ...p, scan_at: sc.started_at, scan_mode: sc.mode }; } }
   return out;
+}
+// News a scan's news check found on an open position (caution or avoid). Every check of the same session counts and
+// a later one never softens an earlier one, as in the emails. Shown on the position's card and in Action needed.
+const NEWS_SEV = { caution: 1, avoid: 2 };
+const NEWS_FROM = /\s*\(from the [^()]* news check\)\s*$/;
+function positionNews(t, m) {
+  const day = m.scan_at ? (S.scans.find((sc) => sc.started_at === m.scan_at) || {}).session_day : null;
+  if (!day) return null;
+  let best = null;
+  for (const sc of [...S.scans].reverse()) {  // oldest first: the first check that flagged it is its source
+    if (String(sc.session_day) !== String(day) || sc.status === "failed") continue;
+    for (const n of sc.position_news || []) {
+      const sev = NEWS_SEV[n.verdict];
+      if (!sev || String(n.ticker || "").toUpperCase() !== String(t.ticker || "").toUpperCase()) continue;
+      const r = String(n.reason || "").replace(NEWS_FROM, "").replace(/\.$/, "") || "notable news";
+      if (!best || sev > best.sev) best = { sev, verdict: n.verdict, reason: r.charAt(0).toUpperCase() + r.slice(1), at: sc.started_at };
+    }
+  }
+  return best;
+}
+function newsWhat(n) {
+  return n.verdict === "avoid" ? "Material company news: check it now and decide whether to keep the position; the plan's stop and exits still apply."
+    : "Company-specific news that doesn't break the trade: the plan is unchanged, but read it before deciding anything.";
 }
 function closedTrades() { return S.trades.filter((t) => t.status === "closed" && num(t.exit_price) !== null).sort((a, b) => String(a.exit_date).localeCompare(String(b.exit_date))); }
 // A position sold in parts is one trade: its closed parts (parent_id) merge into one record for every statistic.
@@ -936,7 +963,7 @@ function viewAlerts() {
   const res = orderResolutions();
   let html = res.length ? `<section class="section"><div class="section-head"><h2>Did these orders fill?</h2><span class="meta">Their sessions are over · one tap records the result</span></div>
     <div class="grid">${res.map(resolveCard).join("")}</div></section>` : "";
-  html += `<section class="section"><div class="section-head"><h2>Action needed on open positions</h2><span class="meta">Exit early, raise a stop, or confirm a fill</span></div>`;
+  html += `<section class="section"><div class="section-head"><h2>Action needed on open positions</h2><span class="meta">Exit early, raise a stop, confirm a fill, or read news on a position</span></div>`;
   html += actions.length ? `<div class="grid">${actions.map(posActionCard).join("")}</div>` : `<div class="empty">No open position needs action right now: the latest scan says keep holding. The pre-close scan (12:25 PM PT) and post-close scan (2:05 PM PT) re-check every open position.</div>`;
   html += `</section><section class="section"><div class="section-head"><h2>New A+ opportunities</h2>
     <span class="meta">${capLeft > 0 ? `${capLeft} of ${esc(st.max_open_positions)} position slots free · ${money(f.cash)} cash` : `All ${esc(st.max_open_positions)} slots are in use; setups still listed so you can swap into a stronger one`}</span></div>`;
@@ -1075,16 +1102,18 @@ function deriveStatus(t, m) {
 // can never disagree. Stored exit alerts are only a log: a later scan supersedes them.
 function positionActions() {
   const marks = latestMarks();
-  return openPositions().map((t) => { const m = marks[t.id] || {}; return { t, m, st: positionStatus(t, m) }; })
-    .filter(({ st }) => st.code !== "HOLD");
+  return openPositions().map((t) => { const m = marks[t.id] || {}; return { t, m, st: positionStatus(t, m), news: positionNews(t, m) }; })
+    .filter(({ st, news }) => st.code !== "HOLD" || news);
 }
-function posActionCard({ t, m, st }) {
-  const lvl = st.tone === "good" ? "good" : st.tone === "act" ? "info" : "alert";
+function posActionCard({ t, m, st, news }) {
+  const lvl = st.code === "HOLD" ? (news?.verdict === "avoid" ? "alert" : "info") : st.tone === "good" ? "good" : st.tone === "act" ? "info" : "alert";
   const held = heldDays(t), maxH = num(t.max_hold) || 7, pnl = posPnl(t, m);
   const btn = st.code === "RAISE_STOP" && st.new_stop != null
     ? `<button class="btn primary small" type="button" data-act="cardstop" data-tid="${esc(t.id)}" data-px="${st.new_stop.toFixed(2)}">Stop moved to ${px(st.new_stop)}</button>`
+    : st.code === "HOLD" ? `<button class="btn small" type="button" data-act="gopos" data-tid="${esc(t.id)}">Open the position</button>`
     : `<button class="btn primary small" type="button" data-act="gopos" data-tid="${esc(t.id)}">Record the sale</button>`;
-  return `<div class="act ${lvl}" data-pos-action="${esc(t.id)}"><div class="tk">${esc(t.ticker)}</div><div><div class="what">${esc(st.label)}</div>
+  return `<div class="act ${lvl}" data-pos-action="${esc(t.id)}"><div class="tk">${esc(t.ticker)}</div><div><div class="what">${esc(st.label)}${news ? ` · ${news.verdict === "avoid" ? "REVIEW THE NEWS NOW" : "CHECK THE NEWS"}` : ""}</div>
+    ${news ? `<div class="news" data-pos-news="${esc(news.verdict)}"><b>News (${esc(news.verdict)}, ${dtShort(news.at)} check):</b> ${hiCaution(news.reason)}. ${esc(newsWhat(news))}</div>` : ""}
     ${st.detail ? `<div class="why">${hiCaution(st.detail)}</div>` : ""}${st.note ? `<div class="why"><b>${esc(st.note)}</b></div>` : ""}
     <div class="small muted">${m.scan_at ? `${esc(modeLabel(m.scan_mode))} scan ${dtShort(m.scan_at)}` : "Not scanned yet"} · last ${px(m.last)} · P&L ${pnl !== null ? pnlHtml(pnl) : "–"} · day ${esc(Math.min(held, maxH))} of ${esc(maxH)}</div></div>
     <div class="btns">${btn}</div></div>`;
@@ -1145,6 +1174,8 @@ function positionCard(t, m) {
     + `<div class="small muted">${m.scan_at ? `Status from the ${dtShort(m.scan_at)} scan; the next scan updates it.` : "No scan has marked this position yet."}</div>`;
   const stBtn = st.code === "RAISE_STOP" && st.new_stop
     ? `<div class="pc-st-act"><button class="btn primary small" type="button" data-act="cardstop" data-tid="${esc(id)}" data-px="${st.new_stop.toFixed(2)}">Stop moved to ${px(st.new_stop)}</button><span class="small muted">Press after you change it in your brokerage.</span></div>` : "";
+  const news = positionNews(t, m);
+  const newsHtml = news ? `<div class="pc-news nv-${esc(news.verdict)}" role="note" data-pos-news="${esc(news.verdict)}"><div class="k">News on this position · ${esc(news.verdict)} · ${dtShort(news.at)} check</div><div>${hiCaution(news.reason)}.</div><div class="small">${esc(newsWhat(news))}</div></div>` : "";
   const statusHtml = `<div class="pc-status st-${esc(st.tone || "hold")}" role="status"><div class="k">Status · what to do now</div><div class="lbl">${esc(st.label)}</div>${st.detail ? `<div class="det">${hiCaution(st.detail)}</div>` : ""}${st.note ? `<div class="note">${esc(st.note)}</div>` : ""}${stBtn}</div>`;
   const chip = (label, v, why) => v === null ? "" : `<button type="button" class="chip" data-act="sellfill" data-tid="${esc(id)}" data-px="${v.toFixed(2)}" data-why="${esc(why)}">${label} ${px(v)}</button>`;
   const lvl = (lbl, v, sub) => `<div><div class="k">${lbl}</div><div class="v">${v}</div><div class="s">${sub || "&nbsp;"}</div></div>`;
@@ -1153,7 +1184,7 @@ function positionCard(t, m) {
     <div class="pc-head"><div class="pc-title"><div class="tk">${esc(t.ticker)}</div>${t.name ? `<div class="nm" title="${esc(t.name)}">${esc(t.name)}</div>` : ""}
       <div class="st">${gchip(gradeOfTrade(t))}${esc(t.strategy_label || t.strategy || "Manual")} · entered ${dShort(t.entry_date)}${num(t.sold_shares) ? ` · ${shareStr(t.sold_shares)} sh sold so far` : ""}</div></div>
       <div class="pc-pnl"><div class="lbl">Open P&L</div><div class="big">${pnl !== null ? pnlHtml(pnl) : "–"}</div><div class="lbl">${pnlPct !== null ? `${pnlPctHtml(pnl, pnlPct)} · last ${px(last)}` : "no mark yet"}</div></div></div>
-    ${statusHtml}
+    ${statusHtml}${newsHtml}
     <div class="pc-levels">
       ${lvl("Entry", px(entry), `${shareStr(sh)} sh`)}
       ${lvl("Stop", px(stop), entry && stop ? spct((100 * (stop - entry)) / entry) : "")}
