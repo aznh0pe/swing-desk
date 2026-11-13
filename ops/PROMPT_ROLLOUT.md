@@ -26,3 +26,12 @@ the recalibration journals the top-ups on their own): all updated 10:35 AM PT.
 - [x] backup weekly   trig_01XCwqgr1TMFQuHDDY1drXFa
 Scan prompts are unchanged (the scanner itself carries the new top-up rule). Live params re-tuned with
 `python3 -m engine.calibrate topups` (strategy/params v5); learning/stats rewritten with the per-grade record (v4).
+
+## Nov 13 2026: pre-market check moved earlier, late-start guard
+
+The scheduler left the 5:50 AM pre-market check and its 6:02 AM backup waiting past 6:26 AM. Both tasks now
+run earlier, and the pre-market prompt starts with an "already done?" step (`PREMARKET_GUARD` in
+build_prompts.py), so a run that starts late after a backup or a dashboard catch-up stops with one line.
+- [x] premarket         trig_01BC6UyGsrA3mesQsU6pFbRP  5:17 AM PT (was 5:50), prompt regenerated
+- [x] backup premarket  trig_01WA17hiGscrK1sLsnnpwjEW  5:47 AM PT (was 6:02), prompt regenerated
+Other prompts are unchanged.
