@@ -220,10 +220,10 @@ def test_news_on_an_open_position_shows_on_its_card_and_in_action_needed():
     card = v["overview"]["card"]
     assert len(card) == 1 and "caution" in card[0].lower() and "A director kept selling shares" in card[0]
     assert "6:22" in card[0] and "from the 6:22 am news check" not in card[0]
-    assert "plan is unchanged" in card[0]
+    assert "Doesn't break the trade: the plan is unchanged." in card[0] and "read the news before deciding anything else" in card[0]
     act = v["alerts"]["act"]
     assert len(act) == 1 and "A director kept selling shares" in act[0]
-    assert "KEEP HOLDING · CHECK THE NEWS" in v["alerts"]["text"]
+    assert "Doesn't break the trade: the plan is unchanged." in act[0] and "KEEP HOLDING" in v["alerts"]["text"]
     assert v["badge"] == "1"
 
 

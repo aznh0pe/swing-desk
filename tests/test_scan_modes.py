@@ -458,4 +458,5 @@ def test_position_news_from_an_earlier_check_shows_in_every_later_scan(synth, tm
     doc = json.loads((tmp_path / "o" / "scan.json").read_text())["scan"]
     assert [(x["ticker"], x["verdict"]) for x in doc.get("position_news") or []] == [("S01", "caution")]
     digest = (tmp_path / "o" / "digest.md").read_text()
-    assert "REVIEW S01 position" in digest and "a director kept selling" in digest and "S99" not in digest
+    assert "S01 · 🔴 **CAUTION** · **Doesn't break the trade: the plan is unchanged.**" in digest
+    assert "What the 6:22 AM news check found: A director kept selling." in digest and "S99" not in digest

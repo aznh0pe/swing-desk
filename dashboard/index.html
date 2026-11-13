@@ -207,10 +207,23 @@ td .t { font-family: var(--f-display); font-stretch: 85%; font-weight: 700; font
 .pc-status.st-sell { background: var(--crit-bg); border-left-color: var(--crit); } .pc-status.st-sell .lbl { color: var(--crit); }
 .pc-status.st-good { background: var(--good-bg); border-left-color: var(--good); } .pc-status.st-good .lbl { color: var(--good); }
 .pc-status.st-act { background: var(--warn-bg); border-left-color: var(--warn); } .pc-status.st-act .lbl { color: var(--warn); }
-.pc-news { padding: 8px 14px 9px; border-bottom: 1px solid var(--line); border-left: 4px solid var(--warn); background: var(--warn-bg); font-size: 13px; color: var(--ink-2); line-height: 1.4; display: grid; gap: 3px; }
-.pc-news.nv-avoid { border-left-color: var(--crit); background: var(--crit-bg); }
-.pc-news .k { font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); }
-.act .news { margin-top: 3px; font-size: 13px; color: var(--ink-2); }
+.nv { display: grid; gap: 6px; padding: 11px 14px 12px; border-bottom: 1px solid var(--line); border-left: 4px solid var(--warn); background: var(--warn-bg); }
+.nv.nv-avoid { border-left-color: var(--crit); background: var(--crit-bg); }
+.nv-top { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; }
+.nv-badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px 3px 8px; border-radius: 999px; background: var(--warn); color: var(--warn-bg);
+  font-family: var(--f-display); font-weight: 800; font-size: 12.5px; letter-spacing: .09em; text-transform: uppercase; line-height: 1.3; }
+.nv-avoid .nv-badge { background: var(--crit); color: var(--crit-bg); }
+.nv-badge svg { width: 13px; height: 13px; flex: none; }
+.nv-src { font-size: 11.5px; color: var(--ink-3); letter-spacing: .02em; }
+.nv-main { display: flex; align-items: flex-start; gap: 7px; font-size: 15px; font-weight: 700; line-height: 1.3; color: var(--ink); }
+.nv-main svg { width: 17px; height: 17px; flex: none; margin-top: 1px; color: var(--good); }
+.nv-avoid .nv-main svg { color: var(--crit); }
+.nv-why { font-size: 13px; line-height: 1.5; color: var(--ink-2); }
+.nv-why b { color: var(--ink-3); font-weight: 600; font-size: 11px; letter-spacing: .07em; text-transform: uppercase; margin-right: 4px; }
+.nv-do { font-size: 12.5px; color: var(--ink-3); }
+.act .nv { margin: 7px 0 4px; padding: 9px 11px 10px; border: 0; border-left: 3px solid var(--warn); border-radius: var(--r-sm); }
+.act .nv.nv-avoid { border-left-color: var(--crit); }
+.act .nv-main { font-size: 14px; }
 .pc-st-act { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 5px; }
 .linklike { background: none; border: 0; padding: 0; margin: 0; font: inherit; color: var(--info); text-decoration: underline; cursor: pointer; }
 @media (max-width: 480px) { .pc-levels { grid-template-columns: repeat(2, minmax(0, 1fr)); } .pc-levels > div:nth-child(2) { border-right: 0; } .pc-levels > div:nth-child(-n+2) { border-bottom: 1px solid var(--line); } }
@@ -493,9 +506,25 @@ function positionNews(t, m) {
   }
   return best;
 }
-function newsWhat(n) {
-  return n.verdict === "avoid" ? "Material company news: check it now and decide whether to keep the position; the plan's stop and exits still apply."
-    : "Company-specific news that doesn't break the trade: the plan is unchanged, but read it before deciding anything.";
+// The news on a position, laid out to be read at a glance: the verdict, then what it means for the trade, then why.
+const NV_ICON = {
+  caution: '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 1.3c.4 0 .8.2 1 .6l6.2 11c.4.7-.1 1.6-1 1.6H1.8c-.9 0-1.4-.9-1-1.6l6.2-11c.2-.4.6-.6 1-.6Zm0 4.2a.8.8 0 0 0-.8.8v3.4a.8.8 0 0 0 1.6 0V6.3a.8.8 0 0 0-.8-.8Zm0 6a.9.9 0 1 0 0 1.8.9.9 0 0 0 0-1.8Z"/></svg>',
+  avoid: '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 1a7 7 0 1 1 0 14A7 7 0 0 1 8 1Zm-3 6.2a.8.8 0 0 0 0 1.6h6a.8.8 0 0 0 0-1.6H5Z"/></svg>',
+  ok: '<svg viewBox="0 0 20 20" aria-hidden="true"><path fill="currentColor" d="M10 1.5a8.5 8.5 0 1 1 0 17 8.5 8.5 0 0 1 0-17Zm3.6 5.4a.9.9 0 0 0-1.3.1l-3.3 4.2-1.6-1.6a.9.9 0 1 0-1.3 1.3l2.3 2.3c.4.4 1 .3 1.3-.1l4-5a.9.9 0 0 0-.1-1.2Z"/></svg>',
+  stop: '<svg viewBox="0 0 20 20" aria-hidden="true"><path fill="currentColor" d="M10 1.5a8.5 8.5 0 1 1 0 17 8.5 8.5 0 0 1 0-17Zm0 4a.9.9 0 0 0-.9.9v4.2a.9.9 0 0 0 1.8 0V6.4a.9.9 0 0 0-.9-.9Zm0 7.2a1 1 0 1 0 0 2 1 1 0 0 0 0-2Z"/></svg>',
+};
+const NV_TEXT = {
+  caution: { main: "Doesn't break the trade: the plan is unchanged.", act: "Nothing changes: keep following the status above, and read the news before deciding anything else." },
+  avoid: { main: "Material company news: review this position now.", act: "The plan's stop and exits still apply. Sell early only if the news changes your view of the trade." },
+};
+function newsBlock(n, inList) {
+  const v = n.verdict === "avoid" ? "avoid" : "caution", tx = NV_TEXT[v];
+  return `<div class="nv nv-${v}" role="note" data-pos-news="${v}">
+    <div class="nv-top"><span class="nv-badge">${NV_ICON[v]}${v === "avoid" ? "Avoid" : "Caution"}</span><span class="nv-src">News check · ${dtShort(n.at)}</span></div>
+    <div class="nv-main">${v === "avoid" ? NV_ICON.stop : NV_ICON.ok}<span>${esc(tx.main)}</span></div>
+    <div class="nv-why"><b>What it found</b>${esc(n.reason)}.</div>
+    ${inList ? "" : `<div class="nv-do">${esc(tx.act)}</div>`}
+  </div>`;
 }
 function closedTrades() { return S.trades.filter((t) => t.status === "closed" && num(t.exit_price) !== null).sort((a, b) => String(a.exit_date).localeCompare(String(b.exit_date))); }
 // A position sold in parts is one trade: its closed parts (parent_id) merge into one record for every statistic.
@@ -1112,8 +1141,8 @@ function posActionCard({ t, m, st, news }) {
     ? `<button class="btn primary small" type="button" data-act="cardstop" data-tid="${esc(t.id)}" data-px="${st.new_stop.toFixed(2)}">Stop moved to ${px(st.new_stop)}</button>`
     : st.code === "HOLD" ? `<button class="btn small" type="button" data-act="gopos" data-tid="${esc(t.id)}">Open the position</button>`
     : `<button class="btn primary small" type="button" data-act="gopos" data-tid="${esc(t.id)}">Record the sale</button>`;
-  return `<div class="act ${lvl}" data-pos-action="${esc(t.id)}"><div class="tk">${esc(t.ticker)}</div><div><div class="what">${esc(st.label)}${news ? ` · ${news.verdict === "avoid" ? "REVIEW THE NEWS NOW" : "CHECK THE NEWS"}` : ""}</div>
-    ${news ? `<div class="news" data-pos-news="${esc(news.verdict)}"><b>News (${esc(news.verdict)}, ${dtShort(news.at)} check):</b> ${hiCaution(news.reason)}. ${esc(newsWhat(news))}</div>` : ""}
+  return `<div class="act ${lvl}" data-pos-action="${esc(t.id)}"><div class="tk">${esc(t.ticker)}</div><div><div class="what">${esc(st.label)}${news?.verdict === "avoid" ? " · REVIEW THE NEWS" : ""}</div>
+    ${news ? newsBlock(news, true) : ""}
     ${st.detail ? `<div class="why">${hiCaution(st.detail)}</div>` : ""}${st.note ? `<div class="why"><b>${esc(st.note)}</b></div>` : ""}
     <div class="small muted">${m.scan_at ? `${esc(modeLabel(m.scan_mode))} scan ${dtShort(m.scan_at)}` : "Not scanned yet"} · last ${px(m.last)} · P&L ${pnl !== null ? pnlHtml(pnl) : "–"} · day ${esc(Math.min(held, maxH))} of ${esc(maxH)}</div></div>
     <div class="btns">${btn}</div></div>`;
@@ -1175,7 +1204,7 @@ function positionCard(t, m) {
   const stBtn = st.code === "RAISE_STOP" && st.new_stop
     ? `<div class="pc-st-act"><button class="btn primary small" type="button" data-act="cardstop" data-tid="${esc(id)}" data-px="${st.new_stop.toFixed(2)}">Stop moved to ${px(st.new_stop)}</button><span class="small muted">Press after you change it in your brokerage.</span></div>` : "";
   const news = positionNews(t, m);
-  const newsHtml = news ? `<div class="pc-news nv-${esc(news.verdict)}" role="note" data-pos-news="${esc(news.verdict)}"><div class="k">News on this position · ${esc(news.verdict)} · ${dtShort(news.at)} check</div><div>${hiCaution(news.reason)}.</div><div class="small">${esc(newsWhat(news))}</div></div>` : "";
+  const newsHtml = news ? newsBlock(news, false) : "";
   const statusHtml = `<div class="pc-status st-${esc(st.tone || "hold")}" role="status"><div class="k">Status · what to do now</div><div class="lbl">${esc(st.label)}</div>${st.detail ? `<div class="det">${hiCaution(st.detail)}</div>` : ""}${st.note ? `<div class="note">${esc(st.note)}</div>` : ""}${stBtn}</div>`;
   const chip = (label, v, why) => v === null ? "" : `<button type="button" class="chip" data-act="sellfill" data-tid="${esc(id)}" data-px="${v.toFixed(2)}" data-why="${esc(why)}">${label} ${px(v)}</button>`;
   const lvl = (lbl, v, sub) => `<div><div class="k">${lbl}</div><div class="v">${v}</div><div class="s">${sub || "&nbsp;"}</div></div>`;

@@ -1012,6 +1012,26 @@ def _write(out, writes, op, coll, did, data, version=None):
 _CAUTION = re.compile(r"(?<!\*\*)\b(caution)\b(?!\*\*)", re.IGNORECASE)
 
 
+_NEWS_FROM = re.compile(r"\s*\(from the ([^()]*) news check\)\s*$")
+
+
+def news_lines(x: dict) -> list[str]:
+    """News on an open position, laid out to be read at a glance: the verdict, what it means for the trade (the
+    main point, in bold), then what the check found and when."""
+    reason = str(x.get("reason") or "notable news").strip()
+    m = _NEWS_FROM.search(reason)
+    when = m.group(1).replace(" am", " AM").replace(" pm", " PM") + " news check" if m else "news check"
+    core = _NEWS_FROM.sub("", reason).rstrip(". ") or "notable news"
+    core = core[0].upper() + core[1:]
+    if x.get("verdict") == "avoid":
+        head = (f"- {x['ticker']} · ⛔ **AVOID** · **Material company news: review this position now.** "
+                "The plan's stop and exits still apply; sell early only if the news changes your view of the trade.")
+    else:
+        head = (f"- {x['ticker']} · CAUTION · **Doesn't break the trade: the plan is unchanged.** "
+                "Keep following its status below; read the news before deciding anything else.")
+    return [head, f"    What the {when} found: {core}."]
+
+
 def mark_caution(text: str) -> str:
     """Make every news "caution" stand out in the email: a red marker and bold (markdown). Only the word is
     marked, and running it twice changes nothing."""
@@ -1177,7 +1197,7 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
     if pn:
         lines += ["", "=== NEWS ON OPEN POSITIONS ==="]
         for x in pn:
-            lines.append(f"- REVIEW {x['ticker']} position ({x['verdict']}): {x['reason']}")
+            lines += news_lines(x)
     if positions:
         lines += ["", f"=== OPEN POSITIONS ({len(positions)}): STATUS AND WHAT TO DO ==="]
         for p in positions:
