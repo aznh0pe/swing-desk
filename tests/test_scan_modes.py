@@ -440,3 +440,22 @@ def test_withdrawn_line_never_repeats_itself():
     own = "No longer clears the bar in the Thu 2:42 PM scan: score 55.9, model win 60%."
     assert withdrawn_core(own) == own
     assert withdrawn_core(None) == "it no longer qualifies."
+
+
+def test_position_news_from_an_earlier_check_shows_in_every_later_scan(synth, tmp_path):
+    """Nov 13: the 6:22 AM pre-market check flagged ILMN (caution); the 7:01 AM scan had no setups to news-check,
+    so its email left the warning out. A scan now carries same-session news on a position it still holds."""
+    from engine import postprocess as pp
+    st = _state(tmp_path)
+    (st / "scans").mkdir()
+    (st / "scans" / "early.json").write_text(json.dumps(
+        {"id": "20261105-0622-premarket", "mode": "premarket", "status": "ok", "session_day": "2026-11-05",
+         "started_at": "2026-11-05T06:22:00-08:00", "news_rules": pp.NEWS_RULES,
+         "position_news": [{"ticker": "S01", "verdict": "caution", "reason": "a director kept selling"},
+                           {"ticker": "S99", "verdict": "caution", "reason": "not held"}]}))
+    now = dt.datetime(2026, 11, 5, 7, 1, tzinfo=cal.PT)
+    scan.run("preclose", str(synth), str(st), str(tmp_path / "o"), now=now)
+    doc = json.loads((tmp_path / "o" / "scan.json").read_text())["scan"]
+    assert [(x["ticker"], x["verdict"]) for x in doc.get("position_news") or []] == [("S01", "caution")]
+    digest = (tmp_path / "o" / "digest.md").read_text()
+    assert "REVIEW S01 position" in digest and "a director kept selling" in digest and "S99" not in digest
