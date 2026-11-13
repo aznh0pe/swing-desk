@@ -3,7 +3,7 @@ Run the Swing Desk {MODE_LABEL} for me now. Work unattended: don't ask me anythi
 Context: I run a small swing-trading account (started at $5,000) from a dashboard. The scanner engine lives in my public GitHub repo {OWNER}/swing-desk (branch main); market data is in the same repo's `data` branch, refreshed about every 15 minutes on weekdays by a GitHub Action. The dashboard's database is the artifact {ARTIFACT} — read and write it with the ArtifactData tool (load it with ToolSearch if it isn't loaded yet). These are model signals for my own decisions: never place trades, never email anyone, never change the dashboard page itself.
 {PROGRESS_BLOCK}
 Steps
-{SETUP}
+{START_GUARD}{SETUP}
 2. Data freshness ({MODE}): read $W/data/meta.json. {FRESHNESS_RULE}
 3. Export the dashboard state with out_dir "$W/state" on url {ARTIFACT}: ArtifactData action "list" with query.limit 1000 for collections config, ledger, trades and strategy; for alerts use action "query" with query {"order_by": {"field": "created_at", "direction": "desc"}, "limit": 1000} so the newest alerts are always included; for scans use action "query" with query {"order_by": {"field": "started_at", "direction": "desc"}, "limit": 6} (so a later news check never softens an earlier caution).
 4. Run `cd $C && python3 -m engine.scan --mode {MODE} --data $W/data --state $W/state --out $W/out{SCAN_ARGS}`. If the result says "failed" or Python errors, read $W/out/failure.json, fix the cause in your local copy (data format, missing column, edge case), and run again — up to 3 fix attempts. Add any fix you made to ISSUES.

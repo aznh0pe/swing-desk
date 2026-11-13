@@ -324,7 +324,7 @@ const RUN_STEPS = [
 const RUN_STALE_MS = 7 * 60000, RUN_SHOW_DONE_MS = 15 * 60000;
 const TABS = [["overview", "Overview"], ["alerts", "Alerts"], ["log", "Trade log"], ["funds", "Funds & income"], ["scans", "Scans"], ["lab", "Strategy lab"]];
 const SCHEDULE = [
-  { when: "5:50 AM PT", backup: "6:02 AM", days: "Mon–Fri", what: "Pre-market check", detail: "Re-checks today's orders against overnight news and pre-market gaps; warns before the 6:30 open." },
+  { when: "5:17 AM PT", backup: "5:47 AM", days: "Mon–Fri", what: "Pre-market check", detail: "Re-checks today's orders against overnight news and pre-market gaps; warns before the 6:30 open. Scheduled early so a late start by the scheduler still lands before the open; if it hasn't come in by 5:29, a Run it now button appears here and on the Overview." },
   { when: "12:25 PM PT", backup: "12:38 PM", days: "Mon–Fri", what: "Pre-close exit scan", detail: "Live prices 35 min before the close: exit-at-close signals, time stops, earnings risk, buy-at-close setups." },
   { when: "2:05 PM PT", backup: "2:53 PM", days: "Mon–Fri", what: "Post-close setup scan", detail: "Final daily bars: tomorrow's A+ setups with limit entry, stop and target to place tonight." },
   { when: "3:12 PM PT", backup: "4:23 PM", days: "Mon–Fri", what: "Daily learning + strategy research", detail: "Grades every alert against what the market did, updates win-rate estimates and writes the journal; then researches and backtests a new strategy idea for the Strategy lab." },
@@ -343,7 +343,9 @@ const HOLIDAY_NAMES = { "2026-11-26": "Thanksgiving Day", "2026-12-25": "Christm
   "2028-04-14": "Good Friday", "2028-05-29": "Memorial Day", "2028-06-19": "Juneteenth", "2028-07-04": "Independence Day", "2028-09-04": "Labor Day", "2028-11-23": "Thanksgiving Day", "2028-12-25": "Christmas Day" };
 // Each scheduled run, its backup check, and what counts as "it ran" (Pacific 24h clock). dur = minutes a run usually takes.
 const RUN_PLAN = [
-  { key: "premarket", label: "Pre-market check", at: "05:50", from: "05:40", backup: "06:02", dur: 20, modes: ["premarket"] },
+  // catchup: from `after` minutes past its time until `until`, a run that hasn't come in offers Run now (the scheduler can start
+// runs late: Fri Nov 13 2026 the 5:50 AM check and its 6:02 AM backup were both still waiting to start at 6:26 AM)
+  { key: "premarket", label: "Pre-market check", at: "05:17", from: "05:05", backup: "05:47", dur: 20, modes: ["premarket"], catchup: { after: 12, until: "06:30" } },
   { key: "preclose", label: "Pre-close exit scan", at: "12:25", from: "12:20", backup: "12:38", dur: 20, modes: ["preclose", "postclose"], half: { at: "09:20", from: "09:15" } },
   { key: "postclose", label: "Post-close setup scan", at: "14:05", from: "13:55", backup: "14:53", dur: 45, modes: ["postclose"], half: { from: "10:55" } },
   { key: "learning", label: "Daily learning + research", at: "15:12", backup: "16:23", dur: 50, journal: true },
@@ -648,7 +650,11 @@ function judgeRun(p, at, hit, failed, now, backupLabel) {
     return { state: "bad", pill: "crit", text: "Failed", note: "The run and its backup check both failed. Press Run now, or open the Swing Desk chat." };
   }
   if (now < at) return { state: "due", pill: "neutral", text: `Due ${to12(at)}`, note: "" };
-  if (now < addMin(at, p.dur)) return { state: "running", pill: "info", text: "Running", note: `Started ${to12(at)}; results usually arrive within ${p.dur} minutes.` };
+  const cu = p.catchup;  // time-critical run: offer Run now as soon as it is clearly late, not only after the backup failed
+  if (cu && now >= addMin(at, cu.after) && now < cu.until)
+    return { state: "late", pill: "warn", text: "Not in yet", runNowOk: true,
+      note: `It was due at ${to12(at)}; the scheduler sometimes starts runs late. Press Run now to have it before the 6:30 open (a scheduled run that starts later sees it's done and stops).` };
+  if (now < addMin(at, p.dur)) return { state: "running", pill: "info", text: "Waiting for results", note: `Scheduled ${to12(at)}; results usually arrive within ${p.dur} minutes.` };
   if (now < bk) return { state: "late", pill: "warn", text: "Not in yet", note: `If it doesn't arrive, the backup check at ${backupLabel} runs it.` };
   if (now < addMin(bk, p.dur)) return { state: "retry", pill: "warn", text: "Backup running", note: `It didn't arrive, so the ${backupLabel} backup check is running it now.` };
   return { state: "bad", pill: "crit", text: "Missed", note: "Neither the run nor its backup check saved results. Press Run now, or open the Swing Desk chat." };
@@ -688,7 +694,7 @@ function runHealth() {
         : now < addMin(q.at, q.dur) ? { state: "running", pill: "info", text: "Running", note: "Started 4:17 PM; usually done within 30 minutes." }
         : now < q.backup ? { state: "late", pill: "warn", text: "Not in yet", note: "If it doesn't arrive, the backup check at 5:07 PM runs it." }
         : now < addMin(q.backup, 45) ? { state: "retry", pill: "warn", text: "Backup running", note: "It didn't arrive, so the 5:07 PM backup check is running it now." }
-        : { state: "bad", pill: "crit", text: "Missed", note: "Neither the refresh nor its backup check saved results. Press Run now (it runs Scan now); Monday's 5:50 AM check re-checks every order either way." };
+        : { state: "bad", pill: "crit", text: "Missed", note: "Neither the refresh nor its backup check saved results. Press Run now (it runs Scan now); Monday's 5:17 AM check re-checks every order either way." };
       out.items.push({ ...q, ...rr, backupLabel: "5:07 PM" });
     }
   }
@@ -711,7 +717,7 @@ function healthPanel() {
   const head = h.closed ? `Market closed today (${esc(h.reason)}).${h.items.length ? "" : " No scans run until the next session."}` : h.half ? "Half day: the market closes at 10:00 AM PT, so the pre-close scan runs at 9:20 AM." : "";
   const rows = h.items.map((i) => `<tr><td><b>${esc(i.label)}</b></td><td class="num" style="white-space:nowrap">${to12(i.at)}</td>
     <td><span class="pill ${i.pill}">${esc(i.text)}</span>${i.note ? ` <span class="small muted">${esc(i.note)}</span>` : ""}
-    ${i.state === "bad" ? ` <button class="btn small" type="button" data-act="runnow" data-run="${i.key}">Run now</button>` : ""}</td>
+    ${i.state === "bad" || i.runNowOk ? ` <button class="btn small" type="button" data-act="runnow" data-run="${i.key}">Run now</button>` : ""}</td>
     <td class="small muted" style="white-space:nowrap">${esc(i.backupLabel || to12(i.backup))}</td></tr>`).join("");
   const feed = sc ? `Prices: last bar ${esc(d.last_bar || "–")}${d.partial_bar ? " (live intraday)" : ""} · data ${esc(d.status || "–")} as of the ${dtShort(sc.started_at)} scan` : "Prices: no scan yet";
   const engine = eng.fingerprint ? ` · Engine ${esc(eng.source === "repo" ? "GitHub repo" : "dashboard copy")} ${esc(eng.fingerprint)}` : "";
@@ -722,7 +728,9 @@ function healthPanel() {
 }
 function attentionBanner() {
   const h = runHealth(), res = orderResolutions().filter((r) => r.kind !== "ask" || r.fc);
-  let out = h.bad.length ? `<div class="banner crit" style="margin-bottom:12px"><b>${h.bad.map((i) => esc(i.label)).join(", ")} didn't run today.</b> The backup check couldn't recover ${h.bad.length === 1 ? "it" : "them"} either. <button class="btn small" type="button" data-tab="scans">See today's runs</button></div>` : "";
+  const pm = h.items.find((i) => i.key === "premarket" && i.runNowOk);
+  let out = pm ? `<div class="banner crit" style="margin-bottom:12px"><b>This morning's pre-market check hasn't come in yet</b> (it was due at ${to12(pm.at)}; the scheduler sometimes starts runs late). <button class="btn small" type="button" data-act="runnow" data-run="premarket">Run it now</button> It takes about 5 minutes and is emailed to you like the scheduled one.</div>` : "";
+  out += h.bad.length ? `<div class="banner crit" style="margin-bottom:12px"><b>${h.bad.map((i) => esc(i.label)).join(", ")} didn't run today.</b> The backup check couldn't recover ${h.bad.length === 1 ? "it" : "them"} either. <button class="btn small" type="button" data-tab="scans">See today's runs</button></div>` : "";
   // problems inside a run that still finished (a failed step, a fallback, a fix): shown until the next clean run
   // a problem Claude has fixed is recorded on the run as resolved: it then shows as fixed (with the fix), not as open
   const openOf = (list, doc) => { const rs = Array.isArray(doc?.issues_resolved) ? doc.issues_resolved : []; return [list.filter((t) => !rs.some((r) => r.issue === t)), rs]; };
@@ -1287,7 +1295,7 @@ function viewScans() {
   <div class="tbl-wrap"><table><thead><tr><th>Time</th><th>Days</th><th>Scan</th><th>What it does</th><th>Backup check</th></tr></thead><tbody>
   ${SCHEDULE.map((s) => `<tr><td class="num" style="white-space:nowrap">${s.when}</td><td>${s.days}</td><td><b>${s.what}</b></td><td class="small">${s.detail}</td><td class="small" style="white-space:nowrap">${s.backup || "–"}</td></tr>`).join("")}
   </tbody></table></div>
-  <div class="small muted">Each backup check confirms its run saved results and, if it failed or never ran, runs it again on the spot (re-run scans email you the full alert digest). On half days (the day after Thanksgiving, Christmas Eve) the pre-close scan runs at 9:20 AM. Prices refresh about every 15 minutes, 3 AM to 4 PM PT on weekdays, through your GitHub data feed. ${st.manual_trigger_id ? "Use <b>Scan now</b> at the top for an extra scan at any time." : "The Scan now button activates once the scans are scheduled."}</div></section>`;
+  <div class="small muted">Each backup check confirms its run saved results and, if it failed or never ran, runs it again on the spot (re-run scans email you the full alert digest). The pre-market check runs early (5:17 AM) so a late start by the scheduler still lands before the 6:30 open; if it hasn't come in 12 minutes after it was due, <b>Run now</b> appears here and on the Overview. On half days (the day after Thanksgiving, Christmas Eve) the pre-close scan runs at 9:20 AM. Prices refresh about every 15 minutes, 3 AM to 4 PM PT on weekdays, through your GitHub data feed. ${st.manual_trigger_id ? "Use <b>Scan now</b> at the top for an extra scan at any time." : "The Scan now button activates once the scans are scheduled."}</div></section>`;
   html += `<section class="section"><div class="section-head"><h2>Scan history</h2><span class="meta">${S.scans.length} most recent</span></div>`;
   html += S.scans.length ? `<div class="tbl-wrap"><table><thead><tr><th>Ran</th><th>Scan</th><th>Status</th><th>Data</th><th class="n">A+ setups</th><th class="n">Exit alerts</th><th>Details</th></tr></thead><tbody>
     ${S.scans.map((s) => `<tr><td style="white-space:nowrap">${dtShort(s.started_at)}</td><td>${esc(modeLabel(s.mode))}</td><td><span class="pill ${s.status === "ok" ? "good" : s.status === "failed" ? "crit" : s.status === "closed" ? "neutral" : "warn"}">${esc(s.status === "closed" ? "market closed" : (s.status || "").replace(/_/g, " "))}</span></td>

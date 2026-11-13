@@ -425,3 +425,18 @@ def test_a_withdrawal_says_which_bar_the_setup_now_misses_even_after_the_news_ch
     ups = scan.build_overlay(sd, [], ctx)
     assert "No longer clears the bar" in ups["e_x_IFF"]["withdrawn_reason"] and "score 55.9" in ups["e_x_IFF"]["withdrawn_reason"]
     assert "No longer qualifies" in ups["e_y_ABC"]["withdrawn_reason"]  # not a signal at all any more
+
+
+def test_withdrawn_line_never_repeats_itself():
+    """Nov 13: the pre-market line read "Withdrawn by the Thu 2:42 PM scan: Withdrawn at 2:42 PM: ... Don't place it,
+    or cancel it if you already did. Don't place it; cancel it if you did." The reason's own lead-in and ending go."""
+    from engine.scan import withdrawn_core
+    r = ("Withdrawn at 2:42 PM: it no longer clears the weekly top-up bar (score 55.9 against 56+). "
+         "Don't place it, or cancel it if you already did.")
+    core = withdrawn_core(r)
+    assert core == "it no longer clears the weekly top-up bar (score 55.9 against 56+)."
+    assert "Withdrawn" not in core and "Don't place" not in core
+    # the scanner's own reasons pass through unchanged
+    own = "No longer clears the bar in the Thu 2:42 PM scan: score 55.9, model win 60%."
+    assert withdrawn_core(own) == own
+    assert withdrawn_core(None) == "it no longer qualifies."

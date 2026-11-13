@@ -71,6 +71,10 @@ def prior_verdicts(state: dict | None, session_day) -> dict:
                 tk = u.get("ticker") or (aid.split("_")[2] if aid.count("_") >= 3 else None)
                 if tk:
                     found.append((tk, "caution", u.get("news_note") or "notable news"))
+        # news on open positions too (Nov 13: the 6:22 AM check flagged ILMN, the 6:27 AM re-run dropped it)
+        for x in sc.get("position_news") or []:
+            if x.get("ticker") and x.get("verdict") in ("caution", "avoid"):
+                found.append((x["ticker"], x["verdict"], x.get("reason") or "notable news"))
         for tk, kind, note in found:
             tk = str(tk).upper()
             note = _FROM.sub("", str(note or "")).strip() or "notable news"

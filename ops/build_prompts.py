@@ -79,11 +79,22 @@ The scanner adds the final "T-s6" (done) record to the results batch itself beca
 The extra message can reach you a little after you start. If the token turns up mid-run, write the record for the step you are on and carry on from there (skip the earlier ones); if step 4 already ran without it, create "T-s6" yourself right after the results are saved, with {"token": T, "seq": 6, "state": "done", "step": "Scan complete", "pct": 100, "scan_id": "<the scan id>", "at": ..., "by": "scan"}. Run the scan once per session: a message that arrives while you work or after you finish is never a request for another scan. If you had already finished, answer it with your final message again, unchanged (the headline line, a blank line, the full digest), without re-running anything.
 '''
 
+# The scheduler can start a run late (Fri Nov 13 2026: the 5:50 AM pre-market check and its 6:02 AM backup were
+# both still waiting to start at 6:26 AM). By then a backup check or a catch-up from the dashboard may already have
+# done the check, so a late start must not send a second one.
+PREMARKET_GUARD = (
+    '0. Already done? Load ArtifactData with ToolSearch if needed, then ArtifactData action "query" on url {ARTIFACT}, '
+    'collection "scans", query {"order_by": {"field": "started_at", "direction": "desc"}, "limit": 4}, out_dir "/tmp/g" '
+    "(the documents are large, so keep them on disk). If one of them has mode \"premarket\", a started_at today (Pacific) at "
+    "or after 5:05 AM and status \"ok\", \"ok_with_warnings\" or \"closed\", this run started late and the check is already "
+    "done (by its backup check or a catch-up from the dashboard): end with exactly one line, \"No action needed: today's "
+    "pre-market check already ran at <its start time, e.g. 5:19 AM PT>.\", and nothing else. Otherwise carry on with step 1.\n")
+
 MODES = {
     "premarket": {
         "MODE": "premarket", "MODE_LABEL": "pre-market check (before the 6:30 AM PT open)",
         "FRESHNESS_RULE": "premarket_asof should be from today after 4:30 AM PT. If it is missing or older, re-clone the data branch once after 5 minutes, then continue regardless.",
-        "NEWS_STEP": NEWS_PREMARKET, "PROGRESS_BLOCK": "", "SCAN_ARGS": ""},
+        "NEWS_STEP": NEWS_PREMARKET, "PROGRESS_BLOCK": "", "SCAN_ARGS": "", "START_GUARD": PREMARKET_GUARD},
     "preclose": {
         "MODE": "preclose", "MODE_LABEL": "pre-close exit scan (35 minutes before the 1:00 PM PT close)",
         "FRESHNESS_RULE": "intraday_asof should be within the last 45 minutes. If it is older, re-clone the data branch once after 5 minutes, then continue with what you have and mention the data time in the digest.",
@@ -132,11 +143,11 @@ WEEKDAY_CLOSED = ('If today\'s Pacific date is a Saturday or Sunday, or one of t
 # TARGET_ID is the scheduled task it backs up (to tell "still running" from "never ran").
 BACKUPS = {
     "backup_premarket": {
-        "TARGET_ID": "trig_01BC6UyGsrA3mesQsU6pFbRP", "TARGET": "premarket", "TARGET_LABEL": "today's pre-market check", "DUE": "5:50 AM PT", "CHECK_COLLECTION": "scans",
+        "TARGET_ID": "trig_01BC6UyGsrA3mesQsU6pFbRP", "TARGET": "premarket", "TARGET_LABEL": "today's pre-market check", "DUE": "5:17 AM PT", "CHECK_COLLECTION": "scans",
         "CHECK_ORDER": "started_at", "CLOSED_RULE": WEEKDAY_CLOSED,
-        "CHECK_RULE": ('It ran if one of those scans has mode "premarket", a started_at today at or after 5:40 AM, and status "ok", '
+        "CHECK_RULE": ('It ran if one of those scans has mode "premarket", a started_at today at or after 5:05 AM, and status "ok", '
                        '"ok_with_warnings" or "closed".'),
-        "OK_LINE": "today's pre-market check ran at <its start time, e.g. 5:52 AM PT>.",
+        "OK_LINE": "today's pre-market check ran at <its start time, e.g. 5:19 AM PT>.",
         "URGENCY": "The market opens at 6:30 AM PT, so go straight to it. "},
     "backup_preclose": {
         "TARGET_ID": "trig_015vu682N2v147NyT2kAdSLJ", "TARGET": "preclose", "TARGET_LABEL": "today's pre-close exit scan", "DUE": "12:25 PM PT", "CHECK_COLLECTION": "scans",
@@ -191,7 +202,8 @@ def main():
     common = {"SETUP": SETUP, "OWNER": a.owner, "ARTIFACT": a.artifact}
     scan_t = (HERE / "scan_prompt.md").read_text()
     for name, vals in MODES.items():
-        txt = fill(scan_t, {**vals, **common})
+        txt = fill(scan_t, {"START_GUARD": "", **vals})   # the guard first: it holds {ARTIFACT}
+        txt = fill(txt, common)
         txt = txt.replace("{MODE}", vals["MODE"])
         (out / f"{name}.md").write_text(txt)
     for name in ("learning", "weekly"):
@@ -203,7 +215,7 @@ def main():
         txt = fill(txt, {"HOLIDAYS": _holidays(), "ARTIFACT": a.artifact})
         (out / f"{name}.md").write_text(txt.replace("{TARGET_PROMPT}", target))
     for f in sorted(out.glob("*.md")):
-        left = [s for s in ("{MODE", "{OWNER}", "{ARTIFACT}", "{NEWS_STEP}", "{PROGRESS_BLOCK}", "{SCAN_ARGS}", "{SETUP}",
+        left = [s for s in ("{MODE", "{OWNER}", "{ARTIFACT}", "{NEWS_STEP}", "{PROGRESS_BLOCK}", "{SCAN_ARGS}", "{SETUP}", "{START_GUARD}",
                             "{TARGET", "{DUE}", "{CHECK_", "{OK_LINE}", "{URGENCY}", "{CLOSED_RULE}", "{HOLIDAYS}", "{TARGET_ID}") if s in f.read_text()]
         print(f.name, len(f.read_text()), "unfilled:" if left else "ok", *left)
 

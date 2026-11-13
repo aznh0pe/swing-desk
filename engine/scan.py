@@ -541,6 +541,15 @@ def position_alert_updates(existing: dict, positions: list, scan_id: str, when: 
     return ups
 
 
+def withdrawn_core(reason) -> str:
+    """The why of a withdrawal, without its own "Withdrawn at ...:" lead-in or "Don't place it" ending (the
+    pre-market line adds both), so the line never says either twice."""
+    r = str(reason or "").strip()
+    r = re.sub(r"^Withdrawn(?: at .{1,40}?)?:\s+", "", r)
+    r = re.sub(r"\s*Don't place it\b[^.]*\.?\s*$", "", r).strip()
+    return r or "it no longer qualifies."
+
+
 def build_overlay(scan_doc: dict, entries: list, ctx: dict) -> dict:
     ups = {}
     live = {e["id"] for e in entries}
@@ -782,7 +791,7 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
                     pass
                 placed = a.get("status") == "placed"
                 pm_checks.append({"alert_id": aid, "ticker": a.get("ticker"), "verdict": "withdrawn", "placed": placed,
-                                  "text": f"Withdrawn by the{when} scan: {prev.get('withdrawn_reason') or 'it no longer qualifies.'} "
+                                  "text": f"Withdrawn by the{when} scan: {withdrawn_core(prev.get('withdrawn_reason'))} "
                                   + ("You marked it placed: CANCEL it before the open." if placed else "Don't place it; cancel it if you did.")})
             else:
                 c = premarket_check(a, premarket, earnings, today)

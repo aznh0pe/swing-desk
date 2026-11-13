@@ -108,3 +108,29 @@ def test_overlay_refreshes_the_plan_of_existing_alerts():
     ups = sc.build_overlay({"news_dropped": []}, [e], {"existing_entry_ids": [e["id"]], "window": {}})
     u = ups[e["id"]]
     assert u["entry"] == 213.65 and u["target"] == 221.34 and u["order"] == "Buy LIMIT $213.65" and u["withdrawn"] is False
+
+
+def test_news_on_an_open_position_carries_to_later_checks_of_the_session(tmp_path, monkeypatch):
+    """Nov 13: the 6:22 AM pre-market check flagged ILMN (caution: a director kept selling); the 6:27 AM re-run of
+    the same check judged it clean and its digest dropped the warning. A later check never softens it now."""
+    early = {"id": "20261113-0622-premarket", "session_day": "2026-11-13", "status": "ok", "news_rules": pp.NEWS_RULES,
+             "started_at": "2026-11-13T06:22:00-08:00",
+             "position_news": [{"ticker": "ILMN", "verdict": "caution", "reason": "director kept selling shares"}]}
+    got = pp.prior_verdicts(_state(early), "2026-11-13")
+    assert got["ILMN"][0] == "caution" and "director kept selling" in got["ILMN"][1]
+    # a later scan's clean verdict doesn't replace it, and it lands in that scan's position news
+    monkeypatch.setattr(pp, "load_state", lambda d: _state(early))
+    monkeypatch.setattr(pp, "load_params", lambda *a, **k: {"grading": {"aplus_score": 86}})
+    monkeypatch.setattr(pp, "make_digest", lambda *a, **k: "digest")
+    monkeypatch.setattr(pp, "email_headline", lambda *a, **k: "headline")
+    scan = {"id": "20261113-0627-premarket", "session_day": "2026-11-13", "mode": "premarket", "status": "ok",
+            "started_at": "2026-11-13T06:27:00-08:00", "counts": {}, "positions": [{"ticker": "ILMN", "trade_id": "t1"}],
+            "premarket_checks": [], "near_misses": []}
+    out = tmp_path / "out"
+    (out / "docs" / "scans").mkdir(parents=True)
+    (out / "writes.json").write_text("[]")
+    (out / "scan.json").write_text(json.dumps({"scan": scan, "entries": [], "ctx": {}}))
+    pp.apply(str(out), ["ILMN=clean"], state_dir=str(tmp_path))
+    got = json.loads((out / "scan.json").read_text())["scan"]
+    assert [(x["ticker"], x["verdict"]) for x in got.get("position_news") or []] == [("ILMN", "caution")]
+    assert "from the 6:22 am news check" in got["position_news"][0]["reason"]

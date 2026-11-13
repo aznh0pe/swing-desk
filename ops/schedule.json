@@ -1,7 +1,7 @@
 {
  "about": "Every scheduled task (times are Pacific). Each backup checks that its task really ran and re-runs it in the same session if it failed or never ran. After changing a prompt template, run ops/build_prompts.py and update both the task and its backup (backup prompts embed the task's prompt).",
  "tasks": {
-  "premarket":  {"id": "trig_01BC6UyGsrA3mesQsU6pFbRP", "when": "weekdays 5:50 AM", "prompt": "ops/generated/premarket.md", "notify": "email + push"},
+  "premarket":  {"id": "trig_01BC6UyGsrA3mesQsU6pFbRP", "when": "weekdays 5:17 AM", "prompt": "ops/generated/premarket.md", "notify": "email + push"},
   "preclose":   {"id": "trig_015vu682N2v147NyT2kAdSLJ", "when": "weekdays 12:25 PM", "prompt": "ops/generated/preclose.md", "notify": "email + push"},
   "postclose":  {"id": "trig_01VJiBMjH2dJJnBrAaTr9BcX", "when": "weekdays 2:05 PM", "prompt": "ops/generated/postclose.md", "notify": "email + push"},
   "learning":   {"id": "trig_01V9Hsf7VTMtsod6AoHQnyiP", "when": "weekdays 3:12 PM", "prompt": "ops/generated/learning.md", "notify": "none"},
@@ -12,7 +12,7 @@
   "halfday_2026-12-24": {"id": "trig_01KsB1UAjVRRvPmyWFLo6BgE", "when": "Thu Dec 24 2026 9:20 AM", "prompt": "ops/generated/preclose_halfday.md", "notify": "email + push"}
  },
  "backups": {
-  "premarket":  {"id": "trig_01WA17hiGscrK1sLsnnpwjEW", "when": "weekdays 6:02 AM", "prompt": "ops/generated/backup_premarket.md", "notify": "email + push"},
+  "premarket":  {"id": "trig_01WA17hiGscrK1sLsnnpwjEW", "when": "weekdays 5:47 AM", "prompt": "ops/generated/backup_premarket.md", "notify": "email + push"},
   "preclose":   {"id": "trig_01G67H8Efdaw2V1wPGevQH4X", "when": "weekdays 12:38 PM", "prompt": "ops/generated/backup_preclose.md", "notify": "email + push"},
   "postclose":  {"id": "trig_01PY6eHAikqDnNCUU4QR2q51", "when": "weekdays 2:53 PM", "prompt": "ops/generated/backup_postclose.md", "notify": "email + push"},
   "learning":   {"id": "trig_01GShKJnc3qaLTWHnZzqHg7o", "when": "weekdays 4:23 PM", "prompt": "ops/generated/backup_learning.md", "notify": "none"},
