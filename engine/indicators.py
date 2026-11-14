@@ -54,10 +54,36 @@ def adx(h, l, c, n=14):
     return wilder(dx, n)
 
 
-def compute(w: dict, universe: pd.DataFrame | None = None) -> dict:
-    """Return a dict of indicator frames aligned to w['close']."""
+COMPACT_CELLS = 4_000_000  # dates x tickers above which derived frames are kept in float32 (see compute)
+RAW = ("open", "high", "low", "close", "volume")
+
+
+class _Frames(dict):
+    """The indicator dict. In compact mode every derived float frame is stored as float32 the moment it is made,
+    so a long history of a wide universe (thousands of tickers) fits in memory; prices and volume stay float64.
+    Float32 keeps 7 significant digits, far finer than any rule's threshold."""
+
+    def __init__(self, compact: bool):
+        super().__init__()
+        self.compact = bool(compact)
+
+    def __setitem__(self, k, v):
+        if self.compact and k not in RAW and isinstance(v, pd.DataFrame) and len(v.columns) \
+                and (v.dtypes == np.float64).all():
+            v = v.astype(np.float32)
+        super().__setitem__(k, v)
+
+
+def compute(w: dict, universe: pd.DataFrame | None = None, compact: bool | None = None) -> dict:
+    """Return a dict of indicator frames aligned to w['close'].
+
+    compact: store derived frames in float32 (None = automatically, when the panel is large: a multi-year history
+    of the wide universe; scans on the ~2-year daily file and the core-only history stay in float64)."""
     o, h, l, c, v = (w[k] for k in ["open", "high", "low", "close", "volume"])
-    ind = {"open": o, "high": h, "low": l, "close": c, "volume": v}
+    if compact is None:
+        compact = c.shape[0] * c.shape[1] > COMPACT_CELLS
+    ind = _Frames(compact)
+    ind.update({"open": o, "high": h, "low": l, "close": c, "volume": v})
     for n in (5, 10, 20, 50, 100, 200):
         ind[f"sma{n}"] = c.rolling(n, min_periods=n).mean()
     ind["ema20"] = c.ewm(span=20, adjust=False, min_periods=20).mean()
@@ -105,22 +131,52 @@ def compute(w: dict, universe: pd.DataFrame | None = None) -> dict:
     tickers = list(c.columns)
     types = pd.Series("stock", index=tickers)
     sectors = pd.Series(None, index=tickers, dtype=object)
+    tier = pd.Series("core", index=tickers)
+    twin = pd.Series(False, index=tickers)
     if universe is not None and len(universe):
         u = universe.reindex(tickers)
         types = u["type"].fillna("stock")
         sectors = u["sector"]
+        if "tier" in u:  # wide universe: "core" (the original list) or "ext"; a ticker the list doesn't name is core
+            tier = u["tier"].where(u["tier"].isin(["core", "ext"]), "core")
+        if "twin_of" in u:  # the same index in a second wrapper (SPY/SPYM): only one of the pair sends setups
+            twin = u["twin_of"].apply(lambda x: isinstance(x, str) and x in c.columns)
     ind["types"] = types
     ind["sectors"] = sectors
+    ind["tier"] = tier
+    ind["twin"] = twin
     is_stock = (types == "stock").values
     ind["is_stock"] = pd.DataFrame(np.broadcast_to(is_stock, c.shape), index=c.index, columns=tickers)
     ind["is_etf"] = ~ind["is_stock"]
     is_lev = types.isin(["etf_lev"]).values
     ind["is_lev"] = pd.DataFrame(np.broadcast_to(is_lev, c.shape), index=c.index, columns=tickers)
 
-    # --- cross-sectional relative strength among stocks
+    # --- cross-sectional relative strength among stocks. The yardstick is always the core tier (the original
+    # universe), so a core stock's rank is the same with or without the extension tier loaded, and an extension
+    # stock is placed on that same scale ("stronger than 85% of the core").
     r = 0.6 * ind["ret126"] + 0.4 * ind["ret63"]
-    rs_stock = r.loc[:, is_stock] if is_stock.any() else r
-    ind["rs_pct"] = rs_stock.rank(axis=1, pct=True).reindex(columns=tickers)
+    is_core = (tier == "core").values
+    ref = is_stock & is_core
+    if not ref.any():
+        ref = is_stock if is_stock.any() else np.ones(len(tickers), dtype=bool)
+    rs = pd.DataFrame(np.nan, index=c.index, columns=tickers)
+    rs.loc[:, ref] = r.loc[:, ref].rank(axis=1, pct=True)
+    other = is_stock & ~ref
+    if other.any():
+        rv, oc = r.values, np.nonzero(other)[0]
+        rc = np.nonzero(ref)[0]
+        ext = np.full((len(c), len(oc)), np.nan)
+        for i in range(len(c)):
+            base = rv[i, rc]
+            base = np.sort(base[~np.isnan(base)])
+            if len(base) < 20:
+                continue
+            x = rv[i, oc]
+            pos = np.clip(np.searchsorted(base, x, side="right") / len(base), 1.0 / len(base), 1.0)
+            pos[np.isnan(x)] = np.nan
+            ext[i] = pos
+        rs.iloc[:, oc] = ext
+    ind["rs_pct"] = rs
 
     # --- market regime
     def series(t):
@@ -137,7 +193,7 @@ def compute(w: dict, universe: pd.DataFrame | None = None) -> dict:
     mk["spy_dist200"] = spy / mk["spy_sma200"] - 1
     mk["spy_ret5"] = spy / spy.shift(5) - 1
     mk["spy_rsi2"] = rsi(spy.to_frame(), 2).iloc[:, 0]
-    st = c.loc[:, is_stock] if is_stock.any() else c
+    st = c.loc[:, ref]  # breadth is measured on the core tier, so it means the same with a wider universe
     mk["breadth50"] = (st > ind["sma50"].loc[:, st.columns]).sum(axis=1) / st.notna().sum(axis=1).replace(0, np.nan)
     mk["breadth200"] = (st > ind["sma200"].loc[:, st.columns]).sum(axis=1) / st.notna().sum(axis=1).replace(0, np.nan)
     vix = series("^VIX")

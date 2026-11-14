@@ -898,7 +898,7 @@ function scanSummary(sc) {
     ${kpi("VIX", m.vix != null ? esc(m.vix) : "–", m.vix_vs_20d ? `${esc(m.vix_vs_20d)}× its 20-day average` : "")}
     ${kpi("A+ setups", esc(c.aplus ?? 0), `${esc(c.week_aplus ?? 0)} this week`)}
     ${kpi("Exit alerts", esc(c.exit_alerts ?? 0), `${esc(c.open_positions ?? 0)} positions checked`)}
-  </div><div class="small muted">${pill} Last bar ${esc(d.last_bar || "–")}${d.partial_bar ? " (live intraday prices)" : ""} · ${esc(d.tickers || "–")} tickers scanned${(d.notes || []).length ? " · " + esc(d.notes.join(" ")) : ""}</div></div>`;
+  </div><div class="small muted">${pill} Last bar ${esc(d.last_bar || "–")}${d.partial_bar ? " (live intraday prices)" : ""} · ${esc(Number((d.universe && d.universe.n) || d.tickers || 0).toLocaleString("en-US") || "–")} stocks &amp; ETFs scanned${d.universe && d.universe.ext ? ` (${esc(Number(d.universe.core).toLocaleString("en-US"))} on the original list + ${esc(Number(d.universe.ext).toLocaleString("en-US"))} on the wider list${d.universe.ext_status && d.universe.ext_status !== "on" && d.universe.ext_label ? ", wider list: " + esc(d.universe.ext_label) : ""})` : ""}${(d.notes || []).length ? " · " + esc(d.notes.join(" ")) : ""}</div></div>`;
 }
 
 // ---------------------------------------------------------------- charts
@@ -1060,6 +1060,7 @@ function ticket(a, today) {
     ${a.withdrawn ? `<div class="note-strip" style="background:var(--crit-bg);color:var(--crit)"><b>Withdrawn:</b> ${hiCaution(a.withdrawn_reason || "a later scan dropped this setup.")} ${a.status === "placed" ? "Cancel the order in your brokerage, then press Cancelled." : "Don't place it."}</div>` : ""}
     ${a.topup_note ? `<div class="note-strip">${esc(a.topup_note)}</div>` : ""}
     ${a.condition_note ? `<div class="small muted" style="margin-top:4px">${esc(a.condition_note)}</div>` : ""}
+    ${a.list_note ? `<div class="small muted" style="margin-top:4px">${esc(a.list_note)}</div>` : ""}
     ${a.size_note ? `<div class="note-strip">${esc(a.size_note)}</div>` : ""}
     ${a.capacity_note ? `<div class="note-strip">${esc(a.capacity_note)}</div>` : ""}
     ${a.status === "placed" ? `<div class="note-strip">Order placed ${a.placed_at ? dtShort(a.placed_at) : ""}. It works until the ${dShort(lastValidDay(a))} close; if it hasn't filled by then it expires, and the dashboard records it as Didn't fill on its own.</div>` : ""}

@@ -1174,6 +1174,182 @@ def run_topups(data_dir, state_dir, out_dir, split="2022-01-01", log=print, now=
             "weeks_at_min": res.get("oos_weeks_at_min"), "excluded": list((res.get("topup_excluded") or {}).keys())}
 
 
+# ----------------------------------------------------------------------------- weekly tier check
+# Nov 14, 2026: the desk scanned 605 tickers and went whole calm weeks without one A+ setup. The data feed now
+# screens every US-listed stock and ETF daily and adds the liquid ones as an extension tier ("ext"). Every rule,
+# the model and the bars stay calibrated on the core tier alone, so the extension tier is a clean test: tickers
+# the model never saw. This check replays the live setup on both tiers and lets the extension tier trade only
+# while its A+ setups win as often as the core's and the desk with it is at least as good as without it.
+TIERS = {"min_aplus": 100,        # A+ setups on the extension tier (2022-now) before it can trade at all
+         "slack_aplus": 0.02,     # its A+ win rate may trail the core's by at most this (2022-now and 2024-now)
+         "slack_sent": 0.005,     # the desk with it: win rate of every setup sent may drop at most half a point
+         "slack_topup": 0.01,     # ... and the weekly top-ups' win rate at most one point
+         "slack_growth": 0.005, "slack_dd": 0.02}
+
+
+def _tier_rows(post: pd.DataFrame, G: dict, late=CAL_END) -> dict:
+    sc, pw = float(G["aplus_score"]), float(G["aplus_pwin"])
+    s = _one_per_ticker(post)
+    ap = s[(s["score"] >= sc) & (s["p"] >= pw)]
+    out = {}
+    for tier in ("core", "ext"):
+        g = ap[ap["tier"] == tier]
+        out[tier] = {"aplus": _trade_stats(g), "aplus_late": _trade_stats(g[g["signal_date"] >= pd.Timestamp(late)]),
+                     "signals": _trade_stats(s[s["tier"] == tier]),
+                     "by_year": [{"year": int(y), **_trade_stats(x)} for y, x in g.groupby(g["signal_date"].dt.year)],
+                     "by_strategy": {n: _trade_stats(x) for n, x in g.groupby("strategy")}}
+    return out
+
+
+TIER_MULTS = (1.0, 0.75, 0.6, 0.5)   # position size on the extension tier, largest that passes first
+
+
+def _tier_pool(post: pd.DataFrame, G: dict, status: str, mult: float) -> pd.DataFrame:
+    """The signals the desk would see with the extension tier under `status` (see strategies.ext_rule)."""
+    sc, pw = float(G["aplus_score"]), float(G["aplus_pwin"])
+    core = post["tier"] == "core"
+    if status == "off":
+        keep = core
+    elif status == "on":
+        keep = core | True
+    else:
+        keep = core | ((post["score"] >= sc) & (post["p"] >= pw))   # below the A+ bar its rows are simply not there
+        if status == "aplus_bull":
+            keep &= core | (post["spy_above200"].astype(float) >= 0.5)
+    out = post[keep]
+    return out.assign(size_mult=np.where(out["tier"] == "ext", float(mult), 1.0))
+
+
+def tier_checks(rows: dict, core: dict, new: dict) -> list:
+    """The checks one way of trading the extension tier must pass: its own A+ setups against the core's, then
+    the desk replayed with it against the desk without it (see TIERS)."""
+    q = TIERS
+    ca, ea = rows["core"]["aplus"], rows["ext"]["aplus"]
+    cl, el = rows["core"]["aplus_late"], rows["ext"]["aplus_late"]
+
+    def chk(key, label, base, val, slack):
+        return {"key": key, "label": label, "core": base, "with_ext": val,
+                "ok": bool(val is not None and (base is None or val >= base - slack))}
+
+    def g(d, a, b):
+        return (d.get(a) or {}).get(b)
+    return [
+        chk("aplus_n", "A+ setups on the wider list, 2022-now", q["min_aplus"], ea["trades"], 0),
+        chk("aplus_win", "A+ win rate on the wider list vs the original list, 2022-now", ca["win_rate"], ea["win_rate"], q["slack_aplus"]),
+        chk("aplus_late", "A+ win rate on the wider list vs the original list, 2024-now", cl["win_rate"], el["win_rate"], q["slack_aplus"]),
+        {"key": "aplus_avg", "label": "Average A+ trade on the wider list", "core": ca["avg_ret"], "with_ext": ea["avg_ret"],
+         "ok": bool((ea["avg_ret"] or 0) > 0)},
+        chk("sent_win", "Win rate of every setup sent", g(core, "sent", "win_rate"), g(new, "sent", "win_rate"), q["slack_sent"]),
+        chk("late_win", "Win rate of every setup sent, 2024-now", g(core, "sent_late", "win_rate"), g(new, "sent_late", "win_rate"), q["slack_sent"]),
+        chk("topup_win", "Weekly top-up win rate", g(core, "topups", "win_rate"), g(new, "topups", "win_rate"), q["slack_topup"]),
+        chk("account_win", "Win rate of the trades the account takes", g(core, "account", "win_rate"), g(new, "account", "win_rate"), q["slack_sent"]),
+        chk("growth", "Simulated account growth a year", g(core, "account", "cagr"), g(new, "account", "cagr"), q["slack_growth"]),
+        chk("drawdown", "Worst drawdown", g(core, "account", "max_dd"), g(new, "account", "max_dd"), q["slack_dd"]),
+    ]
+
+
+def run_tiers(data_dir, state_dir, out_dir, split="2022-01-01", log=print, now=None, params_path=None) -> dict:
+    """Weekly tier check. Replays the live setup (or the just-recalibrated one in params_path, a doc_params.json)
+    on every ticker in the feed and decides how the extension tier trades: the most permissive of "on",
+    "aplus_only", "aplus_bull" (each at the largest position size that passes) whose checks all pass, else "off"
+    (see TIERS). Writes tiers_report.json and tiers.json (the block for params["tiers"]); with params_path, also
+    adds the block and a changelog line to that file, so the weekly recalibration saves them together."""
+    from .scan import load_params
+    now = now or cal.now_pt()
+    out = pathlib.Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    state = load_state(state_dir)
+    pdoc = None
+    if params_path and pathlib.Path(params_path).exists():
+        pdoc = json.loads(pathlib.Path(params_path).read_text())
+        P = S.params_with_defaults(pdoc.get("params") or pdoc)
+    else:
+        P = load_params(state, None)
+    pm = (P.get("models") or {}).get("_pooled")
+    info = D.universe_info(data_dir)
+    uni = {k: info.get(k) for k in ("n", "core", "ext", "ext_stocks", "built", "source")}
+    stamp = now.isoformat(timespec="seconds")
+    if not info.get("ext"):
+        block = {"ext": {"status": "off", "size_mult": 1.0, "checked": stamp, "by": "weekly tier check",
+                         "reason": "The data feed has no wider list right now, so only the original list trades.", "universe": uni}}
+    elif not (pm and pm.get("kind") == "pooled") or not (P.get("grading") or {}).get("aplus_score"):
+        raise SystemExit("live params have no pooled model or A+ bar: run the weekly recalibration first")
+    else:
+        w = D.load_history(data_dir, tier=None)
+        ind = I.compute(w, D.load_universe(data_dir))
+        log(f"history: {w['close'].shape[0]} days x {w['close'].shape[1]} tickers (both tiers)")
+        P_all = copy.deepcopy(P)
+        P_all["tiers"] = {"ext": {"status": "on"}}   # the replay needs the tier's signals whatever its status
+        P_all["tiers_live"] = {}
+        plans = S.all_plans(ind, P_all)
+        trs = [B.simulate(plans[n], ind, P_all, include_unfilled=True) for n, sp in P_all["strategies"].items()
+               if sp.get("enabled", True) and n in plans]
+        t = mark_entry(_score_live(pd.concat([x for x in trs if not x.empty], ignore_index=True), pm, P_all), P_all)
+        t["tier"] = t["ticker"].map(ind["tier"]).fillna("core").values
+        del ind, plans, trs, w
+        post = t[t["signal_date"] >= pd.Timestamp(split)]
+        G = P["grading"]
+        st_ = state.get("settings") or {}
+        desk_min = int(st_.get("min_setups_week", 5))
+        acct = {"max_open": int(st_.get("max_open_positions") or P["risk"]["max_open"]),
+                "risk_pct": float(st_.get("risk_pct") or P["risk"]["risk_pct"]),
+                "max_position_pct": float(st_.get("max_position_pct") or P["risk"]["max_position_pct"])}
+        rows = _tier_rows(post, G)
+        slim = lambda d: {k: d.get(k) for k in ("aplus", "topups", "sent", "sent_late", "weeks_at_min", "setups_per_week", "account")}
+        core = desk_replay(_tier_pool(post, G, "off", 1.0), G, desk_min, acct)
+        tried, pick = [], None
+        for status in ("on", "aplus_only", "aplus_bull"):
+            for mult in TIER_MULTS:
+                d = desk_replay(_tier_pool(post, G, status, mult), G, desk_min, acct)
+                checks = tier_checks(rows, core, d)
+                ok = all(c["ok"] for c in checks)
+                tried.append({"status": status, "size_mult": mult, "ok": ok, "missed": [c["label"] for c in checks if not c["ok"]],
+                              "desk": slim(d)})
+                log(f"  {status} x{mult}: {'passes' if ok else 'misses ' + '; '.join(tried[-1]['missed'])}")
+                if ok:
+                    pick = (status, mult, checks, d)
+                    break
+                if any(c["key"].startswith("aplus_") and not c["ok"] for c in checks):
+                    break   # its own A+ setups fail: no size fixes that
+            if pick or any(c["key"].startswith("aplus_") and not c["ok"] for c in checks):
+                break
+        ea, ca = rows["ext"]["aplus"], rows["core"]["aplus"]
+        own = (f"its A+ setups won {100 * (ea['win_rate'] or 0):.1f}% of {ea['trades']} on tickers the model was never tuned on "
+               f"(original list: {100 * (ca['win_rate'] or 0):.1f}% of {ca['trades']})")
+        if pick:
+            status, mult, checks, d = pick
+            how = {"on": "trades like the original list", "aplus_only": "sends A+ setups only (no weekly top-ups)",
+                   "aplus_bull": "sends A+ setups only, and only while SPY is above its 200-day average"}[status]
+            size = "" if mult >= 1 else f", at {round(100 * mult)}% of the usual position size"
+            less = [x for x in tried if not x["ok"]]
+            why = (" Looser ways were replayed first and missed: " + "; ".join(
+                f"{S.TIER_LABEL[x['status']]}{'' if x['size_mult'] >= 1 else ' at ' + str(round(100 * x['size_mult'])) + '% size'} "
+                f"({', '.join(x['missed'])})" for x in less[:4]) + ".") if less else ""
+            reason = (f"The wider list {how}{size}: {own}, and the desk replayed with it kept its win rates, growth and drawdown "
+                      f"(account growth {100 * (d['account'].get('cagr') or 0):.1f}% a year vs {100 * (core['account'].get('cagr') or 0):.1f}%, "
+                      f"worst drawdown {100 * (d['account'].get('max_dd') or 0):.1f}% vs {100 * (core['account'].get('max_dd') or 0):.1f}%).{why}")
+        else:
+            status, mult, d = "off", 1.0, None
+            checks = tier_checks(rows, core, tried[-1]["desk"]) if tried else []
+            reason = (f"The wider list stays paused: {own}, but no way of trading it kept the desk's results "
+                      f"(last tried: {tried[-1]['status']} missed {', '.join(tried[-1]['missed'])})." if tried else
+                      "The wider list stays paused: nothing could be replayed.")
+        block = {"ext": {"status": status, "size_mult": mult, "checked": stamp, "by": "weekly tier check", "reason": reason,
+                         "checks": checks, "tiers": rows, "tried": [{k: v for k, v in x.items() if k != "desk"} for x in tried],
+                         "desk": {"core": slim(core), "with_ext": slim(d) if d else None}, "universe": uni}}
+        log(f"extension tier: {status} x{mult}. {reason}")
+    line = "Wider list (weekly tier check): " + block["ext"]["reason"]
+    (out / "tiers.json").write_text(json.dumps(block, default=str))
+    (out / "tiers_report.json").write_text(json.dumps({"tiers": block, "changelog": line}, indent=1, default=str))
+    if pdoc is not None:
+        tgt = pdoc.get("params") if isinstance(pdoc.get("params"), dict) else pdoc
+        tgt["tiers"] = block
+        if isinstance(pdoc.get("changelog_entry"), list):
+            pdoc["changelog_entry"].append(line)
+        pathlib.Path(params_path).write_text(json.dumps(pdoc, default=str))
+    return {"status": block["ext"]["status"], "size_mult": block["ext"].get("size_mult"), "reason": block["ext"]["reason"], "changelog": line}
+
+
 # ----------------------------------------------------------------------------- daily promotion check
 # Nov 12, 2026: research found candidates every day but they waited for Saturday, so a strong idea found on a
 # Monday sat out the whole week. The daily promotion check puts a candidate live the next trading day when
@@ -1669,7 +1845,8 @@ def run_learning(data_dir, state_dir, out_dir, now=None) -> dict:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["backtest", "learn", "topups", "promote"])
+    ap.add_argument("cmd", choices=["backtest", "learn", "topups", "promote", "tiers"])
+    ap.add_argument("--params", default=None, help="tiers: a doc_params.json to check and add the result to (default: the live params in --state)")
     ap.add_argument("--ids", default=None, help="promote: comma list of research ideas to check (default: every candidate)")
     ap.add_argument("--data", required=True)
     ap.add_argument("--state", default=None)
@@ -1685,6 +1862,8 @@ def main():
         print(json.dumps({k: v for k, v in rep.items() if k != "strategies"}, indent=1, default=str))
     elif a.cmd == "topups":
         print(json.dumps(run_topups(a.data, a.state, a.out, a.split), indent=1, default=str))
+    elif a.cmd == "tiers":
+        print(json.dumps(run_tiers(a.data, a.state, a.out, a.split, params_path=a.params), indent=1, default=str))
     elif a.cmd == "promote":
         rep = run_promote(a.data, a.state, a.out, a.split, ids=a.ids.split(",") if a.ids else None)
         print(json.dumps({k: rep.get(k) for k in ("note", "promoted")}, indent=1, default=str))

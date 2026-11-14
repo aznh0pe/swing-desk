@@ -101,7 +101,39 @@ def load_universe(d) -> pd.DataFrame:
     for c in ["name", "type", "sector", "sector_etf"]:
         if c not in u:
             u[c] = None
+    # the wide universe: "core" (the list every rule and bar is calibrated on) or "ext" (the daily-screened
+    # extension tier, see pipeline/universe.py). A list without tiers is all core.
+    if "tier" not in u:
+        u["tier"] = "core"
+    u["tier"] = u["tier"].where(u["tier"].isin(["core", "ext"]), "core")
     return u.set_index("ticker", drop=False)
+
+
+def tier_tickers(d, tier: str = "core") -> list[str] | None:
+    """Tickers of one tier, or None when the universe file has no tiers (then every ticker is core)."""
+    js = _read_json(pathlib.Path(d) / "universe.json", None) or {}
+    items = js.get("items") or []
+    if not any((i or {}).get("tier") == "ext" for i in items):
+        return None
+    return [i["ticker"] for i in items if (i.get("tier") or "core") == tier]
+
+
+def universe_info(d) -> dict:
+    """What the scan covered, for the scan record and the dashboard: sizes by tier and today's list changes."""
+    js = _read_json(pathlib.Path(d) / "universe.json", None) or {}
+    items = js.get("items") or []
+    meta = load_meta(d)
+    stats = js.get("stats") or meta.get("universe_stats") or {}
+    ext = [i for i in items if (i or {}).get("tier") == "ext"]
+    live = [i for i in items if (i or {}).get("type") != "index" and not (i or {}).get("twin_of")]
+    out = {"n": len(live), "core": len([i for i in live if i.get("tier") != "ext"]),
+           "ext": len([i for i in live if i.get("tier") == "ext"]),
+           "ext_stocks": len([i for i in ext if i.get("type") == "stock"]),
+           "mode": js.get("mode") or ("wide" if ext else "core"), "built": js.get("built"),
+           "source": stats.get("source"), "added": int(stats.get("added") or 0), "dropped": int(stats.get("dropped") or 0),
+           "added_tickers": list(stats.get("added_tickers") or [])[:40],
+           "dropped_tickers": list(stats.get("dropped_tickers") or [])[:40]}
+    return out
 
 
 def load_earnings(d) -> dict:
@@ -164,12 +196,29 @@ def load_daily(d) -> dict[str, pd.DataFrame]:
     return to_wide(read_prices(pathlib.Path(d) / "daily.csv.gz"))
 
 
-def load_history(d) -> dict[str, pd.DataFrame]:
+def load_history(d, tier: str | None = "core") -> dict[str, pd.DataFrame]:
+    """The long history (2008-now). tier="core" (the default) loads the tier every rule, model and bar is
+    calibrated on; tier=None loads every ticker (the weekly tier check replays the live setup on all of them)."""
     p = pathlib.Path(d)
     parts = sorted(p.glob("history*.parquet")) or sorted(p.glob("history*.csv.gz"))
     if not parts:
         raise FileNotFoundError("no history file in " + str(p))
-    frames = [pd.read_parquet(f) if f.suffix == ".parquet" else pd.read_csv(f) for f in parts]
+    keep = tier_tickers(d, tier) if tier else None
+    frames = []
+    for f in parts:
+        if f.suffix == ".parquet":
+            df = None
+            if keep is not None:
+                try:
+                    df = pd.read_parquet(f, filters=[("ticker", "in", keep)])
+                except Exception:
+                    df = None
+            df = pd.read_parquet(f) if df is None else df
+        else:
+            df = pd.read_csv(f)
+        if keep is not None:
+            df = df[df["ticker"].isin(set(keep))]
+        frames.append(df)
     return to_wide(_clean_long(pd.concat(frames, ignore_index=True)))
 
 

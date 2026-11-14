@@ -163,6 +163,7 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
     settings = {**state["settings"], "risk_pct": gov["risk_pct"]}
     open_tickers = {v["doc"].get("ticker") for v in state["trades"].values()
                     if v["doc"].get("status") == "open"}
+    tiers = ind["tier"].to_dict() if ind.get("tier") is not None else {}
     cands = []
     for name, plan in plans.items():
         try:
@@ -204,7 +205,7 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
                     else:
                         target = entry + tg["mult"] * atr
                     rr = (target - entry) / max(entry - stop, 1e-6)
-                    cands.append({"name": name, "j": int(j), "ticker": tk, "entry": entry,
+                    cands.append({"name": name, "j": int(j), "ticker": tk, "tier": str(tiers.get(tk, "core")), "entry": entry,
                                   "stop": stop, "target": target, "rr": rr, "p": float(p[k]), "live_p": float(p_full[k]),
                                   "atr": atr, "close": close, "feats": feats.iloc[k].to_dict(),
                                   "model": mdl, "sp": sp, "plan": plan})
@@ -287,10 +288,13 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
     no_topup = set((G.get("topup_excluded") or {}).keys()) | set((G.get("topup_excluded_live") or {}).keys())
     off = tmode == "off" or bool(G.get("topups_off")) or G.get("topup_ok") is False
 
+    ext = S.ext_rule(P)
+    ext_aplus_only = ext["status"] != "on"  # the extension tier tops a week up only once its top-ups are proven
+
     def topup_ok(cd) -> bool:
         mp = cd.get("model_p", cd["p"])  # the model's own win estimate, as in the backtest replay
         return (not off and cd["grade"] != "A+" and cd["score"] >= floor and mp >= top_p and cd["name"] not in no_topup
-                and sendable(cd))
+                and not (ext_aplus_only and cd.get("tier") == "ext") and sendable(cd))
     # The week so far counts setups that are still live: never one a later scan withdrew. Setups an earlier run of
     # this same scan sent for today's signals (a Scan now after the post-close scan) count once, and only while
     # they still qualify; this run withdraws the ones that no longer do (Nov 12).
@@ -370,7 +374,10 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
             continue  # too lopsided: one stop-out erases five targets
         u = universe.loc[cd["ticker"]] if cd["ticker"] in universe.index else None
         meta = S.meta(cd["name"], P)
-        size = size_position(cd["entry"], cd["stop"], f["capital"], cash_left, P, cd["score"], settings)
+        is_ext = cd.get("tier") == "ext"
+        sset = settings if not (is_ext and ext["size_mult"] < 1) else {**settings, "risk_pct": float(settings.get("risk_pct", P["risk"]["risk_pct"])) * ext["size_mult"]}
+        size = size_position(cd["entry"], cd["stop"], f["capital"], cash_left, P,
+                             min(cd["score"], 89.9) if sset is not settings else cd["score"], sset)  # part size stays part size
         e_win = cd["p"]
         mdl = cd["model"] or {}
         aw, al = mdl.get("avg_win", 0.025), mdl.get("avg_loss", -0.035)
@@ -407,6 +414,21 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
             "partial_bar": bool(partial_bar),
         }
         doc["grade_kind"] = "topup" if cd.get("topup") else ("aplus" if cd["grade"] == "A+" else "watch")
+        if cd.get("tier") == "ext":  # from the wider list: say so, with what makes it tradable
+            doc["tier"] = "ext"
+            cap, dvm = (u.get("cap_b") if u is not None else None), (u.get("dv_m") if u is not None else None)
+            bits = []
+            try:
+                if cap is not None and math.isfinite(float(cap)):
+                    bits.append(f"${float(cap):,.1f}B company")
+                if dvm is not None and math.isfinite(float(dvm)):
+                    bits.append(f"trades about ${float(dvm):,.0f}M a day")
+            except Exception:
+                bits = []
+            doc["list_note"] = ("From the wider list (stocks and ETFs beyond the S&P 500, screened every day for size and "
+                                "trading volume)" + (": " + ", ".join(bits) if bits else "") + ". Same rules and the same A+ bar"
+                                + (f"; sized at {round(100 * ext['size_mult'])}% of the usual risk because mid-caps move more."
+                                   if ext["size_mult"] < 1 else "."))
         if cond_today:
             doc["market_condition"] = cond_today
             tb = (((PC.get("table") or {}).get(cd["name"]) or {}).get(cond_today) or {}).get("oos") or {}
@@ -845,7 +867,9 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
         "id": scan_id, "mode": mode, "started_at": ts, "status": "ok" if not errors else "ok_with_warnings",
         "data": {**health, "feed_generated_utc": meta.get("generated_utc"),
                  "intraday_asof": meta.get("intraday_asof"), "partial_bar": partial,
-                 "tickers": int(ind["close"].shape[1])},
+                 "tickers": int(ind["close"].shape[1]),
+                 "universe": {**D.universe_info(data_dir), "ext_status": S.ext_status(P),
+                              "ext_label": S.TIER_LABEL.get(S.ext_status(P)), "ext_size_mult": S.ext_rule(P)["size_mult"]}},
         "market": regime_summary(ind), "funds": f,
         "counts": {"aplus": sum(1 for e in entries if not e.get("sent_earlier")),
                    "topups": sum(1 for e in entries if e.get("topup_note") and not e.get("sent_earlier")),
@@ -1317,6 +1341,8 @@ def setup_block(e: dict, rank) -> list[str]:
         out.append(f"   TOP-UP   {e['topup_note']}")
     if e.get("condition_note"):
         out.append(f"   MARKET   {e['condition_note']}")
+    if e.get("list_note"):
+        out.append(f"   LIST     {e['list_note']}")
     if e.get("capacity_note"):
         out.append(f"   NOTE     {e['capacity_note']}")
     if e.get("size_note"):

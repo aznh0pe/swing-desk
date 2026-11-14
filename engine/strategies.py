@@ -121,6 +121,36 @@ def params_with_defaults(p: dict | None) -> dict:
     return out
 
 
+TIER_STATUSES = ("on", "aplus_only", "aplus_bull", "off")   # most to least permissive
+TIER_LABEL = {"on": "trading like the original list", "aplus_only": "A+ setups only",
+              "aplus_bull": "A+ setups only, in bull markets only", "off": "paused"}
+
+
+def ext_rule(P: dict) -> dict:
+    """How the extension tier (the daily-screened stocks and ETFs beyond the original list) trades:
+    {"status", "size_mult"}. status: "on"; "aplus_only" (its setups are sent only at the A+ bar, never as weekly
+    top-ups); "aplus_bull" (A+ only, and only while SPY is above its 200-day average); or "off". size_mult scales
+    its position size (mid-caps move more).
+    Two records decide and the stricter wins: P["tiers"]["ext"] from the weekly tier check (the live model and
+    bars replayed on tickers they were never tuned on) and P["tiers_live"]["ext"] from the tier's own live record
+    (daily review). With no check on record the tier is off: nothing trades untested."""
+    order = {k: i for i, k in enumerate(TIER_STATUSES)}
+    t = (P.get("tiers") or {}).get("ext") or {}
+    lv = (P.get("tiers_live") or {}).get("ext") or {}
+    tested, live = str(t.get("status") or "off"), str(lv.get("status") or "on")
+    tested, live = (tested if tested in order else "off"), (live if live in order else "on")
+    status = tested if order[tested] >= order[live] else live
+    try:
+        mult = min(1.0, max(0.25, float(t.get("size_mult", 1.0)))) * min(1.0, max(0.25, float(lv.get("size_mult", 1.0))))
+    except Exception:
+        mult = 1.0
+    return {"status": status, "size_mult": round(mult, 3)}
+
+
+def ext_status(P: dict) -> str:
+    return ext_rule(P)["status"]
+
+
 def base_masks(ind: dict, P: dict) -> dict:
     f = P["filters"]
     c = ind["close"]
@@ -133,6 +163,18 @@ def base_masks(ind: dict, P: dict) -> dict:
         & ind["atr10"].notna() & tradable
     if not f.get("allow_leveraged", True):
         liquid &= ~is_lev
+    twin = ind.get("twin")
+    if twin is not None and bool(twin.any()):  # the same index in a second wrapper never sends a second setup
+        liquid &= ~pd.DataFrame(np.broadcast_to(twin.values.astype(bool), c.shape), index=c.index, columns=c.columns)
+    tier = ind.get("tier")
+    if tier is not None and bool((tier == "ext").any()):
+        st_ = ext_status(P)
+        is_ext = pd.DataFrame(np.broadcast_to((tier == "ext").values, c.shape), index=c.index, columns=c.columns)
+        if st_ == "off":
+            liquid &= ~is_ext
+        elif st_ == "aplus_bull":  # no extension-tier setups on days SPY closed under its 200-day average
+            bear = ~(ind["market"]["spy_above200"].reindex(c.index) >= 0.5)
+            liquid &= ~is_ext.where(bear.values[:, None], False)
     return {"liquid": liquid, "is_stock": is_stock, "is_etf": is_etf & tradable,
             "is_lev": is_lev}
 

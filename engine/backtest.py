@@ -236,6 +236,7 @@ def portfolio(trades: pd.DataFrame, start_capital=5000.0, max_open=5, risk_pct=1
     if score_col not in tr:
         tr[score_col] = -tr["rsi2"]
     tr = tr.sort_values(["signal_date", score_col], ascending=[True, False])
+    has_mult = "size_mult" in tr.columns
     capital = start_capital
     open_pos = []  # (exit_date, pnl)
     taken = []
@@ -262,7 +263,8 @@ def portfolio(trades: pd.DataFrame, start_capital=5000.0, max_open=5, risk_pct=1
             risk_ps = r["fill"] - r["stop"]
             if risk_ps <= 0:
                 continue
-            dollars = min(capital * risk_pct / 100 / risk_ps * r["fill"], capital * max_pos_pct / 100)
+            mult = float(r["size_mult"]) if has_mult and r["size_mult"] == r["size_mult"] else 1.0  # e.g. the wider list at part size
+            dollars = min(capital * mult * risk_pct / 100 / risk_ps * r["fill"], capital * max_pos_pct / 100)
             pnl = dollars * r["ret"]
             open_pos.append((r["exit_date"], pnl))
             taken.append({"date": day, "ticker": r["ticker"], "strategy": r["strategy"],
