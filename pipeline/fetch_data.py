@@ -2,7 +2,7 @@
 
     python pipeline/fetch_data.py --mode auto --out out
 
-Modes: auto | daily | intraday | premarket | earnings | history | all
+Modes: auto | daily | intraday | premarket | earnings | history | universe | all
 `out/` holds the current contents of the `data` branch; this script updates it in place.
 Design rules: never overwrite good data with worse data, retry everything, record what
 failed in meta.json so the scanner can see data health.
@@ -14,6 +14,7 @@ import concurrent.futures as cf
 import datetime as dt
 import io
 import json
+import os
 import pathlib
 import sys
 import time
@@ -151,9 +152,13 @@ def _clean(df: pd.DataFrame) -> pd.DataFrame:
 
 # ----------------------------------------------------------------------------- modes
 
-def mode_daily(out: pathlib.Path, tickers: list[str], meta: dict, now_et: dt.datetime):
+def mode_daily(out: pathlib.Path, tickers: list[str], meta: dict, now_et: dt.datetime,
+               all_tickers: list[str] | None = None):
+    """Daily bars for `tickers`. With all_tickers, `tickers` is a subset being added (new universe members):
+    everyone else's rows are kept and the day's status flags are left alone."""
+    partial = all_tickers is not None
     start = (now_et.date() - dt.timedelta(days=1150)).isoformat()
-    log(f"daily: {len(tickers)} tickers from {start}")
+    log(f"daily{' (new members)' if partial else ''}: {len(tickers)} tickers from {start}")
     new, failed = yf_download(tickers, start=start, interval="1d")
     if failed:
         log(f"daily: {len(failed)} failed on Yahoo, trying Stooq")
@@ -174,6 +179,17 @@ def mode_daily(out: pathlib.Path, tickers: list[str], meta: dict, now_et: dt.dat
     old = pd.read_csv(old_p) if old_p.exists() else pd.DataFrame()
     have = set(new["ticker"]) if not new.empty else set()
     coverage = len(have) / max(1, len(tickers))
+    if partial:
+        if new.empty:
+            errors.append(f"daily (new members): none of {len(tickers)} fetched")
+            return
+        keep = old[old["ticker"].isin(set(all_tickers) - have)] if not old.empty else old
+        new = pd.concat([new, _clean(keep)], ignore_index=True) if len(keep) else new
+        new.to_csv(old_p, index=False, compression="gzip")
+        meta.update({"daily_tickers": int(new["ticker"].nunique()), "daily_added": sorted(have)[:60],
+                     "daily_added_n": len(have)})
+        log(f"daily (new members): added {len(have)} of {len(tickers)}")
+        return
     if coverage < 0.6 and not old.empty:
         errors.append(f"daily coverage {coverage:.0%}: kept previous file")
         meta["daily_status"] = "kept_previous"
@@ -327,9 +343,9 @@ def mode_history(out: pathlib.Path, tickers: list[str], meta: dict, now_et: dt.d
     for old_f in out.glob("history*.parquet"):
         old_f.unlink()
     yr = df["date"].dt.year
-    for name, m in (("history_2008_2014.parquet", yr <= 2014), ("history_2015_2020.parquet", (yr >= 2015) & (yr <= 2020)),
-                    ("history_2021_now.parquet", yr >= 2021)):
-        df[m].to_parquet(out / name, index=False, compression="zstd")
+    for a, b in ((2008, 2010), (2011, 2013), (2014, 2016), (2017, 2019), (2020, 2022), (2023, 2100)):
+        name = f"history_{a}_{'now' if b == 2100 else b}.parquet"
+        df[(yr >= a) & (yr <= b)].to_parquet(out / name, index=False, compression="zstd")
     meta.update({"history_asof": now_et.isoformat(timespec="minutes"), "history_tickers": int(df["ticker"].nunique()),
                  "history_failed": failed[:50]})
     log(f"history: {len(df)} rows, {df['ticker'].nunique()} tickers")
@@ -372,14 +388,34 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", default="auto")
     ap.add_argument("--out", default="out")
+    ap.add_argument("--universe", default=os.environ.get("UNIVERSE") or "", help="core | wide (default: universe.DEFAULT_MODE)")
     a = ap.parse_args()
     out = pathlib.Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     now_et = dt.datetime.now(ET)
     meta_p = out / "meta.json"
     meta = json.loads(meta_p.read_text()) if meta_p.exists() else {}
-    items = U.build(out / "universe.json")
-    (out / "universe.json").write_text(json.dumps({"asof": now_et.isoformat(timespec="minutes"), "items": items}))
+    umode = (a.universe or "").strip().lower()
+    umode = umode if umode in ("core", "wide") else U.DEFAULT_MODE
+    uni_p = out / "universe.json"
+    try:
+        prev_u = json.loads(uni_p.read_text()) if uni_p.exists() else {}
+    except Exception:
+        prev_u = {}
+    today = str(now_et.date())
+    if prev_u.get("items") and prev_u.get("built") == today and prev_u.get("mode") == umode and a.mode not in ("all", "universe"):
+        items = prev_u["items"]  # the list is screened once a day, on the day's first pass
+    else:
+        items = U.build(uni_p, mode=umode, today=today, daily_path=out / "daily.csv.gz")
+        st = dict(U.build.last_stats)
+        uni_p.write_text(json.dumps({"asof": now_et.isoformat(timespec="minutes"), "built": today, "mode": umode,
+                                     "stats": st, "items": items}))
+        meta["universe_built"] = today
+        meta["universe_mode"] = umode
+        meta["universe_stats"] = {k: v for k, v in st.items() if k not in ("added_tickers", "dropped_tickers")}
+        meta["universe_added"] = st.get("added_tickers", [])
+        meta["universe_dropped"] = st.get("dropped_tickers", [])
+        log(f"universe ({umode}): {len(items)} tickers, {json.dumps(meta['universe_stats'])}")
     tickers = [i["ticker"] for i in items]
     stocks = [i["ticker"] for i in items if i["type"] == "stock"]
     if a.mode == "auto":
@@ -388,7 +424,17 @@ def main():
         modes = ["history", "daily", "earnings"] + (["intraday"] if cal and cal.market_phase() == "open" else [])
     else:
         modes = [m.strip() for m in a.mode.split(",")]
-    log(f"now {now_et:%Y-%m-%d %H:%M} ET, modes {modes}, universe {len(tickers)}")
+    modes = [m for m in modes if m != "universe"]
+    # new universe members have no bars yet: fetch theirs now, so they can be scanned today
+    if (out / "daily.csv.gz").exists() and "daily" not in modes and "history" not in modes:
+        try:
+            have = set(pd.read_csv(out / "daily.csv.gz", usecols=["ticker"])["ticker"].unique())
+            new_members = [t for t in tickers if t not in have]
+            if new_members:
+                mode_daily(out, new_members, meta, now_et, all_tickers=tickers)
+        except Exception as e:
+            errors.append(f"new-member bars: {e!r}"[:200])
+    log(f"now {now_et:%Y-%m-%d %H:%M} ET, modes {modes}, universe {len(tickers)} ({umode})")
     for m in modes:
         try:
             {"daily": lambda: mode_daily(out, tickers, meta, now_et),

@@ -15,8 +15,14 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "auto | daily | intraday | premarket | earnings | history | all"
+        description: "auto | daily | intraday | premarket | earnings | history | universe | all"
         default: "auto"
+      branch:
+        description: "data branch to build (default: data, the live feed)"
+        default: "data"
+      universe:
+        description: "core | wide (blank: the default in pipeline/universe.py)"
+        default: ""
   push:
     branches: [main]
     paths: ["pipeline/**", ".github/workflows/market-data.yml"]
@@ -48,8 +54,9 @@ jobs:
       - name: Restore current data branch
         run: |
           mkdir -p out
-          if git fetch --depth 1 origin data:refs/remotes/origin/data 2>/dev/null; then
-            git archive refs/remotes/origin/data | tar -x -C out
+          B="${{ github.event.inputs.branch || 'data' }}"
+          if git fetch --depth 1 origin "$B:refs/remotes/origin/$B" 2>/dev/null; then
+            git archive "refs/remotes/origin/$B" | tar -x -C out
           fi
           ls -la out
 
@@ -72,4 +79,6 @@ jobs:
           PUSH_URL: https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          DATA_BRANCH: ${{ github.event.inputs.branch || 'data' }}
+          UNIVERSE: ${{ github.event.inputs.universe || '' }}
         run: bash pipeline/refresh_loop.sh
