@@ -15,7 +15,7 @@ import pathlib
 HERE = pathlib.Path(__file__).resolve().parent
 
 SETUP = (
-    "0. Tools first: this task works through the Artifact and ArtifactData tools (load them with ToolSearch, query "
+    "Tools first (before any numbered step): this task works through the Artifact and ArtifactData tools (load them with ToolSearch, query "
     "\"select:Artifact,ArtifactData\"). If ToolSearch finds neither of them, don't improvise with other tools: load "
     "PushNotification with ToolSearch (\"select:PushNotification\"), send \"Swing Desk: this run has no dashboard tools "
     "(Artifact / ArtifactData), so it could not run; open the Swing Desk chat\", make that sentence your final message, and stop.\n"
