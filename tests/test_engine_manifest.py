@@ -11,6 +11,8 @@ def test_published_engine_copy_matches_the_code():
     hint = "engine changed: run python3 ops/publish_engine.py, then republish the dashboard with those files"
     assert m["files"] == V.files(ROOT), hint
     assert m["fingerprint"] == V.fingerprint(ROOT), hint
+    # Python files are served as <name>.py.txt (the publisher cannot serve .py); the runs drop the .txt
+    assert m["published"] == [f + ".txt" if f.endswith(".py") else f for f in m["files"]], hint
 
 
 def test_engine_installs_missing_packages_itself_once(monkeypatch, tmp_path):
