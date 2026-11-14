@@ -242,3 +242,41 @@ def predict_pooled(m: dict, feats: pd.DataFrame, strategies, offsets: dict | Non
 def score_pooled(p, e_pct) -> np.ndarray:
     s_p = np.clip((np.asarray(p) - 0.62) / (0.78 - 0.62), 0, 1)
     return np.round(100 * (0.55 * np.asarray(e_pct) + 0.45 * s_p), 1)
+
+
+# ----------------------------------------------------------------------------- own-record ("standalone") grading
+# Nov 14, 2026: the pooled model grades on market stress, so in calm bull markets (61% of days) it found almost no
+# A+ setups, and a new strategy that wins 80%+ in calm markets could never show "its own setups" in a replay. A
+# strategy that clears calibrate.STANDALONE on its own tested record (2008-2021 and unseen 2022-now, by signal
+# day, in named market conditions) is graded on that record instead: its setups there are A+.
+STANDALONE_BONUS = 4.0   # score points above the A+ bar at most, so pooled A+ setups with high scores still rank first
+
+
+def standalone_of(P: dict, name: str):
+    sa = ((P.get("strategies") or {}).get(name) or {}).get("standalone")
+    return sa if isinstance(sa, dict) and sa.get("p") else None
+
+
+def apply_standalone(P: dict, names, p, score, offsets: dict | None = None):
+    """Replace win odds and score for strategies graded on their own record. Returns (p, score, mask).
+    p = the strategy's tested win rate (already haircut), moved by its live adjustment in `offsets`;
+    score = the A+ bar plus up to STANDALONE_BONUS points, so the setup is A+ exactly while p clears the A+ win bar."""
+    p = np.array(p, dtype=float, copy=True)
+    score = np.array(score, dtype=float, copy=True)
+    mask = np.zeros(len(p), dtype=bool)
+    bar = float((P.get("grading") or {}).get("aplus_score", 80))
+    cache = {}
+    for i, n in enumerate(names):
+        if n not in cache:
+            sa = standalone_of(P, n)
+            if sa is None:
+                cache[n] = None
+            else:
+                off = float(((offsets or {}).get(n) or {}).get("offset", 0.0))
+                base = min(0.99, max(0.01, float(sa["p"])))
+                pv = float(1.0 / (1.0 + np.exp(-(np.log(base / (1.0 - base)) + off))))
+                cache[n] = (pv, round(bar + min(STANDALONE_BONUS, max(0.0, (pv - 0.75) * 40.0)), 1))
+        if cache[n] is not None:
+            p[i], score[i] = cache[n]
+            mask[i] = True
+    return p, score, mask

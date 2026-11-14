@@ -388,9 +388,14 @@ def test_weekly_minimum_is_five_and_quiet_scans_still_report():
     assert busy.startswith("1 exit alert") and "done:" not in busy
 
 
-def test_grades_are_recorded_apart_per_strategy_and_their_records_set_the_rules():
+def test_grades_are_recorded_apart_per_strategy_and_their_records_set_the_rules(monkeypatch):
     import datetime as dt
     from engine import learnlog as LL
+    # this test is about the bookkeeping and the rules' thresholds as written for independent results; results
+    # bunched in one week have their own test (test_results_bunched_in_one_week_count_as_the_evidence_they_are)
+    for k_, v_ in (("CLUSTER_RHO", 0.0), ("TOPUP_MIN_N", 12), ("STRAT_TOPUP_MIN_N", 8), ("APLUS_MIN_N", 25),
+                   ("COND_MIN_N", 12), ("COND_MIN_N_AW", 20)):
+        monkeypatch.setattr(LL, k_, v_)
     now = dt.datetime(2026, 11, 20, 15, 0)
     alerts, shadow = [], []
     for i in range(20):
@@ -485,7 +490,16 @@ def test_topup_replay_follows_the_weekly_pace_and_is_tuned_on_its_own():
     pk3, _ = CB.simulate_topups(s, 999, 9, 0, 0, 5, excluded=["BAD"])
     assert not (pk3["strategy"] == "BAD").any()
     res = CB.calibrate_topups(sig[sig["signal_date"] >= "2022-01-01"], 95, 0.78, 5)
-    assert res["topup_ok"] and res["topup_floor"] < 95 and "BAD" in res["topup_excluded"]
+    assert res["topup_ok"] and res["topup_floor"] < 95
+    # a strategy whose own top-ups trail is excluded, or the chosen rule already leaves it almost none
+    bad = (res["topup_by_strategy"].get("BAD") or {}).get("trades", 0)
+    assert "BAD" in res["topup_excluded"] or bad < CB.TOPUP_STRAT_MIN
+    pk_bad = pd.DataFrame({"strategy": ["BAD"] * 40 + ["GOOD"] * 160, "filled": True,
+                           "ret": [0.02] * 12 + [-0.02] * 28 + [0.02] * 120 + [-0.02] * 40})
+    assert set(CB._topup_exclusions(pk_bad, 0.66)) == {"BAD"}
+    # the top-up win bar is its own decision: an absolute grid from 50%, never above the A+ bar (Nov 14, 2026)
+    assert CB._topup_pwins(0.62) == [0.5, 0.54, 0.58, 0.62]
+    assert min(CB._topup_pwins(0.72)) == 0.5 and max(CB._topup_pwins(0.72)) == 0.72 and 0.54 in CB._topup_pwins(0.72)
     assert res["oos_topup_trades"] >= CB.TOPUP_MIN_TRADES and res["oos_weeks_at_min"] >= res["oos_weeks_at_min_aplus_only"]
     assert {r["year"] for r in res["topup_by_year"]} >= {2022, 2026} and "chosen_rule_late" in res["topup_time_split"]
     # floors nobody can clear: top-ups off, said plainly
@@ -494,10 +508,15 @@ def test_topup_replay_follows_the_weekly_pace_and_is_tuned_on_its_own():
     assert off["topup_ok"] is False and "off" in off["topup_note"]
 
 
-def test_market_conditions_are_learned_validated_and_used():
+def test_market_conditions_are_learned_validated_and_used(monkeypatch):
     import datetime as dt
     import pandas as pd
     from engine import learnlog as LL, strategies as S
+    # this test is about the bookkeeping and the rules' thresholds as written for independent results; results
+    # bunched in one week have their own test (test_results_bunched_in_one_week_count_as_the_evidence_they_are)
+    for k_, v_ in (("CLUSTER_RHO", 0.0), ("TOPUP_MIN_N", 12), ("STRAT_TOPUP_MIN_N", 8), ("APLUS_MIN_N", 25),
+                   ("COND_MIN_N", 12), ("COND_MIN_N_AW", 20)):
+        monkeypatch.setattr(LL, k_, v_)
     # one definition everywhere
     assert S.condition_of(1, 1.0, 0.01) == "bull_calm" and S.condition_of(1, 1.2, 0.0) == "bull_stress"
     assert S.condition_of(0, 1.0, 0.0) == "bear_calm" and S.condition_of(0, 1.0, -0.03) == "bear_stress"

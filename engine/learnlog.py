@@ -43,6 +43,32 @@ def _cadd(c: dict, cond, ret: float, live: bool = False) -> None:
     d[k + "ret"] = round(d[k + "ret"] + ret, 5)
 
 
+# Results of setups sent in the same week rise and fall together (Nov 14, 2026: across 2022-now, A+ outcomes in one
+# signal week correlate about 0.25), so 14 wins from one rebound week are worth about 3 independent results, not 14.
+# Every cell remembers how many results each week gave ("wk"), and every weighted count the rules use is scaled by
+# the cell's share of independent evidence: sum over weeks of n / (1 + (n - 1) * CLUSTER_RHO), over n.
+CLUSTER_RHO = 0.25
+
+
+def _wk_add(c: dict, day) -> None:
+    try:
+        y, w, _ = dt.date.fromisoformat(str(day)[:10]).isocalendar()
+    except Exception:
+        return
+    k = f"{y}-W{w:02d}"
+    wk = c.setdefault("wk", {})
+    wk[k] = wk.get(k, 0) + 1
+
+
+def eff(c: dict) -> float:
+    """Share of a cell's results that count as independent evidence (1.0 for cells stored before weeks were kept)."""
+    wk = (c or {}).get("wk") or {}
+    tot = sum(wk.values())
+    if not tot:
+        return 1.0
+    return sum(n / (1.0 + (n - 1) * CLUSTER_RHO) for n in wk.values() if n > 0) / tot
+
+
 def monthly_tallies(alerts: list, shadow: list, closed_trades: list) -> dict:
     amap = {a.get("id"): a for a in alerts}
     out: dict = {}
@@ -58,6 +84,7 @@ def monthly_tallies(alerts: list, shadow: list, closed_trades: list) -> dict:
         c["shadow_n"] += 1
         c["shadow_wins"] += int(ret > 0)
         c["shadow_ret"] += ret
+        _wk_add(c, a.get("valid_for"))
         reg = "stress" if stressed(a.get("features") or {}) else "calm"
         c[reg + "_n"] += 1
         c[reg + "_wins"] += int(ret > 0)
@@ -98,13 +125,14 @@ def _age_months(m: str, now) -> float:
 
 
 def weighted_record(months: dict, strategy: str, now) -> tuple[float, float]:
-    """(weighted trades, weighted wins): live fills count double, older months fade with a 6-month half-life."""
+    """(weighted trades, weighted wins): live fills count double, older months fade with a 6-month half-life,
+    and results bunched in one week count as the independent evidence they are (see CLUSTER_RHO)."""
     n = w = 0.0
     for m, cells in (months or {}).items():
         c = (cells or {}).get(strategy)
         if not c:
             continue
-        wt = 0.5 ** (_age_months(m, now) / HALF_LIFE_MONTHS)
+        wt = 0.5 ** (_age_months(m, now) / HALF_LIFE_MONTHS) * eff(c)
         n += wt * (c.get("shadow_n", 0) + 2 * c.get("live_n", 0))
         w += wt * (c.get("shadow_wins", 0) + 2 * c.get("live_wins", 0))
     return n, w
@@ -128,7 +156,7 @@ def summary(months: dict, now) -> dict:
             for k in ("stress_n", "stress_wins", "calm_n", "calm_wins", "live_n", "live_wins"):
                 r[k] += c.get(k, 0)
             r["first_month"] = min(r["first_month"], m)
-            _cond_acc(r.setdefault("_cond", {}), c, 0.5 ** (_age_months(m, now) / HALF_LIFE_MONTHS))
+            _cond_acc(r.setdefault("_cond", {}), c, 0.5 ** (_age_months(m, now) / HALF_LIFE_MONTHS) * eff(c))
     for r in out.values():
         tot = r.pop("all_ret")
         r["all_avg_ret"] = round(tot / r["all_n"], 5) if r["all_n"] else None
@@ -300,13 +328,13 @@ def portfolio_stats(alerts: list, shadow: list, trades: list, ledger: list, toda
 GRADES = ("aplus", "topup", "watch")
 GRADE_LABEL = {"aplus": "A+", "topup": "Weekly top-up", "watch": "Watchlist (not sent)"}
 
-TOPUP_MIN_N = 12        # weighted top-up results before their record may change the rule
+TOPUP_MIN_N = 8         # weighted top-up results (independent evidence, see CLUSTER_RHO) before their record may change the rule
 TOPUP_OFF_WIN = 0.60    # under this the top-ups stop
 TOPUP_TIGHT_GAP = 0.07  # this far under the tested top-up win rate, top-ups must clear the A+ win estimate
-STRAT_TOPUP_MIN_N = 8   # weighted top-ups of one strategy before its own record counts
+STRAT_TOPUP_MIN_N = 6   # weighted top-ups of one strategy before its own record counts
 STRAT_PRIOR_N = 20      # its record is shrunk toward the tested top-up win rate with this weight
 STRAT_TOPUP_GAP = 0.08  # a strategy this far under (after shrinkage) stops sending top-ups
-APLUS_MIN_N = 25        # weighted A+ results before the A+ record is judged
+APLUS_MIN_N = 15        # weighted A+ results before the A+ record is judged
 APLUS_GAP = 0.10        # this far under the tested A+ win rate puts A+ on watch
 WATCH_KEEP_DAYS = 75    # watchlist ids remembered this long, so each paper result counts once
 
@@ -327,6 +355,7 @@ def _add_shadow(c: dict, ret: float, alert: dict, reason) -> None:
     c["shadow_n"] += 1
     c["shadow_wins"] += int(ret > 0)
     c["shadow_ret"] += ret
+    _wk_add(c, (alert or {}).get("valid_for"))
     reg = "stress" if stressed((alert or {}).get("features") or {}) else "calm"
     c[reg + "_n"] += 1
     c[reg + "_wins"] += int(ret > 0)
@@ -424,6 +453,7 @@ def _add_acc(r: dict, c: dict, wt: float) -> None:
     r["ret"] += c.get("shadow_ret", 0.0)
     for k in ("live_n", "live_wins", "live_ret", "stress_n", "stress_wins", "calm_n", "calm_wins"):
         r[k] += c.get(k, 0)
+    wt = wt * eff(c)   # results bunched in one week are not independent evidence
     r["wn"] += wt * (c.get("shadow_n", 0) + 2 * c.get("live_n", 0))
     r["ww"] += wt * (c.get("shadow_wins", 0) + 2 * c.get("live_wins", 0))
     for k, v in (c.get("exits") or {}).items():
@@ -526,10 +556,10 @@ def aplus_watch(stats: dict | None, G: dict) -> dict | None:
                      "recalibration will favour the stricter A+ bar until the record recovers.")}
 
 
-COND_MIN_N = 12        # weighted results of one strategy in one market condition before its own record counts
+COND_MIN_N = 8         # weighted results of one strategy in one market condition before its own record counts
 COND_PRIOR_N = 20      # shrunk toward the strategy's tested win rate in that condition with this weight
 COND_GAP = 0.10        # this far under (after shrinkage), or under 58%, the strategy pauses in that condition
-COND_MIN_N_AW = 20     # an all-weather strategy (held up in every condition in testing) needs more live evidence
+COND_MIN_N_AW = 14     # an all-weather strategy (held up in every condition in testing) needs more live evidence
 COND_PRIOR_N_AW = 40   # ... and its tested record weighs twice as much before one condition can pause it
 
 
@@ -571,6 +601,52 @@ def all_weather_live(stats: dict | None, min_n: float = COND_MIN_N) -> dict:
     return out
 
 
+EXT_MIN_N = 8          # weighted A+ results from the wider list before its own record can pause it
+EXT_GAP = 0.12         # this far under the tested A+ win rate (or under 60%) the wider list pauses
+
+
+def tier_tallies(alerts: list, shadow: list) -> dict:
+    """{month: {tier: cell}} for the A+ setups the desk sent, by the list they came from (core / ext)."""
+    amap = {a.get("id"): a for a in alerts}
+    out: dict = {}
+    for s in shadow:
+        if s.get("status") != "closed" or not s.get("fill"):
+            continue
+        a = amap.get(s.get("alert_id"))
+        m = str((a or {}).get("valid_for", ""))[:7]
+        if not a or len(m) != 7 or grade_of(a) != "aplus":
+            continue
+        ret = float(s["exit"]) / float(s["fill"]) - 1
+        _add_shadow(out.setdefault(m, {}).setdefault("ext" if a.get("tier") == "ext" else "core", _cell()), ret, a, s.get("reason"))
+    for cells in out.values():
+        for c in cells.values():
+            _round(c)
+    return out
+
+
+def tier_summary(tier_months: dict, now) -> dict:
+    by = {}
+    for m, cells in sorted((tier_months or {}).items()):
+        wt = 0.5 ** (_age_months(m, now) / HALF_LIFE_MONTHS)
+        for tier, c in (cells or {}).items():
+            _add_acc(by.setdefault(tier, _acc()), c, wt)
+    return {t: {k: v for k, v in _fin(r).items() if k not in ("exits", "by_condition")} for t, r in by.items()}
+
+
+def ext_live_policy(stats: dict | None, G: dict) -> dict | None:
+    """Pauses the wider list on its own A+ record: None while it holds up (or has too few results), else
+    {"status": "off", "reason", "record", "n"}. It returns by itself once the record recovers or ages out."""
+    e = ((stats or {}).get("tier_summary") or {}).get("ext") or {}
+    exp = float(G.get("oos_aplus_win_rate") or 0.75)
+    n, wr = float(e.get("weighted_n") or 0), e.get("weighted_win_rate")
+    if n < EXT_MIN_N or wr is None or wr >= max(0.60, exp - EXT_GAP):
+        return None
+    return {"status": "off", "record": round(wr, 4), "n": round(n, 1),
+            "reason": (f"The wider list is paused on its own record: its A+ setups won {wr:.0%} over {n:.0f} weighted results "
+                       f"(tested A+ {exp:.0%}). The original list keeps trading; the wider list returns once its record "
+                       "recovers or the losing stretch ages out.")}
+
+
 def stats_doc(prev_doc: dict | None, alerts: list, shadow: list, closed_trades: list, export_complete: bool, now,
               watch: list | None = None, wshadow: list | None = None) -> dict:
     fresh = monthly_tallies(alerts, shadow, closed_trades)
@@ -580,8 +656,10 @@ def stats_doc(prev_doc: dict | None, alerts: list, shadow: list, closed_trades: 
                if isinstance(c, dict) and all(isinstance(v, dict) and "shadow_n" not in v for v in c.values())}
     gm = merge_months(prev_gm, grade_tallies(alerts, shadow, closed_trades), export_complete, oldest)
     wm, wids = accumulate_watch(prev_doc, watch or [], wshadow or [], now)
+    tm = merge_months((prev_doc or {}).get("tier_months") or {}, tier_tallies(alerts, shadow), export_complete, oldest)
     return {"updated_at": now.isoformat(timespec="seconds"), "months": months, "summary": summary(months, now),
             "grade_months": gm, "watch_months": wm, "watch_ids": wids, "grade_summary": grade_summary(gm, wm, now),
+            "tier_months": tm, "tier_summary": tier_summary(tm, now), "cluster_rho": CLUSTER_RHO,
             "half_life_months": HALF_LIFE_MONTHS,
             "about": ("Monthly tallies of every graded alert (shadow) and real trade (live) per strategy, kept "
                       "permanently; score adjustments use them with live fills counted double and a 6-month half-life. "

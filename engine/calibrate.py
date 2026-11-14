@@ -346,13 +346,23 @@ def _trade_stats(df: pd.DataFrame) -> dict:
             "profit_factor": round(float(f.loc[w, "ret"].sum() / gl), 2) if gl > 0 else None}
 
 
+def _topup_pwins(pw: float) -> list:
+    """Model-win bars a top-up rule may use. Nov 14, 2026: the grid used to hang off the A+ bar (A+ win bar
+    minus 0 to 8 points), so a recalibration that chose a high A+ win bar (72%) could only look at top-ups with
+    a 64%+ model win, found almost none, switched top-ups off and lost the adoption check on weekly coverage
+    two Saturdays running. The top-up bar is its own decision: an absolute grid from 50% up, never above the
+    A+ bar."""
+    grid = {0.50, 0.54, 0.58, 0.62} | {round(max(0.5, pw - d), 2) for d in (0.08, 0.04, 0.0)}   # few enough to stay fast
+    return sorted(x for x in grid if x <= round(pw, 2) + 1e-9)
+
+
 def _choose_topup_rule(s: pd.DataFrame, sc: float, pw: float, min_week: int, min_trades: int = TOPUP_MIN_TRADES):
     """The top-up bar with the highest win rate among rules whose replayed top-ups clear the trade-count,
     average-trade and profit-factor floors; among rules within 1.5 points of the best, the one that keeps
     the most weeks at the minimum. None if no rule clears the floors."""
     cands = []
     for floor in range(max(40, int(sc) - 30), int(sc), 2):
-        for tpw in sorted({round(max(0.5, pw - d), 2) for d in (0.08, 0.06, 0.04, 0.02, 0.0)}):
+        for tpw in _topup_pwins(pw):
             pk, wk = simulate_topups(s, sc, pw, floor, tpw, min_week)
             st = _trade_stats(pk)
             if st["trades"] < min_trades or st["avg_ret"] < TOPUP_MIN_AVG or (st["profit_factor"] or 0) < TOPUP_MIN_PF:
@@ -406,7 +416,10 @@ def calibrate_topups(post: pd.DataFrame, sc: float, pw: float, min_week: int = 5
         pk2, wk2 = simulate_topups(s, sc, pw, floor, tpw, min_week, excluded=list(trial))
         st2 = _trade_stats(pk2)
         c2 = float((wk2 >= min_week).mean()) if len(wk2) else 0.0
-        if st2["trades"] < TOPUP_MIN_TRADES or st2["win_rate"] < st["win_rate"] or c2 < cover0 - 0.05:
+        # win rate comes first: a strategy whose top-ups lose money (profit factor under 1) goes even if a few
+        # weeks then fall short of the pace; a merely trailing one goes only while the weekly coverage holds
+        losing = all((_trade_stats(pk[pk["strategy"] == n]).get("profit_factor") or 0) < 1.0 for n in more)
+        if st2["trades"] < TOPUP_MIN_TRADES or st2["win_rate"] < st["win_rate"] or (c2 < cover0 - 0.05 and not losing):
             break
         excl, pk, wk, st, cover = trial, pk2, wk2, st2, c2
     weeks = max(1, len(wk))
@@ -649,6 +662,7 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
               "period": [str(w["close"].index.min().date()), str(w["close"].index.max().date())],
               "tickers": int(w["close"].shape[1]), "strategies": {}}
     pooled = []
+    standalone_on, standalone_lost = {}, {}   # strategies graded on their own record: re-checked on this week's data
 
     def evaluate(name, res, spec=None):
         if spec is not None:  # a research strategy: its rules travel with the params
@@ -701,6 +715,27 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
             rec.update(custom=True, about=spec.get("about"), source=spec.get("source"),
                        rules=R.describe({**spec, "params": res["variant"], "grid": {}}),
                        market_conditions=list(spec.get("market_conditions") or []) or None, graded=graded)
+        was_sa = ((oldP.get("strategies") or {}).get(name) or {}).get("standalone")
+        if spec is not None and was_sa and (oldP.get("strategies") or {}).get(name, {}).get("enabled", True):
+            # promoted on its own record (see STANDALONE): it keeps that status only while this week's data agrees
+            try:
+                sa = standalone_record(res["trades"], split)
+            except Exception as ex:
+                sa = {"ok": False, "checks": [{"key": "error", "label": f"own-record check failed: {ex!r}"[:200], "ok": False}]}
+            if sa.get("ok") and set(sa["conditions"]) <= set(spec.get("market_conditions") or sa["conditions"]):
+                P["strategies"][name]["standalone"] = {"p": sa["p"], "conditions": list(sa["conditions"]), "note": sa["note"],
+                                                       "record": sa["record"], "at": (was_sa or {}).get("at"),
+                                                       "rechecked": report["generated"]}
+                P["strategies"][name]["market_conditions"] = list(sa["conditions"])
+                P["strategies"][name]["enabled"] = True
+                rec.update(enabled=True, standalone={"p": sa["p"], "conditions": list(sa["conditions"]), "record": sa["record"],
+                                                     "checks": sa["checks"]},
+                           status_reason="Active: " + sa["note"] + " Re-checked every Saturday.", path=None)
+                standalone_on[name] = sa
+            else:
+                miss = ", ".join(c["label"].lower() for c in sa.get("checks", []) if not c.get("ok")) or "its record"
+                standalone_lost[name] = (f"{mt['label']} is no longer graded on its own record ({miss} fell short on this week's "
+                                         "data); it is judged like every other research strategy again.")
         report["strategies"][name] = rec
         log(f"  {name}: train win {st_train.get('win_rate')} avg {st_train.get('avg_ret')} PF "
             f"{st_train.get('profit_factor')} | OOS win {st_test.get('win_rate')} avg {st_test.get('avg_ret')} "
@@ -748,8 +783,12 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
             if res is not None:
                 evaluate(cid, res, spec)
     allp = pd.concat(pooled, ignore_index=True) if pooled else pd.DataFrame()
+    sa_trades = allp[allp["strategy"].isin(list(standalone_on))].copy() if (standalone_on and not allp.empty) else pd.DataFrame()
     if not allp.empty:
-        enabled_names = [n for n, v in report["strategies"].items() if v.get("enabled")]
+        # own-record strategies are graded apart: they stay out of the pooled model fit, the A+ bar choice and the
+        # research gate (their calm-market trades would bend a model built on market stress), and re-join the
+        # live-vs-recalibrated replay below on both sides
+        enabled_names = [n for n, v in report["strategies"].items() if v.get("enabled") and n not in standalone_on]
 
         def fit_and_grade(names):
             en_ = allp[allp["strategy"].isin(names)].copy()
@@ -878,6 +917,9 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
     P["updated"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     P["source"] = "backtest"
     changes = list(pre_changes)
+    changes.extend(standalone_lost.values())
+    if standalone_on:
+        report["standalone"] = {n: {"p": v["p"], "conditions": v["conditions"], "record": v["record"]} for n, v in standalone_on.items()}
     if research_docs:
         report["research_retests"] = [{"idea": d.get("idea_id"), "verdict": d.get("verdict"), "summary": d.get("summary")}
                                       for d in research_docs]
@@ -958,7 +1000,8 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
         try:
             P_old = S.params_with_defaults(copy.deepcopy(oldP))
             champ = live_replay(ind, P_old, split, desk_min, acct)
-            ch_t = mark_entry(_score_live(allp.copy(), P["models"]["_pooled"], P), P)
+            ch_src = pd.concat([allp, sa_trades], ignore_index=True) if len(sa_trades) else allp.copy()
+            ch_t = mark_entry(_score_live(ch_src, P["models"]["_pooled"], P), P)
             chall = desk_replay(ch_t[ch_t["signal_date"] >= split], P["grading"], desk_min, acct)
             ok_a, checks_a = adoption_gate(champ, chall)
             keys_ = ("aplus", "topups", "sent", "sent_late", "weeks_at_min", "setups_per_week", "account")
@@ -1341,13 +1384,113 @@ def run_tiers(data_dir, state_dir, out_dir, split="2022-01-01", log=print, now=N
     line = "Wider list (weekly tier check): " + block["ext"]["reason"]
     (out / "tiers.json").write_text(json.dumps(block, default=str))
     (out / "tiers_report.json").write_text(json.dumps({"tiers": block, "changelog": line}, indent=1, default=str))
-    if pdoc is not None:
+    prev = ((P.get("tiers") or {}).get("ext") or {})
+    changed = (prev.get("status"), prev.get("size_mult")) != (block["ext"]["status"], block["ext"].get("size_mult"))
+    if pdoc is not None:  # the weekly recalibration's document: add the block, it is saved with everything else
         tgt = pdoc.get("params") if isinstance(pdoc.get("params"), dict) else pdoc
         tgt["tiers"] = block
         if isinstance(pdoc.get("changelog_entry"), list):
             pdoc["changelog_entry"].append(line)
         pathlib.Path(params_path).write_text(json.dumps(pdoc, default=str))
-    return {"status": block["ext"]["status"], "size_mult": block["ext"].get("size_mult"), "reason": block["ext"]["reason"], "changelog": line}
+    else:  # run on its own: the live params with the block added, ready to save as strategy/params
+        live_doc = state.get("params_doc") or {}
+        base = copy.deepcopy(live_doc.get("params") or live_doc)
+        if base:
+            base["tiers"] = block
+            base["version"], base["updated"] = int(time.time()), stamp
+            (out / "doc_params.json").write_text(json.dumps({"params": base, "updated_at": stamp, "changelog_entry": [line]}, default=str))
+    return {"status": block["ext"]["status"], "size_mult": block["ext"].get("size_mult"), "changed": bool(changed),
+            "reason": block["ext"]["reason"], "changelog": line}
+
+
+# ----------------------------------------------------------------------------- own-record (standalone) A+ strategies
+# See model.apply_standalone. A strategy is graded on its own record only while that record is A+ grade by every
+# measure below, in both the design years and the unseen years, counted by signal day as well as by trade
+# (setups fired on the same day rise and fall together, so 1,500 trades on 50 days are 50 pieces of evidence).
+STANDALONE = {"win": 0.75,          # win rate, 2008-2021 and 2022-now, in each market condition it trades
+              "day_win": 0.75,      # the same with every signal day counting once
+              "oos_trades": 300, "oos_days": 40, "train_days": 80,
+              "cond_trades": 100,   # trades in a market condition (each period) before it can trade there
+              "oos_pf": 1.4, "oos_avg": 0.004,
+              "year_win": 0.60, "year_days": 5,   # no calendar year with 5+ signal days below 60%
+              "haircut": 0.02, "p_cap": 0.80}     # win estimate shown and graded on: the weakest measure minus 2 points
+
+
+def _pf_at_least(st: dict, need: float) -> bool:
+    """Profit factor check; no losing trade at all (profit factor undefined) passes when the average is positive."""
+    pf = st.get("profit_factor")
+    return (pf is None and (st.get("avg_ret") or 0) > 0 and (st.get("trades") or 0) > 0) or (pf or 0) >= need
+
+
+def _day_win(f: pd.DataFrame):
+    if f.empty:
+        return None
+    return float(f.groupby("signal_date")["ret"].apply(lambda x: float((x > 0).mean())).mean())
+
+
+def standalone_record(tr: pd.DataFrame, split) -> dict:
+    """Does this strategy's own tested record make its setups A+ (see STANDALONE)? Returns
+    {"ok", "p", "conditions", "checks", "record", "note"}."""
+    q = STANDALONE
+    split = pd.Timestamp(split)
+    f = tr[tr["filled"] & tr["ret"].notna()]
+    out = {"ok": False, "p": None, "conditions": [], "checks": [], "record": {}, "note": ""}
+    if f.empty or not {"spy_above200", "vix_ratio", "spy_ret5"} <= set(f.columns):
+        return out
+    f = _with_conditions(f) if "condition" not in f.columns else f
+
+    def win(g):
+        return float((g["ret"] > 0).mean()) if len(g) else None
+    conds = []
+    for c, g in f.groupby("condition"):
+        a, b = g[g["signal_date"] < split], g[g["signal_date"] >= split]
+        if len(a) >= q["cond_trades"] and len(b) >= q["cond_trades"] and win(a) >= q["win"] and win(b) >= q["win"] \
+                and _pf_at_least(_trade_stats(b), 1.25):
+            conds.append(str(c))
+    if not conds:
+        out["checks"] = [{"key": "conditions", "label": f"A market condition where it won {round(100 * q['win'])}%+ in both periods "
+                          f"({q['cond_trades']}+ trades each)", "value": None, "ok": False}]
+        return out
+    g = f[f["condition"].isin(conds)]
+    a, b = g[g["signal_date"] < split], g[g["signal_date"] >= split]
+    sa_, sb_ = _trade_stats(a), _trade_stats(b)
+    da, db = a["signal_date"].nunique(), b["signal_date"].nunique()
+    dwa, dwb = _day_win(a), _day_win(b)
+    yrs = []
+    for y, x in g.groupby(g["signal_date"].dt.year):
+        if x["signal_date"].nunique() >= q["year_days"]:
+            yrs.append((int(y), win(x)))
+    worst = min(yrs, key=lambda t: t[1]) if yrs else None
+
+    def chk(key, label, value, need, ok):
+        return {"key": key, "label": label, "value": value, "need": need, "ok": bool(ok)}
+    checks = [
+        chk("train_win", "Win rate 2008-2021", sa_.get("win_rate"), f">= {round(100 * q['win'])}%", (sa_.get("win_rate") or 0) >= q["win"]),
+        chk("oos_win", "Win rate 2022-now (unseen data)", sb_.get("win_rate"), f">= {round(100 * q['win'])}%", (sb_.get("win_rate") or 0) >= q["win"]),
+        chk("train_day_win", "Win rate by signal day 2008-2021", round(dwa, 4) if dwa is not None else None, f">= {round(100 * q['day_win'])}%", (dwa or 0) >= q["day_win"]),
+        chk("oos_day_win", "Win rate by signal day 2022-now", round(dwb, 4) if dwb is not None else None, f">= {round(100 * q['day_win'])}%", (dwb or 0) >= q["day_win"]),
+        chk("oos_trades", "Trades 2022-now", sb_.get("trades", 0), f">= {q['oos_trades']}", sb_.get("trades", 0) >= q["oos_trades"]),
+        chk("oos_days", "Signal days 2022-now", int(db), f">= {q['oos_days']}", db >= q["oos_days"]),
+        chk("train_days", "Signal days 2008-2021", int(da), f">= {q['train_days']}", da >= q["train_days"]),
+        chk("oos_pf", "Profit factor 2022-now", sb_.get("profit_factor"), f">= {q['oos_pf']}", _pf_at_least(sb_, q["oos_pf"])),
+        chk("oos_avg", "Average trade 2022-now", sb_.get("avg_ret"), f">= +{100 * q['oos_avg']:.1f}%", (sb_.get("avg_ret") or 0) >= q["oos_avg"]),
+        chk("worst_year", "Weakest calendar year" + (f" ({worst[0]})" if worst else ""), round(worst[1], 4) if worst else None,
+            f">= {round(100 * q['year_win'])}%", worst is None or worst[1] >= q["year_win"]),
+    ]
+    ok = all(c["ok"] for c in checks)
+    keys = ("trades", "win_rate", "avg_ret", "profit_factor")
+    rec = {"conditions": conds, "train": {**{k: sa_.get(k) for k in keys}, "days": int(da), "day_win": round(dwa, 4) if dwa is not None else None},
+           "oos": {**{k: sb_.get(k) for k in keys}, "days": int(db), "day_win": round(dwb, 4) if dwb is not None else None},
+           "worst_year": {"year": worst[0], "win_rate": round(worst[1], 4)} if worst else None}
+    out.update(checks=checks, record=rec, conditions=conds)
+    if ok:
+        pv = min(q["p_cap"], min(sa_["win_rate"], sb_["win_rate"], dwa, dwb) - q["haircut"])
+        where = " and ".join(S.CONDITION_PLURAL[c] for c in conds)
+        out.update(ok=True, p=round(float(pv), 3), note=(
+            f"A+ on this strategy's own tested record in {where}: its setups won {100 * sb_['win_rate']:.0f}% of "
+            f"{sb_['trades']:,} on unseen 2022-now data ({db} signal days) and {100 * sa_['win_rate']:.0f}% of {sa_['trades']:,} "
+            f"in 2008-2021, so it is graded on that record rather than on the pooled model's score."))
+    return out
 
 
 # ----------------------------------------------------------------------------- daily promotion check
@@ -1452,8 +1595,10 @@ def promote_gate(base: dict, new: dict, name: str) -> tuple[bool, list]:
 
 def _score_live(t: pd.DataFrame, pm: dict, P_: dict) -> pd.DataFrame:
     """Scores setups exactly as the scanner grades them (live pooled model; live adjustments only where they make grading stricter)."""
-    p_, e_, ep_ = M.predict_pooled(pm, t[S.FEATURES], t["strategy"].values, M.grading_offsets(P_.get("live_adjust")))
-    return t.assign(p=p_, score=M.score_pooled(p_, ep_))
+    offs = M.grading_offsets(P_.get("live_adjust"))
+    p_, e_, ep_ = M.predict_pooled(pm, t[S.FEATURES], t["strategy"].values, offs)
+    p_, sc_, _ = M.apply_standalone(P_, t["strategy"].values, p_, M.score_pooled(p_, ep_), offs)  # own-record strategies
+    return t.assign(p=p_, score=sc_)
 
 
 def _pct(v, signed=False):
@@ -1547,9 +1692,46 @@ def run_promote(data_dir, state_dir, out_dir, split="2022-01-01", log=print, now
         new = desk_replay(post_c, G, min_week, acct)
         ok, checks = promote_gate(base, new, iid)
         lab = spec.get("label") or iid
+        sa = None
+        if not ok and not spec.get("graded"):
+            # graded by the pooled model it could not help; is its own record A+ grade (see STANDALONE)? Then replay
+            # the desk with its setups sent as A+ in the market conditions where that record holds.
+            try:
+                sa_try = standalone_record(tr, split)
+                if sa_try["ok"]:
+                    spec_s = {**spec, "market_conditions": list(sa_try["conditions"])}
+                    P_s = copy.deepcopy(P_new)
+                    P_s.setdefault("custom", {})[iid] = {"spec": spec_s, "params": variant, "label": spec.get("label"),
+                                                         "family": spec.get("family"), "about": spec.get("about"), "source": spec.get("source")}
+                    P_s["strategies"][iid] = R.strategy_entry(spec_s, variant, True)
+                    P_s["strategies"][iid]["market_conditions"] = list(sa_try["conditions"])
+                    P_s["strategies"][iid]["standalone"] = {"p": sa_try["p"], "conditions": list(sa_try["conditions"]),
+                                                            "note": sa_try["note"], "record": sa_try["record"],
+                                                            "at": now.isoformat(timespec="seconds")}
+                    pl_s = S.build(iid, ind, P_s)
+                    tr_s = B.simulate(pl_s, ind, P_s, include_unfilled=True) if pl_s is not None else pd.DataFrame()
+                    if not tr_s.empty:
+                        t_s = scored(tr_s, P_s)
+                        post_s = pd.concat([post, t_s[t_s["signal_date"] >= split]], ignore_index=True)
+                        new_s = desk_replay(post_s, G, min_week, acct)
+                        ok_s, checks_s = promote_gate(base, new_s, iid)
+                        log(f"  {iid} on its own record ({', '.join(sa_try['conditions'])}, p {sa_try['p']}): "
+                            f"{'PROMOTE' if ok_s else 'not yet'} " + "; ".join(
+                                f"{c['key']} {c['base']} -> {c['new'] if c['key'] != 'own' else (c['new'] or {}).get('win_rate')} "
+                                f"{'ok' if c['ok'] else 'FAIL'}" for c in checks_s))
+                        if ok_s:
+                            ok, checks, new, sa, spec, P_c, tr, post_c = True, checks_s, new_s, sa_try, spec_s, P_s, tr_s, post_s
+                        else:
+                            sa = {**sa_try, "ok": False, "gate": checks_s}
+                else:
+                    sa = sa_try
+            except Exception as ex:
+                log(f"  {iid}: own-record check failed: {ex!r}")
         rec = {"id": iid, "label": lab, "ok": ok, "graded": bool(spec.get("graded")),
                "market_conditions": spec.get("market_conditions"), "checks": checks,
                "with": {k: v for k, v in new.items() if k != "by_strategy"}, "own": new["by_strategy"].get(iid)}
+        if sa is not None:
+            rec["standalone"] = {k: sa.get(k) for k in ("ok", "p", "conditions", "checks", "record", "gate") if sa.get(k) is not None}
         report["candidates"].append(rec)
         log(f"  {iid}: {'PROMOTE' if ok else 'not yet'} " + "; ".join(f"{c['key']} {c['base']} -> {c['new'] if c['key'] != 'own' else (c['new'] or {}).get('win_rate')} {'ok' if c['ok'] else 'FAIL'}" for c in checks))
         if not ok:
@@ -1568,6 +1750,11 @@ def run_promote(data_dir, state_dir, out_dir, split="2022-01-01", log=print, now
             "research_result": r.get("id"), "replay_without": {k: base[k] for k in ("aplus", "topups", "sent", "weeks_at_min", "account")},
             "replay_with": {k: new[k] for k in ("aplus", "topups", "sent", "weeks_at_min", "account")}, "own": own}
         how = ("judged on its graded setups, the only ones the desk sends" if spec.get("graded") else
+               ("graded on its own tested record, so its setups are A+ in "
+                f"{' and '.join(S.CONDITION_PLURAL[c] for c in spec['market_conditions'])}: "
+                f"{_pct((sa['record'].get('oos') or {}).get('win_rate'))} of {(sa['record'].get('oos') or {}).get('trades')} won on unseen "
+                f"2022-now data over {(sa['record'].get('oos') or {}).get('days')} signal days, "
+                f"{_pct((sa['record'].get('train') or {}).get('win_rate'))} in 2008-2021") if sa is not None and sa.get("ok") else
                f"trading only in {' and '.join(S.CONDITION_PLURAL[c] for c in spec['market_conditions'])}"
                if spec.get("market_conditions") else "passed every standalone check")
         changes.append(
@@ -1589,8 +1776,11 @@ def run_promote(data_dir, state_dir, out_dir, split="2022-01-01", log=print, now
         cards[iid] = {"enabled": True, "variant": variant, "train": st_tr, "test_oos": st_te, "all": st_all,
                       "yearly": B.yearly(tr).reset_index().to_dict("records"), "label": lab, "family": spec.get("family"),
                       "checks": ([c for c in raw_checks if c["key"] in ("train_win", "oos_pf", "oos_decay")] + gchk) if spec.get("graded") else raw_checks,
+                      "standalone": ({"p": sa["p"], "conditions": list(sa["conditions"]), "record": sa["record"], "checks": sa["checks"]}
+                                     if sa is not None and sa.get("ok") else None),
                       "status_reason": (f"Active since {now.strftime('%b %-d')} (daily promotion check): "
                                         + ("judged on its graded setups, the only ones the desk sends. " if spec.get("graded") else "")
+                                        + ((sa.get("note") or "") + " " if sa is not None and sa.get("ok") else "")
                                         + f"Replaying the desk with it kept the A+ and top-up win rates and raised simulated "
                                           f"account growth {_pct(base['account']['cagr'])} -> {_pct(new['account']['cagr'])} a year. "
                                           "Saturday's recalibration re-checks it."),
@@ -1722,6 +1912,16 @@ def run_learning(data_dir, state_dir, out_dir, now=None) -> dict:
         else:
             G_.pop("aplus_watch", None)
             changes.append("A+ record back in line with its test: the A+ watch is lifted.")
+    # the wider list on its own A+ record (the weekly tier check decides how it trades; this can only pause it)
+    ext_pol = LL.ext_live_policy(stats, G_)
+    old_ext = ((P.get("tiers_live") or {}).get("ext") or {})
+    if bool(ext_pol) != bool(old_ext.get("status") == "off"):
+        if ext_pol:
+            P["tiers_live"] = {"ext": {**ext_pol, "at": now.isoformat(timespec="seconds")}}
+            changes.append(ext_pol["reason"])
+        else:
+            P["tiers_live"] = {}
+            changes.append("The wider list's own A+ record is back in line with its test: its pause is lifted.")
     # market conditions: today's, how each grade and strategy has done in it, and live pauses
     mk = ind["market"].iloc[-1]
     cond_today = S.condition_of(mk.get("spy_above200"), mk.get("vix_ratio"), mk.get("spy_ret5"))
@@ -1822,6 +2022,36 @@ def run_learning(data_dir, state_dir, out_dir, now=None) -> dict:
                "market_condition": cond_today, "by_condition": by_cond, "all_weather_live": aw_live,
                "insights": insights or ["No statistically meaningful drift yet."],
                "changes": changes or ["No parameter changes today."], "params_version": P.get("version")}
+    try:  # the list the scans cover, checked every day: size by tier, today's additions and removals, its source
+        ui = D.universe_info(data_dir)
+        ui.update(ext_status=S.ext_status(P), ext_label=S.TIER_LABEL.get(S.ext_status(P)), ext_size_mult=S.ext_rule(P)["size_mult"])
+        journal["universe"] = ui
+        line = f"List scanned: {ui['n']:,} stocks and ETFs ({ui['core']:,} on the original list"
+        if ui.get("ext"):
+            line += f" + {ui['ext']:,} on the wider list, which is {ui['ext_label']}"
+            if ui["ext_size_mult"] < 1 and ui["ext_status"] != "off":
+                line += f" at {round(100 * ui['ext_size_mult'])}% size"
+        line += ")."
+        if ui.get("added") or ui.get("dropped"):
+            line += (f" Today's screen added {ui['added']}" + (f" ({', '.join(ui['added_tickers'][:8])}{'...' if ui['added'] > 8 else ''})" if ui.get("added_tickers") else "")
+                     + f" and dropped {ui['dropped']}" + (f" ({', '.join(ui['dropped_tickers'][:8])}{'...' if ui['dropped'] > 8 else ''})" if ui.get("dropped_tickers") else "") + ".")
+        ts_ = (stats or {}).get("tier_summary") or {}
+        if (ts_.get("ext") or {}).get("n"):
+            e_, c_ = ts_["ext"], ts_.get("core") or {}
+            line += (f" A+ setups graded so far: wider list {e_['wins']} of {e_['n']} won"
+                     + (f", original list {c_['wins']} of {c_['n']}" if c_.get("n") else "") + ".")
+        journal["insights"].append(line)
+        warn = []
+        if ui.get("mode") == "wide" and not (300 <= int(ui.get("ext_stocks") or 0) <= 1650):
+            warn.append(f"the wider list has {ui.get('ext_stocks')} stocks (expected 300 to 1,650)")
+        if ui.get("mode") == "wide" and ui.get("source") and "nasdaq-screener" not in str(ui["source"]):
+            warn.append(f"the wider list came from a fallback today ({ui['source']})")
+        if ui.get("built") and str(ui["built"]) < (now.date() - dt.timedelta(days=4)).isoformat():
+            warn.append(f"the list was last rebuilt on {ui['built']}")
+        if warn:
+            journal["universe_warning"] = "List check: " + "; ".join(warn) + "."
+    except Exception as ex:
+        journal["universe_warning"] = f"List check could not run: {ex!r}"[:200]
     writes = []
     jid = now.strftime("%Y-%m-%d-%H%M")
     journal["id"] = jid

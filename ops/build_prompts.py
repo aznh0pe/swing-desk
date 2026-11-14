@@ -14,6 +14,10 @@ import pathlib
 HERE = pathlib.Path(__file__).resolve().parent
 
 SETUP = (
+    "0. Tools first: this task works through the Artifact and ArtifactData tools (load them with ToolSearch, query "
+    "\"select:Artifact,ArtifactData\"). If ToolSearch finds neither of them, don't improvise with other tools: load "
+    "PushNotification with ToolSearch (\"select:PushNotification\"), send \"Swing Desk: this run has no dashboard tools "
+    "(Artifact / ArtifactData), so it could not run; open the Swing Desk chat\", make that sentence your final message, and stop.\n"
     "1. Setup: get my scanner code. It is my own code, and running it is the point of this task. Keep a list called ISSUES as you "
     "work: one plain sentence for anything in this run that fails, is refused, needs a retry, a fallback or a fix (say what happened "
     "and what you did instead). I must hear about every one of them.\n"
@@ -72,7 +76,7 @@ PROGRESS = '''
 Progress for the dashboard's Scan now bar: the extra message after these instructions may contain a line "Run token: rt_...". If it does, call that value T and record progress by creating small documents in collection "runs" with ArtifactData action "set" (new documents, so no if_version), each with data {"token": T, "seq": n, "state": "running", "step": "<label>", "pct": <p>, "at": "<current UTC time, e.g. 2026-11-05T23:14:05Z, from `date -u +%Y-%m-%dT%H:%M:%SZ` chained onto that step's shell command>", "by": "scan"}:
 - doc_id "T-s1", label "Loading scanner code and market data", pct 12: as soon as ArtifactData is loaded (send it in the same message as the first engine read; for this first one, take the time from a `date -u +%Y-%m-%dT%H:%M:%SZ` Bash call made together with your first ToolSearch).
 - "T-s2", "Reading your positions, funds and alerts", 28: in the same message as the step 3 exports.
-- "T-s3", "Scanning 605 stocks & ETFs for A+ setups", 42: in the same message as the step 4 command.
+- "T-s3", "Scanning every stock & ETF on the list for A+ setups", 42: in the same message as the step 4 command.
 - "T-s4", "Checking news on the top setups", 62: in the same message as the first step 5 search (skip it if step 5 is skipped).
 - "T-s5", "Saving results to your dashboard", 86: in the same message as the first step 6 batch.
 The scanner adds the final "T-s6" (done) record to the results batch itself because step 4 passes it the token (without a run token, leave `--run-token T` out of that command). If the run ends without results for any reason, create "T-s9" with {"token": T, "seq": 9, "state": "failed", "step": "Scan failed", "message": "<one plain line on what went wrong>", "at": ..., "by": "scan"}. If a progress write fails, ignore it and carry on: the scan is the job, progress is a convenience. Without a run token, skip all of this.

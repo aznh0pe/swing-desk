@@ -307,6 +307,8 @@ pre.digest { white-space: pre-wrap; font-family: var(--f-mono); font-size: 12px;
 .funnel { display: flex; flex-wrap: wrap; gap: 8px; }
 .funnel .kpi { min-width: 110px; flex: 1; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+.lesson { padding: 10px 0; border-bottom: 1px solid var(--line, rgba(127,127,127,.25)); line-height: 1.45; }
+.lesson:last-child { border-bottom: 0; }
 </style>
 
 <header class="deskbar">
@@ -1060,6 +1062,7 @@ function ticket(a, today) {
     ${a.withdrawn ? `<div class="note-strip" style="background:var(--crit-bg);color:var(--crit)"><b>Withdrawn:</b> ${hiCaution(a.withdrawn_reason || "a later scan dropped this setup.")} ${a.status === "placed" ? "Cancel the order in your brokerage, then press Cancelled." : "Don't place it."}</div>` : ""}
     ${a.topup_note ? `<div class="note-strip">${esc(a.topup_note)}</div>` : ""}
     ${a.condition_note ? `<div class="small muted" style="margin-top:4px">${esc(a.condition_note)}</div>` : ""}
+    ${a.grade_note ? `<div class="small muted" style="margin-top:4px">${esc(a.grade_note)}</div>` : ""}
     ${a.list_note ? `<div class="small muted" style="margin-top:4px">${esc(a.list_note)}</div>` : ""}
     ${a.size_note ? `<div class="note-strip">${esc(a.size_note)}</div>` : ""}
     ${a.capacity_note ? `<div class="note-strip">${esc(a.capacity_note)}</div>` : ""}
@@ -1512,10 +1515,19 @@ function viewLab() {
     html += `<div class="panel"><h3>Simulated $5,000 account, A+ setups only, ${esc(settings().max_open_positions)} slots</h3><div class="stats" style="margin-top:8px">
       ${stat("Trades", p.trades)}${stat("Win rate", pct(100 * p.win_rate))}${stat("CAGR", spct(100 * p.cagr))}${stat("Max drawdown", pct(100 * p.max_dd))}${stat("Trades/week", p.trades_per_week)}${stat("OOS win rate", o.win_rate != null ? pct(100 * o.win_rate) : "–")}${stat("OOS CAGR", o.cagr != null ? spct(100 * o.cagr) : "–")}
     </div><p class="small muted" style="margin:8px 0 0">Survivorship bias (today's index members) and perfect limit fills flatter backtests; expect live results to be somewhat lower.</p></div>`; }
-  html += `</section>` + viewLearning() + viewResearch();
+  html += `</section>` + viewLearning() + viewResearch() + viewLessons();
   html += `<section class="section"><div class="section-head"><h2>Learning journal</h2><span class="meta">What worked, what didn't, and what changed. Written daily after the close.</span></div>`;
   html += S.journal.length ? S.journal.slice(0, 30).map(journalEntry).join("") : `<div class="empty">The first journal entry is written after the first daily learning review. Every alert is graded against what the market actually did, including setups you skipped.</div>`;
   return html + `</section>`;
+}
+// the desk's permanent lessons (learning/lessons): newest first, grouped only by date, never trimmed
+function viewLessons() {
+  const items = ((S.learning.lessons || {}).items || []).slice().sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+  if (!items.length) return "";
+  const row = (it) => `<div class="lesson"><div class="small muted">${esc(dShort(it.date))} · ${esc(it.topic || "")}</div><div>${esc(it.lesson || "")}</div>${it.evidence ? `<div class="small muted">From: ${esc(it.evidence)}</div>` : ""}</div>`;
+  const first = items.slice(0, 6), rest = items.slice(6);
+  return `<section class="section" id="lessons"><div class="section-head"><h2>What the desk has learned</h2><span class="meta">${items.length} lessons kept for good · every new design starts from them</span></div>
+    <div class="panel">${first.map(row).join("")}${rest.length ? `<details><summary class="small">Show ${rest.length} more</summary>${rest.map(row).join("")}</details>` : ""}</div></section>`;
 }
 function stat(k, v) { return `<div><div class="k">${k}</div><div class="v">${v ?? "–"}</div></div>`; }
 // same bar as engine/strategies.py ENABLE_RULE; used only if a backtest document predates the checks

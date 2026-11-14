@@ -4,6 +4,7 @@
     python -m engine.research add   --spec F --state S --out O     validate + queue a new idea
     python -m engine.research test  (--id ID[,ID] | --spec F | --queued N) --data D --state S --out O
     python -m engine.research seed  --state S --out O              queue the starter backlog
+    python -m engine.research states --spec F --data D --out O      where does this trade win? (for own designs)
 
 Every idea is a JSON rule spec (see engine/rules.py). `test` searches its small parameter grid on
 2008-2021 data only, then reports how the chosen variant did on unseen 2022-now data, whether it
@@ -82,6 +83,10 @@ def candidate_specs(state_dir, old_params: dict | None = None, cap: int = 6, ext
         results[r["id"]] = r
     latest = latest_results(results)
     keep = {iid: cu["spec"] for iid, cu in ((old_params or {}).get("custom") or {}).items() if cu.get("spec")}
+    for iid, sp_ in list(keep.items()):  # an own-record strategy is re-tested in the market conditions it trades
+        sa = (((old_params or {}).get("strategies") or {}).get(iid) or {}).get("standalone") or {}
+        if sa.get("conditions"):
+            keep[iid] = {**sp_, "market_conditions": list(sa["conditions"])}
     pool = {}
     for iid, r in latest.items():
         if r.get("verdict") == "candidate" and iid in ideas and ideas[iid].get("spec") and iid not in keep:
@@ -640,6 +645,101 @@ def run_tests(specs: list[dict], data_dir, state_dir, out_dir, split="2022-01-01
     return res
 
 
+# ----------------------------------------------------------------------------- state scan (own designs)
+# Nov 14, 2026: a model run over every live signal could not find a calm-bull-market setup that wins 75%+; a scan of
+# WHEN one simple trade wins did (the Fear-Fade strategies: 80% of 4,633 in 2008-2021, 83% of 1,555 on unseen data).
+# `states` runs that scan for any spec: its trades bucketed by the state of the market and of the stock on the signal
+# day, edges fixed on 2008-2021, both periods side by side, counted by trade and by signal day. A state worth a
+# rule wins clearly more in BOTH periods over many signal days; one that only shows up in one period is noise.
+STATE_MARKET = {
+    "vix_ratio": lambda mk: mk["vix_ratio"],
+    "vix_chg3": lambda mk: mk["vix"] / mk["vix"].shift(3) - 1,
+    "vix_ratio_max5": lambda mk: mk["vix_ratio"].rolling(5).max(),
+    "vix": lambda mk: mk["vix"],
+    "spy_ret3": lambda mk: mk["spy"] / mk["spy"].shift(3) - 1,
+    "spy_ret5": lambda mk: mk["spy_ret5"],
+    "spy_ret20": lambda mk: mk["spy"] / mk["spy"].shift(20) - 1,
+    "spy_rsi2": lambda mk: mk["spy_rsi2"],
+    "spy_dist200": lambda mk: mk["spy_dist200"],
+    "spy_below_20d_high": lambda mk: mk["spy"] / mk["spy"].rolling(20).max() - 1,
+    "breadth50": lambda mk: mk["breadth50"],
+    "breadth50_chg5": lambda mk: mk["breadth50"] - mk["breadth50"].shift(5),
+    "breadth200": lambda mk: mk["breadth200"],
+}
+STATE_STOCK = ("rsi2", "atr_pct", "dist50", "dist200", "rs_pct", "ret5", "ibs", "adx14", "vol_ratio", "streak", "depth_atr", "slope200")
+STATE_EXPR = {"vix_chg3": "(vix / vix[3] - 1)", "vix_ratio_max5": "rmax(vix_ratio, 5)", "spy_ret3": "(spy / spy[3] - 1)",
+              "spy_ret20": "(spy / spy[20] - 1)", "spy_below_20d_high": "(spy / rmax(spy, 20) - 1)",
+              "breadth50_chg5": "(breadth50 - breadth50[5])"}
+
+
+def state_scan(spec: dict, ind: dict, P: dict, split, buckets=(0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0)) -> dict:
+    """Win rate of the spec's trades by bucket of each market and stock state (see the note above)."""
+    split = pd.Timestamp(split)
+    plan = R.build_plan(spec, ind, P, S.base_masks(ind, P), spec.get("params") or {})
+    t = B.simulate(plan, ind, P, include_unfilled=False)
+    t = t[t["filled"] & t["ret"].notna()]
+    mk = ind["market"]
+    cols = {}
+    for k, fn in STATE_MARKET.items():
+        try:
+            cols["mkt_" + k] = fn(mk)
+        except Exception:
+            continue
+    t = t.join(pd.DataFrame(cols), on="signal_date")
+
+    def cell(g):
+        if not len(g):
+            return {"n": 0}
+        days = g.groupby("signal_date")["ret"].apply(lambda x: float((x > 0).mean()))
+        return {"n": int(len(g)), "days": int(len(days)), "win": round(float((g["ret"] > 0).mean()), 3),
+                "day_win": round(float(days.mean()), 3), "avg": round(float(g["ret"].mean()), 4)}
+    tr, te = t[t["signal_date"] < split], t[t["signal_date"] >= split]
+    out = {"base": {"train": cell(tr), "oos": cell(te)}, "market": {}, "stock": {}, "standouts": []}
+    for kind, names in (("market", ["mkt_" + k for k in STATE_MARKET if "mkt_" + k in t.columns]), ("stock", [f for f in STATE_STOCK if f in t.columns])):
+        for col in names:
+            v = tr[col].dropna()
+            if len(v) < 200:
+                continue
+            edges = np.unique(np.quantile(v, buckets))
+            rows = []
+            for lo, hi in zip(edges[:-1], edges[1:]):
+                a, b = tr[(tr[col] >= lo) & (tr[col] <= hi)], te[(te[col] >= lo) & (te[col] <= hi)]
+                rows.append({"lo": round(float(lo), 4), "hi": round(float(hi), 4), "train": cell(a), "oos": cell(b)})
+            name = col[4:] if kind == "market" else col
+            out[kind][name] = rows
+            for r in rows:  # worth a look: 75%+ by trade and by day in both periods, on enough days, clearly above the base
+                a, b = r["train"], r["oos"]
+                if a.get("days", 0) >= 60 and b.get("days", 0) >= 30 and min(a["win"], b["win"], a["day_win"], b["day_win"]) >= 0.75 \
+                        and min(a["win"] - out["base"]["train"]["win"], b["win"] - out["base"]["oos"]["win"]) >= 0.02:
+                    out["standouts"].append({"state": name, "kind": kind, "lo": r["lo"], "hi": r["hi"], "train": a, "oos": b,
+                                             "as_a_rule": STATE_EXPR.get(name, name)})
+    out["standouts"].sort(key=lambda r: -min(r["train"]["day_win"], r["oos"]["day_win"]))
+    out["how_to_read"] = ("Each row is one bucket of a state on the signal day (edges set on 2008-2021). A state is worth a rule only "
+                          "if its bucket wins clearly more in BOTH periods, by trade and by signal day, over many signal days; "
+                          "'standouts' lists the buckets at 75%+ everywhere. Turn one into a condition with 'as_a_rule' and the "
+                          "bucket's lo/hi, then run `research test` on the new spec: the test, not this scan, decides.")
+    return out
+
+
+def cmd_states(spec_file, data_dir, out_dir, split="2022-01-01"):
+    spec = json.loads(pathlib.Path(spec_file).read_text())
+    spec = spec[0] if isinstance(spec, list) else spec
+    errs = R.validate(spec)
+    if errs:
+        print(json.dumps({"refused": spec.get("id"), "why": errs}, indent=1))
+        return None
+    w = D.load_history(data_dir)
+    ind = I.compute(w, D.load_universe(data_dir))
+    res = state_scan(spec, ind, S.params_with_defaults(None), split)
+    out = pathlib.Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "states.json").write_text(json.dumps(res, indent=1))
+    show = {"base": res["base"], "standouts": res["standouts"][:25], "how_to_read": res["how_to_read"],
+            "full_table": str((out / "states.json").resolve())}
+    print(json.dumps(show, indent=1))
+    return res
+
+
 # ----------------------------------------------------------------------------- CLI
 def cmd_next(state_dir, out_dir):
     """What to test next: a queued idea from the log; otherwise the next untested idea from the curated
@@ -664,13 +764,18 @@ def cmd_next(state_dir, out_dir):
     focus = research_focus(state_dir)
     if focus:
         res["focus"] = focus  # when designing a new idea, serve this first
+    try:  # what the desk already knows for good: read before designing anything
+        from . import lessons as LS
+        res["lessons"] = LS.brief(LS.load(state_dir))
+    except Exception:
+        res["lessons"] = []
     (out / "next.json").write_text(json.dumps(res, indent=1))
     print(json.dumps(res, indent=1))
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["next", "add", "test", "seed"])
+    ap.add_argument("cmd", choices=["next", "add", "test", "seed", "states"])
     ap.add_argument("--state", default=None)
     ap.add_argument("--out", required=True)
     ap.add_argument("--data", default=None)
@@ -683,6 +788,10 @@ def main():
     out = pathlib.Path(a.out)
     if a.cmd == "next":
         return cmd_next(a.state, a.out)
+    if a.cmd == "states":
+        if not (a.spec and a.data):
+            ap.error("states needs --spec and --data")
+        return cmd_states(a.spec, a.data, a.out, a.split)
     ideas = load_ideas(a.state)
     now = cal.now_pt()
     if a.cmd in ("add", "seed"):

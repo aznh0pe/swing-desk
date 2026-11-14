@@ -227,8 +227,13 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
             p_, e_, ep_ = M.predict_pooled(pm, fdf, names, M.grading_offsets(adj))
             sc_ = M.score_pooled(p_, ep_)
             p_live = M.predict_pooled(pm, fdf, names, adj)[0] if adj else p_
-            for cd, pv, ev, epv, scv, plv in zip(cands, p_, e_, ep_, sc_, p_live):
+            # strategies graded on their own tested record (M.apply_standalone): A+ in their market conditions
+            p_, sc_, own_ = M.apply_standalone(P, names, p_, sc_, M.grading_offsets(adj))
+            p_live = M.apply_standalone(P, names, p_live, sc_, adj)[0]
+            for cd, pv, ev, epv, scv, plv, ow in zip(cands, p_, e_, ep_, sc_, p_live, own_):
                 cd.update(p=float(pv), exp_ret=float(ev), e_pct=float(epv), score=float(scv), live_p=float(plv))
+                if ow:
+                    cd["standalone"] = True
         except Exception as e:
             errors.append(f"pooled model failed, using per-strategy scores: {e!r}"[:200])
             pm = None
@@ -240,7 +245,7 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
         cd["grade"] = M.grade(cd["score"], cd["p"], P["grading"])
         cd["model_p"] = cd["p"]
         cd["p"] = shown = cd.get("live_p", cd["model_p"])  # the win estimate carries the live record in full
-        for row in table:  # Win % = how often past setups with this score actually won
+        for row in ([] if cd.get("standalone") else table):  # Win % = how often past setups with this score actually won
             if row["lo"] <= cd["score"] < row["hi"]:
                 n = row["n"]
                 cd["p"] = (row["win"] * n + shown * 30) / (n + 30)
@@ -265,7 +270,10 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
         b = best.get(cd["ticker"])
         if b is None or cd["score"] > b["score"]:
             best[cd["ticker"]] = cd
-    ranked = sorted(best.values(), key=lambda x: (-x["score"], -x["p"]))
+    # equal score and win estimate (own-record setups on the same day all share theirs): the stronger trend first.
+    # Within Fear-Fade ETF days the third furthest above the 50-day average won as often and earned about twice
+    # the average of the third nearest it, 2008-2021 and 2022-now alike; the replays keep ties unordered.
+    ranked = sorted(best.values(), key=lambda x: (-x["score"], -x["p"], -float((x.get("feats") or {}).get("dist50") or 0.0)))
     # weekly minimum: from Wednesday's post-close scan on, top the week up to `min_week`
     # setups with the best grade-A candidates (clearly labelled as such)
     G = P["grading"]
@@ -414,6 +422,11 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
             "partial_bar": bool(partial_bar),
         }
         doc["grade_kind"] = "topup" if cd.get("topup") else ("aplus" if cd["grade"] == "A+" else "watch")
+        if cd.get("standalone"):  # A+ on the strategy's own tested record, not the pooled model
+            sa = M.standalone_of(P, cd["name"]) or {}
+            doc["standalone"] = True
+            doc["grade_note"] = sa.get("note") or ("A+ on this strategy's own tested record in today's market condition, "
+                                                   "not on the pooled model's score.")
         if cd.get("tier") == "ext":  # from the wider list: say so, with what makes it tradable
             doc["tier"] = "ext"
             cap, dvm = (u.get("cap_b") if u is not None else None), (u.get("dv_m") if u is not None else None)
@@ -1341,6 +1354,8 @@ def setup_block(e: dict, rank) -> list[str]:
         out.append(f"   TOP-UP   {e['topup_note']}")
     if e.get("condition_note"):
         out.append(f"   MARKET   {e['condition_note']}")
+    if e.get("grade_note"):
+        out.append(f"   GRADE    {e['grade_note']}")
     if e.get("list_note"):
         out.append(f"   LIST     {e['list_note']}")
     if e.get("capacity_note"):

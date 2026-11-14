@@ -66,7 +66,7 @@ INDEXES = {"^VIX": "CBOE Volatility Index"}
 # and more distinct ETFs. Every item carries a tier: "core" (the original universe) or "ext". Market context
 # (breadth, relative-strength ranks) is always measured on the core tier, so core signals are identical with
 # or without the extension, and the extension can be judged, paused or narrowed on its own record.
-DEFAULT_MODE = "core"      # "core" | "wide"; the workflow input or UNIVERSE env overrides it
+DEFAULT_MODE = "wide"      # "core" | "wide"; the workflow input or UNIVERSE env overrides it
 
 NASDAQ_SCREENER = "https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=25&offset=0&download=true"
 ISHARES = {  # fallback when the screener is unreachable: index-fund holdings (no market cap or volume)

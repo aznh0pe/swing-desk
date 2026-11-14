@@ -174,7 +174,7 @@ def base_masks(ind: dict, P: dict) -> dict:
             liquid &= ~is_ext
         elif st_ == "aplus_bull":  # no extension-tier setups on days SPY closed under its 200-day average
             bear = ~(ind["market"]["spy_above200"].reindex(c.index) >= 0.5)
-            liquid &= ~is_ext.where(bear.values[:, None], False)
+            liquid &= ~pd.DataFrame(is_ext.values & bear.values[:, None], index=c.index, columns=c.columns)
     return {"liquid": liquid, "is_stock": is_stock, "is_etf": is_etf & tradable,
             "is_lev": is_lev}
 

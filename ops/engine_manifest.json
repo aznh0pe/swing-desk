@@ -1,5 +1,5 @@
 {
- "fingerprint": "e194772a8eae",
+ "fingerprint": "2020e9ef9909",
  "files": [
   "engine/__init__.py",
   "engine/backtest.py",
@@ -8,6 +8,7 @@
   "engine/data.py",
   "engine/indicators.py",
   "engine/learnlog.py",
+  "engine/lessons.py",
   "engine/model.py",
   "engine/monitor.py",
   "engine/portfolio.py",
