@@ -3,7 +3,8 @@
     python3 ops/build_prompts.py --owner aznh0pe --artifact https://claude.ai/artifact/... --out ops/generated
 
 Writes one prompt per scheduled task: premarket, preclose, postclose, manual (Scan now button),
-learning (daily review + strategy research), weekly (recalibration), and a backup check for each
+learning (daily review + strategy research), weekly (recalibration), checks (the promotion check and
+the wider-list tier check on demand, for a one-off run), and a backup check for each
 scheduled one (backup_*) that re-runs it when it failed or never ran.
 """
 from __future__ import annotations
@@ -218,7 +219,7 @@ def main():
         txt = fill(txt, common)
         txt = txt.replace("{MODE}", vals["MODE"])
         (out / f"{name}.md").write_text(txt)
-    for name in ("learning", "weekly"):
+    for name in ("learning", "weekly", "checks"):   # checks: the promotion and tier checks on demand (ops/checks_prompt.md)
         (out / f"{name}.md").write_text(fill((HERE / f"{name}_prompt.md").read_text(), common))
     backup_t = (HERE / "backup_prompt.md").read_text()
     for name, vals in BACKUPS.items():

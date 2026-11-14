@@ -284,6 +284,8 @@ def _growth_pick(post: pd.DataFrame, near: list, base, topup_min_week: int, risk
 
 # ----------------------------------------------------------------------------- weekly top-ups
 TOPUP_MIN_TRADES = 150   # filled top-ups 2022-now before a top-up rule can be chosen
+TOPUP_WIN_FLOOR = 0.68   # a top-up rule must have won at least this often on 2022-now data...
+TOPUP_WIN_BAND = 0.08    # ...and within this of the best rule's win rate, to be chosen for its weekly coverage
 TOPUP_MIN_AVG = 0.004    # their average trade must clear +0.4%
 TOPUP_MIN_PF = 1.25      # and their profit factor 1.25
 TOPUP_STRAT_MIN = 30     # top-ups of one strategy before its own result counts
@@ -357,9 +359,9 @@ def _topup_pwins(pw: float) -> list:
 
 
 def _choose_topup_rule(s: pd.DataFrame, sc: float, pw: float, min_week: int, min_trades: int = TOPUP_MIN_TRADES):
-    """The top-up bar with the highest win rate among rules whose replayed top-ups clear the trade-count,
-    average-trade and profit-factor floors; among rules within 1.5 points of the best, the one that keeps
-    the most weeks at the minimum. None if no rule clears the floors."""
+    """The top-up bar that keeps the most weeks at the minimum, among rules whose replayed top-ups clear the
+    trade-count, average-trade and profit-factor floors, win at least TOPUP_WIN_FLOOR and stay within
+    TOPUP_WIN_BAND of the best rule's win rate. None if no rule clears the floors."""
     cands = []
     for floor in range(max(40, int(sc) - 30), int(sc), 2):
         for tpw in _topup_pwins(pw):
@@ -370,9 +372,15 @@ def _choose_topup_rule(s: pd.DataFrame, sc: float, pw: float, min_week: int, min
             cands.append((st["win_rate"], float((wk >= min_week).mean()) if len(wk) else 0.0, floor, tpw, st, pk, wk))
     if not cands:
         return None
+    # Top-ups exist to keep the week on pace, and the pace picks the best-scored setup first, so a lower floor only
+    # adds setups in weeks the higher floor leaves short. Nov 14, 2026: choosing the highest win rate (within 1.5
+    # points) picked a 76%-win rule that reached five setups in 39% of weeks over a 69%-win rule that reached 88%,
+    # and the recalibrated setup lost the live-versus-recalibrated check on coverage alone while beating the live
+    # one on win rates, growth and drawdown. Now: the rule that keeps the most weeks at the minimum among rules that
+    # win at least TOPUP_WIN_FLOOR and stay within TOPUP_WIN_BAND of the best; the higher win rate breaks ties.
     top = max(c[0] for c in cands)
-    near = [c for c in cands if c[0] >= top - 0.015]
-    return max(near, key=lambda c: (c[1], c[0]))
+    near = [c for c in cands if c[0] >= max(TOPUP_WIN_FLOOR, top - TOPUP_WIN_BAND)] or [c for c in cands if c[0] >= top - 0.015]
+    return max(near, key=lambda c: (round(c[1], 2), c[0]))
 
 
 def _topup_exclusions(pk: pd.DataFrame, wr: float) -> dict:
@@ -1227,7 +1235,8 @@ TIERS = {"min_aplus": 100,        # A+ setups on the extension tier (2022-now) b
          "slack_aplus": 0.02,     # its A+ win rate may trail the core's by at most this (2022-now and 2024-now)
          "slack_sent": 0.005,     # the desk with it: win rate of every setup sent may drop at most half a point
          "slack_topup": 0.01,     # ... and the weekly top-ups' win rate at most one point
-         "slack_growth": 0.005, "slack_dd": 0.02}
+         "slack_growth": 0.005, "slack_dd": 0.02,
+         "strat_min": 100, "strat_gap": 0.05}   # a strategy whose A+ setups there trail its own on the core by 5+ points sits out
 
 
 def _tier_rows(post: pd.DataFrame, G: dict, late=CAL_END) -> dict:
@@ -1260,7 +1269,8 @@ def _tier_pool(post: pd.DataFrame, G: dict, status: str, mult: float) -> pd.Data
         if status == "aplus_bull":
             keep &= core | (post["spy_above200"].astype(float) >= 0.5)
     out = post[keep]
-    return out.assign(size_mult=np.where(out["tier"] == "ext", float(mult), 1.0))
+    # the scan ranks the wider list after the original one (scan.build_entries), so it only fills free slots
+    return out.assign(size_mult=np.where(out["tier"] == "ext", float(mult), 1.0), rank_last=(out["tier"] == "ext").values)
 
 
 def tier_checks(rows: dict, core: dict, new: dict) -> list:
@@ -1338,6 +1348,20 @@ def run_tiers(data_dir, state_dir, out_dir, split="2022-01-01", log=print, now=N
                 "risk_pct": float(st_.get("risk_pct") or P["risk"]["risk_pct"]),
                 "max_position_pct": float(st_.get("max_position_pct") or P["risk"]["max_position_pct"])}
         rows = _tier_rows(post, G)
+        # strategy by strategy first: one that works on the original list but clearly not on the wider one (100+ A+
+        # setups there, 5+ points behind its own A+ setups on the original list) does not trade the wider list
+        excl = {}
+        for n_, e_ in rows["ext"]["by_strategy"].items():
+            c_ = rows["core"]["by_strategy"].get(n_) or {}
+            if e_.get("trades", 0) >= TIERS["strat_min"] and c_.get("trades", 0) >= 30 \
+                    and (e_.get("win_rate") or 0) < (c_.get("win_rate") or 0) - TIERS["strat_gap"]:
+                excl[n_] = (f"its A+ setups on the wider list won {100 * e_['win_rate']:.0f}% of {e_['trades']} against "
+                            f"{100 * c_['win_rate']:.0f}% of {c_['trades']} on the original list")
+        if excl:
+            post = post[~((post["tier"] == "ext") & post["strategy"].isin(list(excl)))]
+            rows_all, rows = rows, _tier_rows(post, G)
+            rows["ext"]["by_strategy_before_exclusions"] = rows_all["ext"]["by_strategy"]
+            log("  not on the wider list: " + "; ".join(f"{k} ({v})" for k, v in excl.items()))
         slim = lambda d: {k: d.get(k) for k in ("aplus", "topups", "sent", "sent_late", "weeks_at_min", "setups_per_week", "account")}
         core = desk_replay(_tier_pool(post, G, "off", 1.0), G, desk_min, acct)
         tried, pick = [], None
@@ -1364,10 +1388,16 @@ def run_tiers(data_dir, state_dir, out_dir, split="2022-01-01", log=print, now=N
             how = {"on": "trades like the original list", "aplus_only": "sends A+ setups only (no weekly top-ups)",
                    "aplus_bull": "sends A+ setups only, and only while SPY is above its 200-day average"}[status]
             size = "" if mult >= 1 else f", at {round(100 * mult)}% of the usual position size"
-            less = [x for x in tried if not x["ok"]]
+            less, seen_ = [], set()
+            for x in tried:   # one line per looser way (its smallest size tried says what could not be fixed by size)
+                if not x["ok"] and x["status"] != status:
+                    seen_.add(x["status"])
+                    less = [y for y in less if y["status"] != x["status"]] + [x]
+            if mult < 1:
+                less += [x for x in tried if not x["ok"] and x["status"] == status][:1]
             why = (" Looser ways were replayed first and missed: " + "; ".join(
-                f"{S.TIER_LABEL[x['status']]}{'' if x['size_mult'] >= 1 else ' at ' + str(round(100 * x['size_mult'])) + '% size'} "
-                f"({', '.join(x['missed'])})" for x in less[:4]) + ".") if less else ""
+                f"{S.TIER_LABEL[x['status']]}{' at any size' if x['status'] != status else ' at full size'} "
+                f"({', '.join(m[0].lower() + m[1:] for m in x['missed'])})" for x in less) + ".") if less else ""
             reason = (f"The wider list {how}{size}: {own}, and the desk replayed with it kept its win rates, growth and drawdown "
                       f"(account growth {100 * (d['account'].get('cagr') or 0):.1f}% a year vs {100 * (core['account'].get('cagr') or 0):.1f}%, "
                       f"worst drawdown {100 * (d['account'].get('max_dd') or 0):.1f}% vs {100 * (core['account'].get('max_dd') or 0):.1f}%).{why}")
@@ -1377,8 +1407,11 @@ def run_tiers(data_dir, state_dir, out_dir, split="2022-01-01", log=print, now=N
             reason = (f"The wider list stays paused: {own}, but no way of trading it kept the desk's results "
                       f"(last tried: {tried[-1]['status']} missed {', '.join(tried[-1]['missed'])})." if tried else
                       "The wider list stays paused: nothing could be replayed.")
+        if excl and status != "off":
+            reason += (" Strategies that sit out on the wider list: " + "; ".join(
+                f"{S.meta(k, P)['label']} ({v})" for k, v in excl.items()) + ".")
         block = {"ext": {"status": status, "size_mult": mult, "checked": stamp, "by": "weekly tier check", "reason": reason,
-                         "checks": checks, "tiers": rows, "tried": [{k: v for k, v in x.items() if k != "desk"} for x in tried],
+                         "excluded": excl, "checks": checks, "tiers": rows, "tried": [{k: v for k, v in x.items() if k != "desk"} for x in tried],
                          "desk": {"core": slim(core), "with_ext": slim(d) if d else None}, "universe": uni}}
         log(f"extension tier: {status} x{mult}. {reason}")
     line = "Wider list (weekly tier check): " + block["ext"]["reason"]

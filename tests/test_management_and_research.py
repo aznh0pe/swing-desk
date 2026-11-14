@@ -497,6 +497,11 @@ def test_topup_replay_follows_the_weekly_pace_and_is_tuned_on_its_own():
     pk_bad = pd.DataFrame({"strategy": ["BAD"] * 40 + ["GOOD"] * 160, "filled": True,
                            "ret": [0.02] * 12 + [-0.02] * 28 + [0.02] * 120 + [-0.02] * 40})
     assert set(CB._topup_exclusions(pk_bad, 0.66)) == {"BAD"}
+    # the rule is chosen for weekly coverage among rules that win often enough (Nov 14, 2026): a strict rule that
+    # wins a little more but leaves most weeks short loses to a looser one that keeps the pace
+    assert res["oos_topup_win_rate"] >= CB.TOPUP_WIN_FLOOR
+    strict = CB.simulate_topups(s, 95, 0.78, 93, 0.5, 5)
+    assert res["oos_weeks_at_min"] >= round(float((strict[1] >= 5).mean()), 3)
     # the top-up win bar is its own decision: an absolute grid from 50%, never above the A+ bar (Nov 14, 2026)
     assert CB._topup_pwins(0.62) == [0.5, 0.54, 0.58, 0.62]
     assert min(CB._topup_pwins(0.72)) == 0.5 and max(CB._topup_pwins(0.72)) == 0.72 and 0.54 in CB._topup_pwins(0.72)

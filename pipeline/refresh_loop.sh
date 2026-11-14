@@ -2,12 +2,13 @@
 # Fetch market data and publish the `data` branch: one pass, or (an `auto` run on a trading day between 6:30 AM
 # and 40 minutes after the close, ET) a pass every 10 minutes until then. See pipeline/keeper_window.py for why.
 # Env: MODE (auto | daily | ...), PUSH_URL (authenticated repo URL), GH_TOKEN (for the hand-over), REPO,
-# DATA_BRANCH (default data), UNIVERSE (core | wide; default set in pipeline/universe.py).
+# DATA_BRANCH (default data), UNIVERSE (core | wide; default set in pipeline/universe.py). A hand-over test sets
+# LOOP_LIMIT_MIN=1 and KEEPER_FORCE=1 (workflow input test_handover): one pass, then the hand-over, on any day.
 set -u
 MODE="${MODE:-auto}"
 BRANCH="${DATA_BRANCH:-data}"   # the live feed; a trial universe is built on another branch first
 START=$(date +%s)
-LIMIT=$((330 * 60))   # hand over to a new run well before GitHub's 6-hour job limit
+LIMIT=$(( ${LOOP_LIMIT_MIN:-330} * 60 ))   # hand over to a new run well before GitHub's 6-hour job limit (LOOP_LIMIT_MIN: tests)
 FAILS=0
 
 pass() {

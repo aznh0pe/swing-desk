@@ -23,6 +23,9 @@ on:
       universe:
         description: "core | wide (blank: the default in pipeline/universe.py)"
         default: ""
+      test_handover:
+        description: "yes = one pass, then hand over to a new run at once (tests the 6-hour hand-over on any day; use a trial branch)"
+        default: ""
   push:
     branches: [main]
     paths: ["pipeline/**", ".github/workflows/market-data.yml"]
@@ -81,4 +84,6 @@ jobs:
           REPO: ${{ github.repository }}
           DATA_BRANCH: ${{ github.event.inputs.branch || 'data' }}
           UNIVERSE: ${{ github.event.inputs.universe || '' }}
+          LOOP_LIMIT_MIN: ${{ github.event.inputs.test_handover == 'yes' && '1' || '330' }}
+          KEEPER_FORCE: ${{ github.event.inputs.test_handover == 'yes' && '1' || '0' }}
         run: bash pipeline/refresh_loop.sh

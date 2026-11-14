@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime as dt
 import pathlib
+import os
 import sys
 from zoneinfo import ZoneInfo
 
@@ -44,6 +45,6 @@ def keep_running(now_et: dt.datetime) -> bool:
 
 if __name__ == "__main__":
     now = dt.datetime.now(ET)
-    on = keep_running(now)
+    on = keep_running(now) or os.environ.get("KEEPER_FORCE") == "1"   # KEEPER_FORCE: the hand-over test only
     print(f"{now:%Y-%m-%d %H:%M} ET: refresh loop {'on' if on else 'off'}")
     sys.exit(0 if on else 1)

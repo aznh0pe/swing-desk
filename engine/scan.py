@@ -164,6 +164,7 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
     open_tickers = {v["doc"].get("ticker") for v in state["trades"].values()
                     if v["doc"].get("status") == "open"}
     tiers = ind["tier"].to_dict() if ind.get("tier") is not None else {}
+    ext_out = set(S.ext_rule(P)["excluded"])   # strategies that sit out on the wider list (weekly tier check)
     cands = []
     for name, plan in plans.items():
         try:
@@ -205,6 +206,8 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
                     else:
                         target = entry + tg["mult"] * atr
                     rr = (target - entry) / max(entry - stop, 1e-6)
+                    if name in ext_out and tiers.get(tk) == "ext":
+                        continue
                     cands.append({"name": name, "j": int(j), "ticker": tk, "tier": str(tiers.get(tk, "core")), "entry": entry,
                                   "stop": stop, "target": target, "rr": rr, "p": float(p[k]), "live_p": float(p_full[k]),
                                   "atr": atr, "close": close, "feats": feats.iloc[k].to_dict(),
@@ -273,7 +276,10 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
     # equal score and win estimate (own-record setups on the same day all share theirs): the stronger trend first.
     # Within Fear-Fade ETF days the third furthest above the 50-day average won as often and earned about twice
     # the average of the third nearest it, 2008-2021 and 2022-now alike; the replays keep ties unordered.
-    ranked = sorted(best.values(), key=lambda x: (-x["score"], -x["p"], -float((x.get("feats") or {}).get("dist50") or 0.0)))
+    # The wider list ranks after the original list: its setups are served and fill the slots the original list leaves
+    # free, but never displace it (the weekly tier check replays the desk exactly this way).
+    ranked = sorted(best.values(), key=lambda x: (x.get("tier") == "ext", -x["score"], -x["p"],
+                                                  -float((x.get("feats") or {}).get("dist50") or 0.0)))
     # weekly minimum: from Wednesday's post-close scan on, top the week up to `min_week`
     # setups with the best grade-A candidates (clearly labelled as such)
     G = P["grading"]

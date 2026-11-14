@@ -128,9 +128,10 @@ TIER_LABEL = {"on": "trading like the original list", "aplus_only": "A+ setups o
 
 def ext_rule(P: dict) -> dict:
     """How the extension tier (the daily-screened stocks and ETFs beyond the original list) trades:
-    {"status", "size_mult"}. status: "on"; "aplus_only" (its setups are sent only at the A+ bar, never as weekly
+    {"status", "size_mult", "excluded"}. status: "on"; "aplus_only" (its setups are sent only at the A+ bar, never as weekly
     top-ups); "aplus_bull" (A+ only, and only while SPY is above its 200-day average); or "off". size_mult scales
-    its position size (mid-caps move more).
+    its position size (mid-caps move more); excluded = strategies that sit out on it (their A+ setups there trail
+    their own on the original list).
     Two records decide and the stricter wins: P["tiers"]["ext"] from the weekly tier check (the live model and
     bars replayed on tickers they were never tuned on) and P["tiers_live"]["ext"] from the tier's own live record
     (daily review). With no check on record the tier is off: nothing trades untested."""
@@ -144,7 +145,7 @@ def ext_rule(P: dict) -> dict:
         mult = min(1.0, max(0.25, float(t.get("size_mult", 1.0)))) * min(1.0, max(0.25, float(lv.get("size_mult", 1.0))))
     except Exception:
         mult = 1.0
-    return {"status": status, "size_mult": round(mult, 3)}
+    return {"status": status, "size_mult": round(mult, 3), "excluded": sorted((t.get("excluded") or {}).keys())}
 
 
 def ext_status(P: dict) -> str:

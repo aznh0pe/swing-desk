@@ -85,7 +85,7 @@ def test_large_panels_store_derived_frames_in_float32(wide):
 # ----------------------------------------------------------------------------- how the wider list trades
 def test_wider_list_status_is_the_stricter_of_the_tested_and_the_live_record():
     assert S.ext_rule({})["status"] == "off"                                           # untested: nothing trades
-    assert S.ext_rule({"tiers": {"ext": {"status": "on", "size_mult": 0.75}}}) == {"status": "on", "size_mult": 0.75}
+    assert S.ext_rule({"tiers": {"ext": {"status": "on", "size_mult": 0.75, "excluded": {"X": "why"}}}}) == {"status": "on", "size_mult": 0.75, "excluded": ["X"]}
     P = {"tiers": {"ext": {"status": "aplus_bull", "size_mult": 0.75}}, "tiers_live": {"ext": {"status": "off"}}}
     assert S.ext_rule(P)["status"] == "off"                                             # its own record pauses it
     P["tiers_live"] = {}

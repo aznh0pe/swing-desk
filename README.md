@@ -1,8 +1,9 @@
 # Swing Desk
 
-A rules-based swing-trading desk for a small account: it scans ~600 liquid US stocks and
-ETFs several times a day, sends only A+ setups (limit entry, stop, target, size, hold
-window, exit rule), watches open positions for early exits, and learns from every alert.
+A rules-based swing-trading desk for a small account: it scans about 1,750 liquid US stocks
+and ETFs several times a day (a core list of ~600 that every rule is calibrated on, plus a
+wider list screened fresh every day), sends only A+ setups (limit entry, stop, target, size,
+hold window, exit rule), watches open positions for early exits, and learns from every alert.
 
 **Not financial advice.** These are model-generated signals from backtested rules. Win
 percentages are estimates and can be wrong. You place and manage every order yourself.
@@ -36,6 +37,28 @@ rate >= 58%, profit factor >= 1.30 and average trade > +0.20%, then out-of-sampl
 factor >= 1.05 with a win rate no more than 8 points below in-sample. The weekly
 recalibration re-tests all of them; the daily review pauses one whose live record drops
 below 50%. The reasons are written into the backtest report and shown in the Strategy lab.
+
+### The wider list, own-record strategies and lessons (Nov 14, 2026)
+
+- **Two tiers** (`pipeline/universe.py`, `engine/data.py`). The *core* tier (S&P 500 members, extra large caps, ~70 ETFs)
+  is what every rule, the model and the bars are calibrated on. The *extension* tier is screened daily from every
+  US-listed stock (market value $2B+, price $8+, $25M+ traded a day, with looser lines to stay and a 90-day grace
+  period) plus ~85 more ETFs. Relative strength and breadth are measured on the core tier, so adding tickers cannot
+  move a core signal. `python -m engine.calibrate tiers` (weekly) replays the live setup on the extension tier,
+  tickers the model never saw, and decides how it trades: like the core, A+ only, A+ only in bull markets (each at
+  the largest position size that keeps the desk's win rates, growth and drawdown), or not at all. Its own live
+  record can pause it. With no check on record it does not trade.
+- **Own-record A+ strategies** (`engine/model.py` `apply_standalone`, `engine/calibrate.py` `STANDALONE`). The pooled
+  model grades on market stress, so calm bull markets (61% of days) gave almost no A+ setups. A strategy whose own
+  tested record is A+ grade in named market conditions (75%+ in 2008-2021 and on unseen 2022-now data, by trade and
+  by signal day, enough signal days, no collapsed year) is graded on that record there, if replaying the desk with it
+  passes the promotion gate. Re-checked every Saturday and kept out of the pooled model fit.
+- **Lessons** (`engine/lessons.py`, database document `learning/lessons`). The conclusions that outlive any one idea
+  (a measured ceiling, a rule that did not help, a trap) are kept for good and printed with the research queue.
+  `python -m engine.research states --spec F --data D --out O` shows in which market and stock states a simple trade
+  wins in both periods: the starting point for the desk's own designs.
+- **Independent evidence** (`engine/learnlog.py` `CLUSTER_RHO`). Results from the same week are correlated, so live
+  records are weighted by independent evidence: 14 wins in one rebound week count as about 3.
 
 What the backtest assumes (`engine/backtest.py`): a limit order fills only when the session's
 low trades through it (a touch is not a fill); stops and time exits pay 0.05% slippage (or your

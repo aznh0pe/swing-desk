@@ -235,7 +235,13 @@ def portfolio(trades: pd.DataFrame, start_capital=5000.0, max_open=5, risk_pct=1
         return {"trades": 0}
     if score_col not in tr:
         tr[score_col] = -tr["rsi2"]
-    tr = tr.sort_values(["signal_date", score_col], ascending=[True, False])
+    # "rank_last" (optional): rows marked True are taken only after every other setup of the day (the wider list
+    # fills slots the original list leaves free; it never displaces it)
+    if "rank_last" in tr.columns:
+        tr = tr.assign(_rl=tr["rank_last"].fillna(False).astype(bool)).sort_values(
+            ["signal_date", "_rl", score_col], ascending=[True, True, False])
+    else:
+        tr = tr.sort_values(["signal_date", score_col], ascending=[True, False])
     has_mult = "size_mult" in tr.columns
     capital = start_capital
     open_pos = []  # (exit_date, pnl)
