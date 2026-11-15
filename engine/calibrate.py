@@ -1264,10 +1264,11 @@ TIERS = {"min_aplus": 100,        # A+ setups on the extension tier (2022-now) b
          "strat_min": 100, "strat_gap": 0.05}   # a strategy whose A+ setups there trail its own on the core by 5+ points sits out
 
 
-def _tier_rows(post: pd.DataFrame, G: dict, late=CAL_END) -> dict:
+def _tier_rows(post: pd.DataFrame, G: dict, late=CAL_END, add: float = 0.0) -> dict:
+    """A+ setups by tier. add = extra model win odds the extension tier's setups must clear (its own A+ bar)."""
     sc, pw = float(G["aplus_score"]), float(G["aplus_pwin"])
     s = _one_per_ticker(post)
-    ap = s[(s["score"] >= sc) & (s["p"] >= pw)]
+    ap = s[(s["score"] >= sc) & (s["p"] >= pw) & ((s["tier"] != "ext") | (s["p"] >= pw + float(add)))]
     out = {}
     for tier in ("core", "ext"):
         g = ap[ap["tier"] == tier]
@@ -1279,9 +1280,13 @@ def _tier_rows(post: pd.DataFrame, G: dict, late=CAL_END) -> dict:
 
 
 TIER_MULTS = (1.0, 0.75, 0.6, 0.5)   # position size on the extension tier, largest that passes first
+# The extension tier's own A+ bar: extra model win odds its setups must clear, lowest that passes first. The model
+# was never tuned on these tickers, so when its A+ setups there trail the original list's at the desk's bar, a
+# higher bar is tried before the list is paused (Nov 14, 2026: 78.7% of 4,973 against 80.9% paused it outright).
+TIER_PWIN_ADDS = (0.0, 0.02, 0.04, 0.06, 0.08, 0.10)
 
 
-def _tier_pool(post: pd.DataFrame, G: dict, status: str, mult: float) -> pd.DataFrame:
+def _tier_pool(post: pd.DataFrame, G: dict, status: str, mult: float, add: float = 0.0) -> pd.DataFrame:
     """The signals the desk would see with the extension tier under `status` (see strategies.ext_rule)."""
     sc, pw = float(G["aplus_score"]), float(G["aplus_pwin"])
     core = post["tier"] == "core"
@@ -1290,7 +1295,8 @@ def _tier_pool(post: pd.DataFrame, G: dict, status: str, mult: float) -> pd.Data
     elif status == "on":
         keep = core | True
     else:
-        keep = core | ((post["score"] >= sc) & (post["p"] >= pw))   # below the A+ bar its rows are simply not there
+        # below its A+ bar (the desk's, plus `add` win odds) its rows are simply not there
+        keep = core | ((post["score"] >= sc) & (post["p"] >= pw + float(add)))
         if status == "aplus_bull":
             keep &= core | (post["spy_above200"].astype(float) >= 0.5)
     out = post[keep]
@@ -1390,36 +1396,53 @@ def run_tiers(data_dir, state_dir, out_dir, split="2022-01-01", log=print, now=N
         slim = lambda d: {k: d.get(k) for k in ("aplus", "topups", "sent", "sent_late", "weeks_at_min", "setups_per_week", "account")}
         core = desk_replay(_tier_pool(post, G, "off", 1.0), G, desk_min, acct)
         tried, pick = [], None
-        for status in ("on", "aplus_only", "aplus_bull"):
-            for mult in TIER_MULTS:
-                d = desk_replay(_tier_pool(post, G, status, mult), G, desk_min, acct)
-                checks = tier_checks(rows, core, d)
-                ok = all(c["ok"] for c in checks)
-                tried.append({"status": status, "size_mult": mult, "ok": ok, "missed": [c["label"] for c in checks if not c["ok"]],
-                              "desk": slim(d)})
-                log(f"  {status} x{mult}: {'passes' if ok else 'misses ' + '; '.join(tried[-1]['missed'])}")
-                if ok:
-                    pick = (status, mult, checks, d)
+        rows0, add_pick = rows, 0.0   # rows0: at the desk's own A+ bar, for the record
+        for add in TIER_PWIN_ADDS:
+            rows_a = rows0 if add == 0 else _tier_rows(post, G, add=add)
+            own_fail = False
+            for status in (("on", "aplus_only", "aplus_bull") if add == 0 else ("aplus_only", "aplus_bull")):
+                for mult in TIER_MULTS:
+                    d = desk_replay(_tier_pool(post, G, status, mult, add), G, desk_min, acct)
+                    checks = tier_checks(rows_a, core, d)
+                    ok = all(c["ok"] for c in checks)
+                    tried.append({"status": status, "size_mult": mult, "pwin_add": add, "ok": ok,
+                                  "missed": [c["label"] for c in checks if not c["ok"]], "desk": slim(d)})
+                    log(f"  {status} x{mult}{f' bar +{add:.2f}' if add else ''}: {'passes' if ok else 'misses ' + '; '.join(tried[-1]['missed'])}")
+                    if ok:
+                        pick = (status, mult, checks, d)
+                        break
+                    own_fail = any(c["key"].startswith("aplus_") and not c["ok"] for c in checks)
+                    if own_fail:
+                        break   # its own A+ setups fail at this bar: no size or status fixes that, a higher bar may
+                if pick or own_fail:
                     break
-                if any(c["key"].startswith("aplus_") and not c["ok"] for c in checks):
-                    break   # its own A+ setups fail: no size fixes that
-            if pick or any(c["key"].startswith("aplus_") and not c["ok"] for c in checks):
+            if pick:
+                rows, add_pick = rows_a, add
                 break
+            if (rows_a["ext"]["aplus"].get("trades") or 0) < TIERS["min_aplus"]:
+                break   # too few setups left to judge: a higher bar only leaves fewer
         ea, ca = rows["ext"]["aplus"], rows["core"]["aplus"]
         own = (f"its A+ setups won {100 * (ea['win_rate'] or 0):.1f}% of {ea['trades']} on tickers the model was never tuned on "
                f"(original list: {100 * (ca['win_rate'] or 0):.1f}% of {ca['trades']})")
+        if add_pick:
+            e0 = rows0["ext"]["aplus"]
+            pw_ = float(G["aplus_pwin"])
+            own = (f"at the desk's own A+ bar its setups won {100 * (e0['win_rate'] or 0):.1f}% of {e0['trades']} on tickers the model "
+                   f"was never tuned on, behind the original list's {100 * (ca['win_rate'] or 0):.1f}% of {ca['trades']}, so it gets a "
+                   f"higher bar (model win odds of {100 * (pw_ + add_pick):.0f}%+ instead of {100 * pw_:.0f}%+), where they won "
+                   f"{100 * (ea['win_rate'] or 0):.1f}% of {ea['trades']}")
         if pick:
             status, mult, checks, d = pick
             how = {"on": "trades like the original list", "aplus_only": "sends A+ setups only (no weekly top-ups)",
                    "aplus_bull": "sends A+ setups only, and only while SPY is above its 200-day average"}[status]
             size = "" if mult >= 1 else f", at {round(100 * mult)}% of the usual position size"
             less, seen_ = [], set()
-            for x in tried:   # one line per looser way (its smallest size tried says what could not be fixed by size)
+            for x in [y for y in tried if y.get("pwin_add", 0) == add_pick]:   # one line per looser way at the bar chosen
                 if not x["ok"] and x["status"] != status:
                     seen_.add(x["status"])
                     less = [y for y in less if y["status"] != x["status"]] + [x]
             if mult < 1:
-                less += [x for x in tried if not x["ok"] and x["status"] == status][:1]
+                less += [x for x in tried if not x["ok"] and x["status"] == status and x.get("pwin_add", 0) == add_pick][:1]
             why = (" Looser ways were replayed first and missed: " + "; ".join(
                 f"{S.TIER_LABEL[x['status']]}{' at any size' if x['status'] != status else ' at full size'} "
                 f"({', '.join(m[0].lower() + m[1:] for m in x['missed'])})" for x in less) + ".") if less else ""
@@ -1429,21 +1452,27 @@ def run_tiers(data_dir, state_dir, out_dir, split="2022-01-01", log=print, now=N
         else:
             status, mult, d = "off", 1.0, None
             checks = tier_checks(rows, core, tried[-1]["desk"]) if tried else []
-            reason = (f"The wider list stays paused: {own}, but no way of trading it kept the desk's results "
-                      f"(last tried: {tried[-1]['status']} missed {', '.join(tried[-1]['missed'])})." if tried else
+            hi = max((x.get("pwin_add", 0) for x in tried), default=0)
+            reason = (f"The wider list stays paused: {own}, but no way of trading it kept the desk's results"
+                      + (f", even with its own A+ bar raised by up to {100 * hi:.0f} points of model win odds" if hi else "")
+                      + f" (last tried: {S.TIER_LABEL[tried[-1]['status']]} missed {', '.join(m[0].lower() + m[1:] for m in tried[-1]['missed'])})." if tried else
                       "The wider list stays paused: nothing could be replayed.")
         if excl and status != "off":
             reason += (" Strategies that sit out on the wider list: " + "; ".join(
                 f"{S.meta(k, P)['label']} ({v})" for k, v in excl.items()) + ".")
-        block = {"ext": {"status": status, "size_mult": mult, "checked": stamp, "by": "weekly tier check", "reason": reason,
+        block = {"ext": {"status": status, "size_mult": mult, "pwin_add": float(add_pick) if status != "off" else 0.0,
+                         "checked": stamp, "by": "weekly tier check", "reason": reason,
                          "excluded": excl, "checks": checks, "tiers": rows, "tried": [{k: v for k, v in x.items() if k != "desk"} for x in tried],
                          "desk": {"core": slim(core), "with_ext": slim(d) if d else None}, "universe": uni}}
-        log(f"extension tier: {status} x{mult}. {reason}")
+        if add_pick and status != "off":
+            block["ext"]["tiers_at_desk_bar"] = {"ext": {k: rows0["ext"].get(k) for k in ("aplus", "aplus_late")}}
+        log(f"extension tier: {status} x{mult}{f' bar +{add_pick:.2f}' if add_pick else ''}. {reason}")
     line = "Wider list (weekly tier check): " + block["ext"]["reason"]
     (out / "tiers.json").write_text(json.dumps(block, default=str))
     (out / "tiers_report.json").write_text(json.dumps({"tiers": block, "changelog": line}, indent=1, default=str))
     prev = ((P.get("tiers") or {}).get("ext") or {})
-    changed = (prev.get("status"), prev.get("size_mult")) != (block["ext"]["status"], block["ext"].get("size_mult"))
+    changed = ((prev.get("status"), prev.get("size_mult"), float(prev.get("pwin_add") or 0))
+               != (block["ext"]["status"], block["ext"].get("size_mult"), float(block["ext"].get("pwin_add") or 0)))
     if pdoc is not None:  # the weekly recalibration's document: add the block, it is saved with everything else
         tgt = pdoc.get("params") if isinstance(pdoc.get("params"), dict) else pdoc
         tgt["tiers"] = block
@@ -1457,7 +1486,8 @@ def run_tiers(data_dir, state_dir, out_dir, split="2022-01-01", log=print, now=N
             base["tiers"] = block
             base["version"], base["updated"] = int(time.time()), stamp
             (out / "doc_params.json").write_text(json.dumps({"params": base, "updated_at": stamp, "changelog_entry": [line]}, default=str))
-    return {"status": block["ext"]["status"], "size_mult": block["ext"].get("size_mult"), "changed": bool(changed),
+    return {"status": block["ext"]["status"], "size_mult": block["ext"].get("size_mult"),
+            "pwin_add": block["ext"].get("pwin_add", 0.0), "changed": bool(changed),
             "reason": block["ext"]["reason"], "changelog": line}
 
 
@@ -2089,6 +2119,8 @@ def run_learning(data_dir, state_dir, out_dir, now=None) -> dict:
             line += f" + {ui['ext']:,} on the wider list, which is {ui['ext_label']}"
             if ui["ext_size_mult"] < 1 and ui["ext_status"] != "off":
                 line += f" at {round(100 * ui['ext_size_mult'])}% size"
+            if S.ext_rule(P).get("pwin_add") and ui["ext_status"] != "off":
+                line += f", behind its own A+ bar ({100 * S.ext_rule(P)['pwin_add']:.0f} points more model win odds)"
         line += ")."
         if ui.get("added") or ui.get("dropped"):
             line += (f" Today's screen added {ui['added']}" + (f" ({', '.join(ui['added_tickers'][:8])}{'...' if ui['added'] > 8 else ''})" if ui.get("added_tickers") else "")

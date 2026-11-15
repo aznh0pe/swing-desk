@@ -128,10 +128,12 @@ TIER_LABEL = {"on": "trading like the original list", "aplus_only": "A+ setups o
 
 def ext_rule(P: dict) -> dict:
     """How the extension tier (the daily-screened stocks and ETFs beyond the original list) trades:
-    {"status", "size_mult", "excluded"}. status: "on"; "aplus_only" (its setups are sent only at the A+ bar, never as weekly
+    {"status", "size_mult", "excluded", "pwin_add"}. status: "on"; "aplus_only" (its setups are sent only at the A+ bar, never as weekly
     top-ups); "aplus_bull" (A+ only, and only while SPY is above its 200-day average); or "off". size_mult scales
     its position size (mid-caps move more); excluded = strategies that sit out on it (their A+ setups there trail
-    their own on the original list).
+    their own on the original list); pwin_add = extra model win odds a wider-list setup must clear to be A+
+    (the model was never tuned on these tickers, so where its A+ setups there trail the original list's, the
+    tier check looks for a higher bar at which they match before it gives up on the list).
     Two records decide and the stricter wins: P["tiers"]["ext"] from the weekly tier check (the live model and
     bars replayed on tickers they were never tuned on) and P["tiers_live"]["ext"] from the tier's own live record
     (daily review). With no check on record the tier is off: nothing trades untested."""
@@ -145,7 +147,12 @@ def ext_rule(P: dict) -> dict:
         mult = min(1.0, max(0.25, float(t.get("size_mult", 1.0)))) * min(1.0, max(0.25, float(lv.get("size_mult", 1.0))))
     except Exception:
         mult = 1.0
-    return {"status": status, "size_mult": round(mult, 3), "excluded": sorted((t.get("excluded") or {}).keys())}
+    try:  # the wider list's own A+ bar: extra model win odds its setups must clear (weekly tier check)
+        add = min(0.2, max(0.0, float(t.get("pwin_add") or 0)))
+    except Exception:
+        add = 0.0
+    return {"status": status, "size_mult": round(mult, 3), "excluded": sorted((t.get("excluded") or {}).keys()),
+            "pwin_add": round(add, 3)}
 
 
 def ext_status(P: dict) -> str:

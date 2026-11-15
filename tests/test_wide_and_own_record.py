@@ -85,7 +85,7 @@ def test_large_panels_store_derived_frames_in_float32(wide):
 # ----------------------------------------------------------------------------- how the wider list trades
 def test_wider_list_status_is_the_stricter_of_the_tested_and_the_live_record():
     assert S.ext_rule({})["status"] == "off"                                           # untested: nothing trades
-    assert S.ext_rule({"tiers": {"ext": {"status": "on", "size_mult": 0.75, "excluded": {"X": "why"}}}}) == {"status": "on", "size_mult": 0.75, "excluded": ["X"]}
+    assert S.ext_rule({"tiers": {"ext": {"status": "on", "size_mult": 0.75, "excluded": {"X": "why"}}}}) == {"status": "on", "size_mult": 0.75, "excluded": ["X"], "pwin_add": 0.0}
     P = {"tiers": {"ext": {"status": "aplus_bull", "size_mult": 0.75}}, "tiers_live": {"ext": {"status": "off"}}}
     assert S.ext_rule(P)["status"] == "off"                                             # its own record pauses it
     P["tiers_live"] = {}
@@ -141,6 +141,71 @@ def test_tier_pool_keeps_only_what_the_status_lets_the_desk_see():
     assert (n("off"), n("on"), n("aplus_only"), n("aplus_bull")) == (2, 5, 4, 3)
     out = CB._tier_pool(post, G, "aplus_bull", 0.75)
     assert list(out["size_mult"]) == [1.0, 1.0, 0.75]
+    # the wider list's own, higher A+ bar: its rows below it are not there; the original list is untouched
+    assert len(CB._tier_pool(post, G, "aplus_only", 1.0, add=0.06)) == 4
+    assert len(CB._tier_pool(post, G, "aplus_only", 1.0, add=0.10)) == 2
+    assert list(CB._tier_pool(post, G, "aplus_only", 1.0, add=0.10)["tier"]) == ["core", "core"]
+
+
+def test_wider_list_can_trade_behind_its_own_higher_a_plus_bar(wide, tmp_path, monkeypatch):
+    """Nov 14, 2026: under the newly adopted setup the wider list's A+ setups won 78.7% against the original list's
+    80.9%, and the tier check switched the list off without trying anything else. Now it looks for a higher bar."""
+    # the rule carries the extra win odds, clipped to a sane range, and none by default
+    P = S.params_with_defaults(None)
+    assert S.ext_rule(P)["pwin_add"] == 0.0
+    P["tiers"] = {"ext": {"status": "aplus_only", "size_mult": 1.0, "pwin_add": 0.04}}
+    assert S.ext_rule(P)["pwin_add"] == 0.04 and S.ext_rule(P)["status"] == "aplus_only"
+    P["tiers"]["ext"]["pwin_add"] = 9
+    assert S.ext_rule(P)["pwin_add"] == 0.2
+    # A+ rows by tier at a higher bar for the wider list only
+    G = {"aplus_score": 80, "aplus_pwin": 0.70}
+    n = 400
+    rng = np.random.default_rng(7)
+    post = pd.DataFrame({"ticker": [f"T{i}" for i in range(n)], "strategy": "X", "tier": ["core", "ext"] * (n // 2),
+                         "signal_date": pd.Timestamp("2024-03-01") + pd.to_timedelta(np.arange(n) % 200, unit="D"),
+                         "score": 90.0, "p": np.tile([0.71, 0.71, 0.80, 0.80], n // 4), "filled": True,
+                         "ret": rng.normal(0.01, 0.03, n)})
+    r0, r1 = CB._tier_rows(post, G), CB._tier_rows(post, G, add=0.05)
+    assert r0["ext"]["aplus"]["trades"] == r0["core"]["aplus"]["trades"] == n // 2
+    assert r1["core"]["aplus"]["trades"] == n // 2 and r1["ext"]["aplus"]["trades"] == n // 4
+
+    # the scan: a wider-list setup that is A+ on the desk's bar but not on its own is not sent
+    from engine import calendar as cal, scan
+    data = tmp_path / "data"
+    shutil.copytree(wide, data)
+    u = json.loads((data / "universe.json").read_text())
+    for it in u["items"]:
+        if it["type"] == "stock":
+            it.update(tier="ext", cap_b=6.5, dv_m=70.0)
+        it.pop("twin_of", None)
+    (data / "universe.json").write_text(json.dumps(u))
+    now = dt.datetime(2026, 11, 5, 14, 10, tzinfo=cal.PT)
+
+    def run(tag, add):
+        st = tmp_path / tag / "state"
+        (st / "config").mkdir(parents=True)
+        (st / "config" / "settings.json").write_text(json.dumps({"initial_balance": 5000, "max_open_positions": 5, "min_setups_week": 0}))
+        (st / "ledger").mkdir()
+        (st / "ledger" / "initial.json").write_text(json.dumps({"id": "initial", "type": "initial", "amount": 5000, "date": "2026-11-01"}))
+        Q = S.params_with_defaults(None)
+        Q["filters"].update(min_dv_stock=0, min_dv_etf=0, min_price=0)
+        Q["grading"].update(aplus_score=0, aplus_pwin=0.0)
+        Q["tiers"] = {"ext": {"status": "aplus_only", "size_mult": 1.0, "pwin_add": 0.01}}
+        (st / "strategy").mkdir()
+        (st / "strategy" / "params.json").write_text(json.dumps({"params": Q}))
+        real = S.ext_rule
+        monkeypatch.setattr(S, "ext_rule", lambda P_: {**real(P_), "pwin_add": add})
+        out = tmp_path / tag / "out"
+        scan.run("postclose", str(data), str(st), str(out), now=now)
+        monkeypatch.setattr(S, "ext_rule", real)
+        res = json.loads((out / "scan.json").read_text())
+        return res["scan"], [a for a in res["entries"] if a.get("tier") == "ext"]
+
+    doc_lo, low = run("low", 0.01)     # a bar every setup clears
+    doc_hi, high = run("high", 1.5)    # a bar no setup can clear
+    assert low and all("higher A+ bar" in a["list_note"] for a in low)
+    assert not high
+    assert doc_lo["data"]["universe"]["ext_pwin_add"] == 0.01
 
 
 def test_account_replay_sizes_part_size_positions():

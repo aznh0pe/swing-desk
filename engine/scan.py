@@ -244,8 +244,12 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
         for cd in cands:
             cd["score"] = float(M.score(np.array([cd["p"]]), pd.DataFrame([cd["feats"]]), cd["model"], np.array([cd["rr"]]))[0])
     table = P["grading"].get("score_win_table") or []
+    ext_add = float(S.ext_rule(P).get("pwin_add") or 0)
+    ext_bar = float(P["grading"].get("aplus_pwin", 0)) + ext_add
     for cd in cands:
         cd["grade"] = M.grade(cd["score"], cd["p"], P["grading"])
+        if ext_add > 0 and cd.get("tier") == "ext" and cd["grade"] == "A+" and cd["p"] < ext_bar:
+            cd["grade"], cd["ext_bar_miss"] = "A", True   # A+ on the original list's bar, not on the wider list's own
         cd["model_p"] = cd["p"]
         cd["p"] = shown = cd.get("live_p", cd["model_p"])  # the win estimate carries the live record in full
         for row in ([] if cd.get("standalone") else table):  # Win % = how often past setups with this score actually won
@@ -445,7 +449,10 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
             except Exception:
                 bits = []
             doc["list_note"] = ("From the wider list (stocks and ETFs beyond the S&P 500, screened every day for size and "
-                                "trading volume)" + (": " + ", ".join(bits) if bits else "") + ". Same rules and the same A+ bar"
+                                "trading volume)" + (": " + ", ".join(bits) if bits else "") + ". Same rules"
+                                + (" and the same A+ bar" if not ext.get("pwin_add") else
+                                   f", and a higher A+ bar than the original list (model win odds of {100 * (float(G.get('aplus_pwin', 0)) + ext['pwin_add']):.0f}%+ "
+                                   f"instead of {100 * float(G.get('aplus_pwin', 0)):.0f}%+), because the model was never tuned on these tickers")
                                 + (f"; sized at {round(100 * ext['size_mult'])}% of the usual risk because mid-caps move more."
                                    if ext["size_mult"] < 1 else "."))
         if cond_today:
@@ -888,7 +895,8 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
                  "intraday_asof": meta.get("intraday_asof"), "partial_bar": partial,
                  "tickers": int(ind["close"].shape[1]),
                  "universe": {**D.universe_info(data_dir), "ext_status": S.ext_status(P),
-                              "ext_label": S.TIER_LABEL.get(S.ext_status(P)), "ext_size_mult": S.ext_rule(P)["size_mult"]}},
+                              "ext_label": S.TIER_LABEL.get(S.ext_status(P)), "ext_size_mult": S.ext_rule(P)["size_mult"],
+                              "ext_pwin_add": S.ext_rule(P)["pwin_add"]}},
         "market": regime_summary(ind), "funds": f,
         "counts": {"aplus": sum(1 for e in entries if not e.get("sent_earlier")),
                    "topups": sum(1 for e in entries if e.get("topup_note") and not e.get("sent_earlier")),
