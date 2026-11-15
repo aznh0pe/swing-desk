@@ -2303,7 +2303,9 @@ def checks_note(promo_dir=None, tiers_dir=None, rs_dir=None, prev_dir=None, issu
     issues = []
     if issues_file and pathlib.Path(issues_file).exists():
         issues = [ln.strip() for ln in pathlib.Path(issues_file).read_text().splitlines() if ln.strip()]
-    run = {"at": stamp, "changes": changes, "insights": insights, **({"issues": issues} if issues else {})}
+    # each run's record: what it changed, any insight that is not just one of those changes again, and its problems
+    extra = [x for x in insights if not any(c in x or x in c for c in changes)]
+    run = {"at": stamp, "changes": changes, **({"insights": extra} if extra else {}), **({"issues": issues} if issues else {})}
     prev, ver = _find_doc(prev_dir, doc_id)
     if prev:
         doc = dict(prev)
@@ -2320,7 +2322,7 @@ def checks_note(promo_dir=None, tiers_dir=None, rs_dir=None, prev_dir=None, issu
         doc = {"id": doc_id, "date": day, "created_at": stamp, "updated_at": stamp, "changes": changes, "insights": insights, "runs": [run]}
     if issues:
         doc["issues"] = issues
-    return {"doc_id": doc_id, "doc": doc, "if_version": ver}
+    return {"doc_id": doc_id, "doc": doc, "if_version": ver, "exists": bool(prev)}
 
 
 def run_checksnote(promo_dir, tiers_dir, rs_dir, prev_dir, issues_file, out_dir, verify_dir=None, now=None) -> dict:
@@ -2336,8 +2338,10 @@ def run_checksnote(promo_dir, tiers_dir, rs_dir, prev_dir, issues_file, out_dir,
         return {"saved": ok, "result": "saved" if ok else "NOT SAVED", "doc_id": want.get("id"), "version": ver}
     note = checks_note(promo_dir, tiers_dir, rs_dir, prev_dir, issues_file, now)
     fp.write_text(json.dumps(note["doc"], indent=1, default=str))
-    return {"doc_id": note["doc_id"], "file_path": str(fp.resolve()), "if_version": note["if_version"],
-            "exists": note["if_version"] is not None, "runs_today": len(note["doc"].get("runs") or [])}
+    # "exists" says whether today's entry was found in the export; the export file does not always carry the
+    # version (Nov 14, 2026: it did not, and the run had to notice), so the run pins the version its own "get" reported
+    return {"doc_id": note["doc_id"], "file_path": str(fp.resolve()), "exists": note["exists"], "if_version": note["if_version"],
+            "runs_today": len(note["doc"].get("runs") or [])}
 
 
 def main():

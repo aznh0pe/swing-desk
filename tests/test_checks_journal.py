@@ -79,6 +79,7 @@ def test_second_run_the_same_day_is_merged_and_pins_the_version(tmp_path):
     assert doc["changes"] == ["Promoted Morning Dip.", WL]          # the day's changes accumulate
     assert doc["insights"][-1] == WL and "morning result" not in doc["insights"]   # the headline is the latest run
     assert doc["runs"][0]["insights"] == ["morning result"] and doc["runs"][0]["issues"] == ["the first write failed"]
+    assert doc["runs"][1]["changes"] == [WL] and all(WL not in i for i in doc["runs"][1].get("insights", []))   # a run's record does not repeat itself
     assert doc["issues"] == ["the data feed is not the wide list yet"]      # the banner follows the latest run
     assert doc["issues_resolved"] == prev["issues_resolved"] and doc["evening"] == {"kept": True}   # nothing else is lost
     # a clean third run clears the open problem
@@ -94,7 +95,22 @@ def test_a_missing_document_export_is_not_mistaken_for_an_entry(tmp_path):
     jv = tmp_path / "jv"
     jv.mkdir()
     (jv / "2026-11-16-checks.json").write_text(json.dumps({"exists": False}))
-    assert CB.run_checksnote(promo, tiers, rs, jv, None, tmp_path / "jn", now=NOW)["if_version"] is None
+    r = CB.run_checksnote(promo, tiers, rs, jv, None, tmp_path / "jn", now=NOW)
+    assert r["if_version"] is None and r["exists"] is False
+
+
+def test_an_export_without_a_version_still_says_the_entry_exists(tmp_path):
+    """Nov 14, 2026 (late): the saved copy of the entry carried no version, the engine printed none, and the run had to
+    notice by itself that the entry existed. The engine now says so, and the run pins the version its own read reported."""
+    promo, tiers, rs = _reports(tmp_path)
+    jv = tmp_path / "jv"
+    jv.mkdir()
+    (jv / "2026-11-16-checks.json").write_text(json.dumps({"id": "2026-11-16-checks", "date": "2026-11-16", "created_at": "2026-11-16T09:00:00-08:00",
+                                                         "insights": ["morning"], "changes": ["Promoted Morning Dip."]}))
+    r = CB.run_checksnote(promo, tiers, rs, jv, None, tmp_path / "jn", now=NOW)
+    assert r["exists"] is True and r["if_version"] is None and r["runs_today"] == 2
+    step = (ROOT / "ops" / "generated" / "checks.md").read_text()
+    assert 'When exists is true' in step and 'the version that "get" just reported' in step
 
 
 def test_verify_tells_saved_from_not_saved(tmp_path):
@@ -124,7 +140,7 @@ def test_the_checks_prompt_saves_the_engine_entry_with_its_version_and_confirms_
     text = (ROOT / "ops" / "generated" / "checks.md").read_text()
     step = text[text.index("7. Journal"):text.index("Run problems:")]
     assert "engine.calibrate checksnote --promo" in step and "--prev $W/jv" in step and "--verify $W/jc" in step
-    assert "if_version" in step and "NOT SAVED" in step and "could not be saved" in step
+    assert "if_version" in step and "exists" in step and "NOT SAVED" in step and "could not be saved" in step
     # the run composes nothing by hand: no report file or key is named in the journal step
     assert not re.search(r"tiers_report\.json|promote_report\.json|changelog_entry|tiers\.ext", step)
 
