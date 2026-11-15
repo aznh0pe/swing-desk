@@ -38,6 +38,11 @@ from .portfolio import load_collection, load_state
 QUALITY = {"oos_win": 0.62, "oos_pf": 1.15, "oos_trades": 80, "max_overlap": 0.70}
 SEED_FILE = pathlib.Path(__file__).resolve().parent / "research_seed.json"
 SEED_FILES = sorted(pathlib.Path(__file__).resolve().parent.glob("research_seed*.json"))  # the curated backlog
+# Own designs made in the Swing Desk chat are committed to engine/research_own.json. The runs log and test them like
+# any queued idea (see own_queue), so a design reaches the live research log, the promotion check and Saturday's
+# recalibration without anyone copying documents by hand.
+OWN_FILE = pathlib.Path(__file__).resolve().parent / "research_own.json"
+OWN_BY = "Swing Desk chat (own design)"
 STAT_KEYS = ("trades", "win_rate", "avg_ret", "profit_factor", "avg_hold", "trades_per_year", "worst_loss",
              "max_consec_losses", "exit_mix", "fill_rate", "avg_win", "avg_loss")
 
@@ -178,6 +183,21 @@ def seed_backlog(ideas: dict) -> list[dict]:
                 continue
             seen.add(sp["id"])
             out.append(sp)
+    return out
+
+
+def own_queue(ideas: dict) -> list[dict]:
+    """Own designs (engine/research_own.json) that are not in the research log yet, in file order."""
+    try:
+        specs = json.loads(OWN_FILE.read_text())
+    except Exception:
+        return []
+    out, seen = [], set()
+    for sp in specs if isinstance(specs, list) else []:
+        if sp.get("id") in ideas or sp.get("id") in seen or check_new(sp, ideas):
+            continue
+        seen.add(sp["id"])
+        out.append(sp)
     return out
 
 
@@ -613,7 +633,7 @@ def evaluate_spec(spec: dict, ind: dict, P: dict, P_live: dict, split, now, by="
 
 
 def run_tests(specs: list[dict], data_dir, state_dir, out_dir, split="2022-01-01", by="research", log=print,
-              ideas_to_add: list[dict] | None = None) -> dict:
+              ideas_to_add: list[dict] | None = None, by_idea: dict | None = None) -> dict:
     from .scan import load_params
     now = cal.now_pt()
     out = pathlib.Path(out_dir)
@@ -626,7 +646,7 @@ def run_tests(specs: list[dict], data_dir, state_dir, out_dir, split="2022-01-01
     P_live = load_params(load_state(state_dir), None)
     known = load_ideas(state_dir)
     for spec in ideas_to_add or []:
-        _write(out, writes, "research", spec["id"], idea_doc(spec, by, now, known))
+        _write(out, writes, "research", spec["id"], idea_doc(spec, (by_idea or {}).get(spec["id"], by), now, known))
     for spec in specs:
         log(f"testing {spec.get('id')} ...")
         try:
@@ -642,6 +662,15 @@ def run_tests(specs: list[dict], data_dir, state_dir, out_dir, split="2022-01-01
         log(f"  -> {doc['verdict']}: {doc['summary']}")
     res = {"tested": len(results), "results": results, "writes": len(writes), "runtime_s": round(time.time() - t0, 1)}
     _finish(out, writes, res)
+    # the same run's later steps (the promotion check) read the research log from the exported state, so what this
+    # test logged is mirrored there: an idea logged here (an own design from the repo) and its result are visible to
+    # them without a copy step in the run's instructions
+    if state_dir and pathlib.Path(state_dir).exists():
+        for wr in writes:
+            dst = pathlib.Path(state_dir) / wr["collection"] / f"{wr['doc_id']}.json"
+            if not dst.exists():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_text(pathlib.Path(wr["file_path"]).read_text())
     return res
 
 
@@ -751,10 +780,12 @@ def cmd_next(state_dir, out_dir):
               "verdict": (latest.get(i) or {}).get("verdict", "queued")} for i, d in sorted(ideas.items())]
     out = pathlib.Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    res = {"next": queued[0]["id"] if queued else None, "queued": [d["id"] for d in queued], "known": known}
+    own = own_queue(ideas)   # own designs waiting in the repo count as queued: `test --queued` logs and tests them
+    res = {"next": queued[0]["id"] if queued else (own[0]["id"] if own else None),
+           "queued": [d["id"] for d in queued] + [sp["id"] for sp in own], "own_queue": [sp["id"] for sp in own], "known": known}
     backlog = seed_backlog(ideas)
     res["backlog"] = [sp["id"] for sp in backlog]
-    if not queued and backlog:
+    if not queued and not own and backlog:
         sp = backlog[0]
         (out / "seed_spec.json").write_text(json.dumps(sp, indent=1))
         res.update(next=sp["id"], from_backlog=True, spec_file=str((out / "seed_spec.json").resolve()),
@@ -810,7 +841,7 @@ def main():
     # test
     if not a.data:
         ap.error("test needs --data")
-    specs, to_add = [], []
+    specs, to_add, by_idea = [], [], {}
     if a.spec:
         raw = json.loads(pathlib.Path(a.spec).read_text())
         for sp in (raw if isinstance(raw, list) else [raw]):
@@ -826,8 +857,13 @@ def main():
     if a.id:
         for iid in a.id.split(","):
             iid = iid.strip()
+            own_sp = next((sp for sp in own_queue(ideas) if sp["id"] == iid), None)
             if iid in ideas and ideas[iid].get("spec"):
                 specs.append(ideas[iid]["spec"])
+            elif own_sp is not None:   # an own design waiting in the repo: log it and test it
+                specs.append(own_sp)
+                to_add.append(own_sp)
+                by_idea[iid] = OWN_BY
             else:
                 print(json.dumps({"missing": iid}))
     if a.queued:
@@ -835,9 +871,14 @@ def main():
         queued = sorted([d for i, d in ideas.items() if i not in latest and d.get("spec")],
                         key=lambda d: str(d.get("created_at", "")))
         specs += [d["spec"] for d in queued[:a.queued]]
+        for sp in own_queue(ideas)[:max(0, a.queued - len(queued[:a.queued]))]:   # then own designs waiting in the repo
+            if sp["id"] not in by_idea:
+                specs.append(sp)
+                to_add.append(sp)
+                by_idea[sp["id"]] = OWN_BY
     if not specs:
         return _finish(out, [], {"tested": 0, "results": [], "writes": 0, "note": "nothing to test"})
-    run_tests(specs, a.data, a.state, a.out, a.split, a.by, ideas_to_add=to_add)
+    run_tests(specs, a.data, a.state, a.out, a.split, a.by, ideas_to_add=to_add, by_idea=by_idea)
 
 
 if __name__ == "__main__":

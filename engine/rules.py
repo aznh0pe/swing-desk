@@ -48,7 +48,7 @@ FRAME_NAMES = {"open", "high", "low", "close", "volume", "sma5", "sma10", "sma20
                "dist50", "v20", "v5", "dv20", "vol_ratio", "ret5", "ret63", "ret126", "adx14", "vwap20",
                "vstd20", "gap_up", "rs_pct", "sector_up", "is_etf", "is_stock", "is_lev", "range"}
 MARKET_NAMES = {"spy", "spy_sma200", "spy_sma50", "spy_above200", "spy_dist200", "spy_ret5", "spy_rsi2",
-                "breadth50", "breadth200", "vix", "vix_ratio"}
+                "breadth50", "breadth200", "vix", "vix_ratio", "spy_bear_age"}
 CAL_NAMES = {"dow", "tdom", "tdom_rev"}
 FUNCS = {"rmin": 2, "rmax": 2, "rmean": 2, "rsum": 2, "min": 2, "max": 2, "abs": 1}
 EXITS = {"sma5", "prev_high", "high7", "rsi2_70", "none"}

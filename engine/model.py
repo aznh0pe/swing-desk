@@ -19,14 +19,18 @@ CLIP = {"rsi2": (0, 100), "depth_atr": (-3, 6), "dist200": (-0.5, 1.5), "slope20
         "spy_dist200": (-0.4, 0.4), "spy_ret5": (-0.2, 0.2), "breadth50": (0, 1), "vix": (8, 90),
         "vix_ratio": (0.5, 3), "sector_up": (0, 1), "is_etf": (0, 1)}
 
+# The per-strategy logistic model keeps its original inputs. Features added later (the bear-market age, used by
+# strategy rules) are not model inputs, so a strategy model saved before them reads exactly what it was fit on.
+LOGIT_FEATURES = [f for f in FEATURES if f not in ("spy_bear_age",)]
+
 
 def _prep(X: pd.DataFrame, med: dict | None = None):
-    X = X.reindex(columns=FEATURES).astype(float).copy()
+    X = X.reindex(columns=LOGIT_FEATURES).astype(float).copy()
     for c, (lo, hi) in CLIP.items():
         if c in X:
             X[c] = X[c].clip(lo, hi)
     if med is None:
-        med = {c: (float(X[c].median()) if X[c].notna().any() else 0.0) for c in FEATURES}
+        med = {c: (float(X[c].median()) if X[c].notna().any() else 0.0) for c in LOGIT_FEATURES}
     X = X.fillna(med)
     return X, med
 
@@ -71,10 +75,10 @@ def fit(trades: pd.DataFrame, min_trades: int = 150, split_date=None) -> dict:
         return model
     lr = LogisticRegression(C=0.3, max_iter=500)
     lr.fit(Z, y)
-    model.update({"kind": "logit", "features": FEATURES, "median": med,
+    model.update({"kind": "logit", "features": LOGIT_FEATURES, "median": med,
                   "mean": {k: float(v) for k, v in mu.items()},
                   "std": {k: float(v) for k, v in sd.items()},
-                  "coef": {k: float(v) for k, v in zip(FEATURES, lr.coef_[0])},
+                  "coef": {k: float(v) for k, v in zip(LOGIT_FEATURES, lr.coef_[0])},
                   "intercept": float(lr.intercept_[0]), "validation": val})
     return model
 
@@ -138,6 +142,12 @@ def live_offset(base_rate: float, wins: int, n: int, prior_n: float = 60.0, max_
 
 POOLED = ["spy_ret5", "spy_drop", "vix_ratio", "breadth50", "rs_pct", "rs_weak", "adx14",
           "atr_pct", "ret5", "dist200"]
+# Nov 14, 2026, tested and NOT added: an input for how long SPY has been under its 200-day average (alone, times the
+# market drop, as a share of recent days, or counted from the 1-year high). Each helped or hurt 2022 depending on
+# how it was written, and the raw trades say why: before 2022, dips bought 30-60 sessions into a break under the
+# 200-day won 80% of 1,227 (every one of seven episodes); in 2022 they won 48.5% of 1,551. One episode against
+# seven is not a rule. The recalibrated desk with the best version lost the live-versus-recalibrated check on the
+# 2024-now win rate, growth and drawdown. The market feature itself (spy_bear_age) stays available to strategy rules.
 
 
 def pooled_frame(feats: pd.DataFrame, strategies, strat_names) -> pd.DataFrame:

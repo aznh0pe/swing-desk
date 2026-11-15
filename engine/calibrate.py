@@ -232,6 +232,39 @@ def _select_cutoffs(sig: pd.DataFrame, min_week: int, prefer_win: bool = False, 
     return (pick, near) if return_near else pick
 
 
+def _bar_rows(post: pd.DataFrame, cands: list, topup_min_week: int, r: dict) -> list:
+    """One row per A+ bar: the whole desk replayed with it (every A+ setup plus that bar's own weekly top-ups)."""
+    s = _one_per_ticker(post)
+    table = []
+    for c in cands:
+        sc, pw = c[2], c[3]
+        tu = calibrate_topups(post, sc, pw, topup_min_week, None)
+        ap = s[(s["score"] >= sc) & (s["p"] >= pw)]
+        if tu.get("topup_ok"):
+            pk, wk = simulate_topups(s, sc, pw, float(tu["topup_floor"]), float(tu["topup_pwin"]), topup_min_week,
+                                     list((tu.get("topup_excluded") or {}).keys()))
+        else:   # no top-up rule cleared its floors: the weekly count is the A+ setups alone
+            pk, wk = simulate_topups(s, sc, pw, float("inf"), 1.0, topup_min_week)
+        sent = pd.concat([ap, pk])
+        pf = B.portfolio(sent, 5000, int(r["max_open"]), float(r["risk_pct"]), float(r["max_position_pct"]))
+        pf.pop("curve", None)
+        st_ = _trade_stats(sent)
+        table.append({"aplus_score": sc, "aplus_pwin": pw, "aplus_win": round(c[0], 4), "aplus_trades": int(c[5]),
+                      "topup_rule": f"{tu.get('topup_floor')}/{tu.get('topup_pwin')}" if tu.get("topup_ok") else "off",
+                      "topup_win": tu.get("oos_topup_win_rate"),
+                      "weeks_at_min": tu.get("oos_weeks_at_min") if tu.get("topup_ok") else (round(float((wk >= topup_min_week).mean()), 3) if len(wk) else 0.0),
+                      "sent_win": st_.get("win_rate"), "sent_trades": st_.get("trades"),
+                      "account_cagr": pf.get("cagr"), "account_max_dd": pf.get("max_dd"), "account_win": pf.get("win_rate"),
+                      "account_trades": pf.get("trades"), "_c": c})
+    return table
+
+
+# Nov 14, 2026, tested and NOT shipped: choosing the A+ bar on the whole desk (weekly coverage first, then win rate,
+# then growth, over the whole win-rate/volume frontier). With the live model it picked a wider bar (A+ 77.0% of 5,633
+# against 78.1% of 2,495) and the recalibrated desk lost the live-versus-recalibrated check on A+ win rate, the
+# 2024-now win rate and drawdown. The rule below, which produced the live setup, stays. Its known limit: it anchors
+# on the single highest A+ win rate, so a model that ranked setups much better would push it to the fewest setups
+# allowed; the live-versus-recalibrated check catches that (weekly coverage), and every bar replayed is logged.
 GROWTH_MAX_CANDS = 8      # near-best A+ bars tried in the account simulation
 GROWTH_DD_SLACK = 0.02    # a bar may not deepen the simulated worst drawdown by more than 2 points
 
@@ -255,24 +288,7 @@ def _growth_pick(post: pd.DataFrame, near: list, base, topup_min_week: int, risk
         cands = [cands[round(i * step)] for i in range(GROWTH_MAX_CANDS)]
     if base is not None and base not in cands:
         cands.append(base)
-    s = _one_per_ticker(post)
-    table = []
-    for c in cands:
-        sc, pw = c[2], c[3]
-        tu = calibrate_topups(post, sc, pw, topup_min_week, None)
-        ap = s[(s["score"] >= sc) & (s["p"] >= pw)]
-        if tu.get("topup_ok"):
-            pk, wk = simulate_topups(s, sc, pw, float(tu["topup_floor"]), float(tu["topup_pwin"]), topup_min_week,
-                                     list((tu.get("topup_excluded") or {}).keys()))
-        else:
-            pk, wk = s.iloc[0:0], pd.Series(dtype=float)
-        pf = B.portfolio(pd.concat([ap, pk]), 5000, int(r["max_open"]), float(r["risk_pct"]), float(r["max_position_pct"]))
-        pf.pop("curve", None)
-        table.append({"aplus_score": sc, "aplus_pwin": pw, "aplus_win": round(c[0], 4), "aplus_trades": int(c[5]),
-                      "topup_rule": f"{tu.get('topup_floor')}/{tu.get('topup_pwin')}" if tu.get("topup_ok") else "off",
-                      "topup_win": tu.get("oos_topup_win_rate"), "weeks_at_min": tu.get("oos_weeks_at_min"),
-                      "account_cagr": pf.get("cagr"), "account_max_dd": pf.get("max_dd"), "account_win": pf.get("win_rate"),
-                      "account_trades": pf.get("trades"), "_c": c})
+    table = _bar_rows(post, cands, topup_min_week, r)
     ok = [x for x in table if x["account_cagr"] is not None]
     if not ok:
         return None, []
@@ -284,10 +300,16 @@ def _growth_pick(post: pd.DataFrame, near: list, base, topup_min_week: int, risk
 
 # ----------------------------------------------------------------------------- weekly top-ups
 TOPUP_MIN_TRADES = 150   # filled top-ups 2022-now before a top-up rule can be chosen
-RESEARCH_GATE = {"win_slack": 0.005, "avg_slack": 0.0005, "per_week": 0.8,
+RESEARCH_GATE = {"win_slack": 0.005, "avg_slack": 0.0005, "per_week": 0.8, "win_gain_fewer": 0.02,
                  # win rate comes first: a slightly smaller average trade is accepted when the win rate rises and the
                  # A+ set as a whole earns more on unseen data (more winning setups), never below the A+ floor
                  "win_gain": 0.005, "avg_keep": 0.85, "avg_floor": 0.006, "profit_gain": 1.10}
+
+
+def _desk_row(G: dict | None):
+    """The desk replay of the chosen A+ bar (see _bar_rows), or None when the bar was not chosen in the account replay."""
+    row = next((x for x in ((G or {}).get("aplus_bar_growth") or []) if x.get("chosen")), None)
+    return row if row and row.get("sent_win") is not None and row.get("account_cagr") is not None else None
 
 
 def research_gate_ok(G, G0, rules=None):
@@ -297,12 +319,27 @@ def research_gate_ok(G, G0, rules=None):
     total return (trades x average) rises by 10% or more."""
     r = rules or RESEARCH_GATE
     f = lambda d, k: float((d or {}).get(k) or 0)
+    # Nov 14, 2026: when both sides carry the desk replay of their chosen bar (see _bar_rows), compare the desks, the
+    # way the final live-versus-recalibrated check does. The two A+ bars are chosen separately and can sit far apart,
+    # so counting setups or total return of the A+ sets alone compares different things: that day a set winning
+    # 85.5% (+3.41% a trade) was dropped against one winning 73.7% (+1.21%) for sending fewer setups.
+    d1, d0 = _desk_row(G), _desk_row(G0)
+    if d1 and d0:
+        # win rates and the weekly minimum only. Growth and drawdown are judged once, against the live desk, in the
+        # final check: a desk that barely trades has a shallow drawdown, and holding the fuller desk to it threw out a
+        # set that reached the weekly minimum in 94% of weeks against 28% (drawdown -14.4% against -10.5%).
+        return bool(d1["aplus_win"] >= d0["aplus_win"] - r["win_slack"] and d1["sent_win"] >= d0["sent_win"] - r["win_slack"]
+                    and (d1["weeks_at_min"] or 0) >= (d0["weeks_at_min"] or 0) - ADOPT["slack_weeks"])
     w1, w0 = f(G, "oos_aplus_win_rate"), f(G0, "oos_aplus_win_rate")
     a1, a0 = f(G, "oos_aplus_avg_ret"), f(G0, "oos_aplus_avg_ret")
     n1, n0 = f(G, "oos_aplus_trades"), f(G0, "oos_aplus_trades")
     if w1 < w0 - r["win_slack"]:
         return False
-    if f(G, "oos_aplus_signals_per_week") < r["per_week"] * f(G0, "oos_aplus_signals_per_week"):
+    # fewer A+ setups a week is not a veto by itself: a set that wins clearly more often (2+ points) and earns at
+    # least as much in total stays in, and the weekly minimum is then judged where it belongs, on the whole desk
+    # (Nov 14, 2026: a set at 85.5% and +3.41% a trade was thrown out against 73.7% and +1.21% for being smaller)
+    if f(G, "oos_aplus_signals_per_week") < r["per_week"] * f(G0, "oos_aplus_signals_per_week") \
+            and not (w1 >= w0 + r.get("win_gain_fewer", 0.02) and n1 * a1 >= n0 * a0):
         return False
     if a1 >= a0 - r["avg_slack"]:
         return True
@@ -314,6 +351,14 @@ TOPUP_WIN_FLOOR = 0.68   # a top-up rule must have won at least this often on 20
 TOPUP_WIN_BAND = 0.08    # ...and within this of the best rule's win rate, to be chosen for its weekly coverage
 TOPUP_MIN_AVG = 0.004    # their average trade must clear +0.4%
 TOPUP_MIN_PF = 1.25      # and their profit factor 1.25
+# Nov 14, 2026: a model that ranks setups better moves the best of them up into A+, and what is left for top-ups
+# earns less (profit factor 1.2 at the same 69% wins). The 1.25 floor then switched top-ups off, the week was on
+# pace 53% of the time instead of 95%, and a desk that won more often on everything it sent was thrown out. The
+# strict floors still come first; only when no strict rule keeps 90% of weeks on pace may a rule pass the softer
+# floors below, and the top-ups must still win 68%+ and make money. The whole desk is then judged in the replay.
+TOPUP_COVER_TARGET = 0.90
+TOPUP_SOFT_AVG = 0.003
+TOPUP_SOFT_PF = 1.10
 TOPUP_STRAT_MIN = 30     # top-ups of one strategy before its own result counts
 TOPUP_STRAT_PRIOR = 20
 
@@ -328,31 +373,42 @@ def simulate_topups(s: pd.DataFrame, sc: float, pw: float, floor: float, tpw: fl
     """Replays the scanner's weekly top-up rule day by day. Every A+ setup counts first; when the week is
     behind its pace (one more setup each weekday, up to min_week), the best-scored setups below the A+ bar
     with score >= floor and model win >= tpw are added (strategies in `excluded` never top up).
-    s: one row per signal day and ticker (see _one_per_ticker). Returns (top-ups sent, setups per week)."""
-    ap = (s["score"] >= sc) & (s["p"] >= pw)
-    n_ap = s.loc[ap].groupby("signal_date").size()
-    band = s[~ap & (s["score"] >= floor) & (s["p"] >= tpw)]
+    s: one row per signal day and ticker (see _one_per_ticker). Returns (top-ups sent, setups per week).
+    Works on row positions (Nov 14, 2026): the pandas version took 0.7 s a call and the bar choice calls it
+    hundreds of times; this one gives the same picks in the same order."""
+    if not len(s):
+        return s.iloc[0:0], pd.Series(dtype=float)
+    score, p = s["score"].to_numpy(dtype=float), s["p"].to_numpy(dtype=float)
+    ap = (score >= sc) & (p >= pw)
+    days, inv = np.unique(s["signal_date"].to_numpy(dtype="datetime64[ns]"), return_inverse=True)
+    n_ap = np.bincount(inv, weights=ap.astype(float), minlength=len(days)).astype(int)
+    band = ~ap & (score >= floor) & (p >= tpw)
     if len(excluded):
-        band = band[~band["strategy"].isin(list(excluded))]
-    if "entry_close" in band.columns:  # buy-at-the-close setups come from the pre-close scan, which never tops up
-        band = band[~band["entry_close"].fillna(False).astype(bool)]
-    groups = {d: g for d, g in band.groupby("signal_date", sort=False)}
+        band &= ~s["strategy"].isin(list(excluded)).to_numpy()
+    if "entry_close" in s.columns:  # buy-at-the-close setups come from the pre-close scan, which never tops up
+        band &= ~s["entry_close"].fillna(False).astype(bool).to_numpy()
+    bpos = np.flatnonzero(band)
+    binv = inv[bpos]
+    order = np.argsort(binv, kind="stable")          # by day, keeping the best-scored-first order of s inside a day
+    bpos, binv = bpos[order], binv[order]
+    idx = np.arange(len(days))
+    starts, ends = np.searchsorted(binv, idx, "left"), np.searchsorted(binv, idx, "right")
+    dts = pd.DatetimeIndex(days)
+    wd = dts.weekday.to_numpy()
+    wks = (dts - pd.to_timedelta(wd, unit="D"))
     picks, weeks, so_far, cur = [], {}, 0, None
-    for d in sorted(s["signal_date"].unique()):
-        d = pd.Timestamp(d)
-        wk = d - pd.Timedelta(days=d.weekday())
+    for i in range(len(days)):
+        wk = wks[i]
         if wk != cur:
             cur, so_far = wk, 0
-        na = int(n_ap.get(d, 0))
-        need = max(0, min(min_week, d.weekday() + 1) - so_far - na)
-        k = 0
-        if need and d in groups:
-            g = groups[d].head(need)
-            picks.append(g)
-            k = len(g)
+        na = int(n_ap[i])
+        need = max(0, min(min_week, int(wd[i]) + 1) - so_far - na)
+        k = min(need, int(ends[i] - starts[i])) if need else 0
+        if k:
+            picks.append(bpos[starts[i]:starts[i] + k])
         so_far += na + k
         weeks[wk] = so_far
-    pk = pd.concat(picks) if picks else s.iloc[0:0]
+    pk = s.iloc[np.concatenate(picks)] if picks else s.iloc[0:0]
     return pk, pd.Series(weeks, dtype=float)
 
 
@@ -387,26 +443,41 @@ def _topup_pwins(pw: float) -> list:
 def _choose_topup_rule(s: pd.DataFrame, sc: float, pw: float, min_week: int, min_trades: int = TOPUP_MIN_TRADES):
     """The top-up bar that keeps the most weeks at the minimum, among rules whose replayed top-ups clear the
     trade-count, average-trade and profit-factor floors, win at least TOPUP_WIN_FLOOR and stay within
-    TOPUP_WIN_BAND of the best rule's win rate. None if no rule clears the floors."""
-    cands = []
+    TOPUP_WIN_BAND of the best rule's win rate. When no such rule keeps TOPUP_COVER_TARGET of weeks on pace, rules
+    that clear the softer floors (see TOPUP_SOFT_PF) compete too. None if no rule clears either set of floors.
+    Returns (win rate, weekly coverage, floor, win bar, stats, top-ups, weeks, soft)."""
+    rules = []
     for floor in range(max(40, int(sc) - 30), int(sc), 2):
         for tpw in _topup_pwins(pw):
             pk, wk = simulate_topups(s, sc, pw, floor, tpw, min_week)
             st = _trade_stats(pk)
-            if st["trades"] < min_trades or st["avg_ret"] < TOPUP_MIN_AVG or (st["profit_factor"] or 0) < TOPUP_MIN_PF:
+            if st["trades"] < min_trades:
                 continue
-            cands.append((st["win_rate"], float((wk >= min_week).mean()) if len(wk) else 0.0, floor, tpw, st, pk, wk))
-    if not cands:
+            rules.append((st["win_rate"], float((wk >= min_week).mean()) if len(wk) else 0.0, floor, tpw, st, pk, wk))
+    if not rules:
         return None
-    # Top-ups exist to keep the week on pace, and the pace picks the best-scored setup first, so a lower floor only
-    # adds setups in weeks the higher floor leaves short. Nov 14, 2026: choosing the highest win rate (within 1.5
-    # points) picked a 76%-win rule that reached five setups in 39% of weeks over a 69%-win rule that reached 88%,
-    # and the recalibrated setup lost the live-versus-recalibrated check on coverage alone while beating the live
-    # one on win rates, growth and drawdown. Now: the rule that keeps the most weeks at the minimum among rules that
-    # win at least TOPUP_WIN_FLOOR and stay within TOPUP_WIN_BAND of the best; the higher win rate breaks ties.
-    top = max(c[0] for c in cands)
-    near = [c for c in cands if c[0] >= max(TOPUP_WIN_FLOOR, top - TOPUP_WIN_BAND)] or [c for c in cands if c[0] >= top - 0.015]
-    return max(near, key=lambda c: (round(c[1], 2), c[0]))
+
+    def pick(avg_floor, pf_floor):
+        cands = [c for c in rules if c[4]["avg_ret"] >= avg_floor and (c[4]["profit_factor"] or 0) >= pf_floor]
+        if not cands:
+            return None
+        # Top-ups exist to keep the week on pace, and the pace picks the best-scored setup first, so a lower floor only
+        # adds setups in weeks the higher floor leaves short. Nov 14, 2026: choosing the highest win rate (within 1.5
+        # points) picked a 76%-win rule that reached five setups in 39% of weeks over a 69%-win rule that reached 88%,
+        # and the recalibrated setup lost the live-versus-recalibrated check on coverage alone while beating the live
+        # one on win rates, growth and drawdown. Now: the rule that keeps the most weeks at the minimum among rules that
+        # win at least TOPUP_WIN_FLOOR and stay within TOPUP_WIN_BAND of the best; the higher win rate breaks ties.
+        top = max(c[0] for c in cands)
+        near = [c for c in cands if c[0] >= max(TOPUP_WIN_FLOOR, top - TOPUP_WIN_BAND)] or [c for c in cands if c[0] >= top - 0.015]
+        return max(near, key=lambda c: (round(c[1], 2), c[0]))
+
+    strict = pick(TOPUP_MIN_AVG, TOPUP_MIN_PF)
+    if strict is not None and strict[1] >= TOPUP_COVER_TARGET:
+        return (*strict, False)
+    soft = pick(TOPUP_SOFT_AVG, TOPUP_SOFT_PF)
+    if soft is not None and soft[0] >= TOPUP_WIN_FLOOR and (strict is None or soft[1] >= strict[1] + 0.05):
+        return (*soft, True)
+    return (*strict, False) if strict is not None else None
 
 
 def _topup_exclusions(pk: pd.DataFrame, wr: float) -> dict:
@@ -439,7 +510,7 @@ def calibrate_topups(post: pd.DataFrame, sc: float, pw: float, min_week: int = 5
                 "topup_note": (f"No top-up rule cleared the floors on 2022-now data (at least {TOPUP_MIN_TRADES} trades, "
                                f"average above +{100 * TOPUP_MIN_AVG:.1f}%, profit factor {TOPUP_MIN_PF}), so top-ups are off "
                                "until a recalibration finds one.")}
-    wr, cover, floor, tpw, st, pk, wk = best
+    wr, cover, floor, tpw, st, pk, wk, soft = best
     # strategies whose own top-ups trail send none; removing one changes the picks, so check again (3 rounds at most)
     excl, cover0 = {}, cover
     for _ in range(3):
@@ -464,7 +535,10 @@ def calibrate_topups(post: pd.DataFrame, sc: float, pw: float, min_week: int = 5
            "oos_topup_pf": st["profit_factor"], "oos_topup_trades": st["trades"],
            "oos_topup_sent_per_week": round(len(pk) / weeks, 2), "oos_weeks_at_min": round(cover, 3),
            "oos_weeks_at_min_aplus_only": ap_cover, "topup_by_year": by_year, "topup_by_strategy": by_strategy,
-           "topup_note": ""}
+           "topup_floors": "soft" if soft else "strict",
+           "topup_note": (f"No top-up rule that clears the usual floors (profit factor {TOPUP_MIN_PF}) keeps "
+                          f"{100 * TOPUP_COVER_TARGET:.0f}% of weeks on pace, so this rule passed the softer floors: its top-ups "
+                          f"won {100 * st['win_rate']:.1f}% with a profit factor of {st['profit_factor']}.") if soft else ""}
     if cal_end is not None:
         ce = pd.Timestamp(cal_end)
         se, sl = s[s["signal_date"] < ce], s[s["signal_date"] >= ce]
@@ -836,8 +910,12 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
             except Exception as ex:  # keep the per-strategy scores if the pooled fit fails
                 log(f"pooled model failed: {ex!r}")
                 pm_ = None
-            return en_, pm_, calibrate_grades(en_, split, cal_end=cal_end, topup_min_week=desk_min, prefer_win=prefer_win,
-                                              risk=acct)
+            G_ = calibrate_grades(en_, split, cal_end=cal_end, topup_min_week=desk_min, prefer_win=prefer_win, risk=acct)
+            for r_ in G_.get("aplus_bar_growth") or []:   # every bar the desk check replayed, so a choice can be audited from the log
+                log(f"    bar {r_['aplus_score']}/{r_['aplus_pwin']}: A+ {100 * r_['aplus_win']:.1f}% of {r_['aplus_trades']}, top-ups {r_['topup_rule']} "
+                    f"{100 * (r_.get('topup_win') or 0):.1f}%, sent {100 * (r_.get('sent_win') or 0):.1f}% of {r_.get('sent_trades')}, weeks {100 * (r_.get('weeks_at_min') or 0):.1f}%, "
+                    f"account {100 * (r_.get('account_cagr') or 0):.1f}%/yr DD {100 * (r_.get('account_max_dd') or 0):.1f}%{' <- chosen' if r_.get('chosen') else ''}")
+            return en_, pm_, G_
 
         en, pm, G = fit_and_grade(enabled_names)
         # research strategies must earn their place inside the A+ set, not just pass on their own
@@ -2163,12 +2241,117 @@ def run_learning(data_dir, state_dir, out_dir, now=None) -> dict:
     return {"journal": day, "changes": len(changes), "insights": len(insights), "writes": len(writes)}
 
 
+# ----------------------------------------------------------------------------- journal entry of the on-demand checks
+# Nov 14, 2026: the checks run composed its journal entry by hand from the report files. One run looked for the
+# wider list's result under a key that did not exist; two later runs the same day could not save their entry at all,
+# because the day's document already existed and a plain "set" of an existing document is refused without its
+# version. The engine now builds the whole entry, merges it into the day's document when there is one, and tells
+# the run which version to pin, so the run only saves a file and confirms it.
+def _read_json(p):
+    try:
+        return json.loads(pathlib.Path(p).read_text())
+    except Exception:
+        return None
+
+
+def _find_doc(folder, doc_id: str):
+    """(doc, version) of an ArtifactData export of journal/<doc_id> somewhere under `folder`, else (None, None)."""
+    from .portfolio import _unwrap
+    if not folder or not pathlib.Path(folder).exists():
+        return None, None
+    for f in sorted(pathlib.Path(folder).rglob("*.json")):
+        raw = _read_json(f)
+        if not isinstance(raw, dict) or raw.get("exists") is False:
+            continue
+        doc, ver = _unwrap(raw)
+        if isinstance(doc, dict) and (doc.get("id") == doc_id or f.stem == doc_id) and (doc.get("date") or doc.get("insights")):
+            return doc, (int(ver) if ver else None)
+    return None, None
+
+
+NO_CHANGE = "No change: no candidate passed and the wider list keeps its status."
+
+
+def checks_note(promo_dir=None, tiers_dir=None, rs_dir=None, prev_dir=None, issues_file=None, now=None) -> dict:
+    """The journal document for one promotion-and-tier checks run: {"doc_id", "doc", "if_version"}.
+    Every text comes from the engine's own report files, read in a fixed order of fall-backs, so nothing is looked
+    up by hand. A run later the same day is merged into the day's document: its result becomes the headline, the
+    day's changes accumulate, and each run stays listed under "runs"."""
+    now = now or cal.now_pt()
+    stamp, day = now.isoformat(timespec="seconds"), now.strftime("%Y-%m-%d")
+    doc_id = f"{day}-checks"
+    P_ = lambda d, name: (pathlib.Path(d) / name) if d else None
+    promo = _read_json(P_(promo_dir, "promote_report.json")) if promo_dir else None
+    tiers = _read_json(P_(tiers_dir, "tiers_report.json")) if tiers_dir else None
+    saved = next((d for d in (_read_json(P_(promo_dir, "doc_params.json")) if promo_dir else None,
+                              _read_json(P_(tiers_dir, "doc_params.json")) if tiers_dir else None) if d), None)
+    ce = (saved or {}).get("changelog_entry") or []
+    changes = [str(x) for x in ([ce] if isinstance(ce, str) else ce) if x] or [NO_CHANGE]
+    insights = []
+    rs = _read_json(P_(rs_dir, "result.json")) if rs_dir else None
+    if rs and rs.get("results"):
+        labels = {}
+        for f in sorted((pathlib.Path(rs_dir) / "docs" / "research_results").glob("*.json")):
+            d_ = _read_json(f) or {}
+            labels[d_.get("idea_id")] = d_.get("label")
+        insights.append(f"{len(rs['results'])} queued research idea{'s were' if len(rs['results']) != 1 else ' was'} tested first: "
+                        + "; ".join(f"{labels.get(r.get('idea')) or r.get('idea')} ({r.get('verdict')})" for r in rs["results"]) + ".")
+    insights.append(str(promo["note"]) if promo and promo.get("note") else "The promotion check wrote no result this run.")
+    ext = ((tiers or {}).get("tiers") or {}).get("ext") or ((((saved or {}).get("params") or {}).get("tiers") or {}).get("ext")) or {}
+    wl = (tiers or {}).get("changelog") or (("Wider list: " + str(ext["reason"])) if ext.get("reason") else None)
+    insights.append(str(wl) if wl else "The tier check wrote no result this run, so the wider list keeps its status.")
+    issues = []
+    if issues_file and pathlib.Path(issues_file).exists():
+        issues = [ln.strip() for ln in pathlib.Path(issues_file).read_text().splitlines() if ln.strip()]
+    run = {"at": stamp, "changes": changes, "insights": insights, **({"issues": issues} if issues else {})}
+    prev, ver = _find_doc(prev_dir, doc_id)
+    if prev:
+        doc = dict(prev)
+        runs = list(prev.get("runs") or [])
+        if not runs:   # a document written before runs were listed: its content is the first run
+            runs.append({"at": prev.get("created_at"), "changes": list(prev.get("changes") or []),
+                         "insights": list(prev.get("insights") or []), **({"issues": list(prev["issues"])} if prev.get("issues") else {})})
+        runs.append(run)
+        day_changes = [c for r in runs for c in (r.get("changes") or []) if c != NO_CHANGE]
+        doc.update(id=doc_id, date=prev.get("date") or day, updated_at=stamp, insights=insights, runs=runs[-12:],
+                   changes=list(dict.fromkeys(day_changes)) or [NO_CHANGE])
+        doc.pop("issues", None)   # the banner follows the latest run; earlier problems stay under "runs"
+    else:
+        doc = {"id": doc_id, "date": day, "created_at": stamp, "updated_at": stamp, "changes": changes, "insights": insights, "runs": [run]}
+    if issues:
+        doc["issues"] = issues
+    return {"doc_id": doc_id, "doc": doc, "if_version": ver}
+
+
+def run_checksnote(promo_dir, tiers_dir, rs_dir, prev_dir, issues_file, out_dir, verify_dir=None, now=None) -> dict:
+    """Writes <out>/journal.json (the document to "set" as journal/<doc_id>) and returns what the run needs to save it.
+    With verify_dir (a fresh export of the saved document) it only checks that the save landed."""
+    out = pathlib.Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    fp = out / "journal.json"
+    if verify_dir:
+        want = _read_json(fp) or {}
+        got, ver = _find_doc(verify_dir, str(want.get("id")))
+        ok = bool(got and want.get("updated_at") and got.get("updated_at") == want.get("updated_at"))
+        return {"saved": ok, "result": "saved" if ok else "NOT SAVED", "doc_id": want.get("id"), "version": ver}
+    note = checks_note(promo_dir, tiers_dir, rs_dir, prev_dir, issues_file, now)
+    fp.write_text(json.dumps(note["doc"], indent=1, default=str))
+    return {"doc_id": note["doc_id"], "file_path": str(fp.resolve()), "if_version": note["if_version"],
+            "exists": note["if_version"] is not None, "runs_today": len(note["doc"].get("runs") or [])}
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["backtest", "learn", "topups", "promote", "tiers"])
+    ap.add_argument("cmd", choices=["backtest", "learn", "topups", "promote", "tiers", "checksnote"])
     ap.add_argument("--params", default=None, help="tiers: a doc_params.json to check and add the result to (default: the live params in --state)")
     ap.add_argument("--ids", default=None, help="promote: comma list of research ideas to check (default: every candidate)")
-    ap.add_argument("--data", required=True)
+    ap.add_argument("--data", default=None)
+    ap.add_argument("--promo", default=None, help="checksnote: the promotion check's output folder")
+    ap.add_argument("--tiers", default=None, help="checksnote: the tier check's output folder")
+    ap.add_argument("--rs", default=None, help="checksnote: the queued-ideas test output folder")
+    ap.add_argument("--prev", default=None, help="checksnote: folder holding an export of today's journal document, if any")
+    ap.add_argument("--issues", default=None, help="checksnote: text file, one run problem per line")
+    ap.add_argument("--verify", default=None, help="checksnote: folder holding a fresh export of the saved document")
     ap.add_argument("--state", default=None)
     ap.add_argument("--out", required=True)
     ap.add_argument("--split", default="2022-01-01")
@@ -2176,6 +2359,11 @@ def main():
     ap.add_argument("--merge-state", default=None, help="dashboard state export to keep live adjustments from")
     ap.add_argument("--cal-end", default=CAL_END, help="start of the holdout window (cut-offs are chosen before it)")
     a = ap.parse_args()
+    if a.cmd == "checksnote":
+        print(json.dumps(run_checksnote(a.promo, a.tiers, a.rs, a.prev, a.issues, a.out, verify_dir=a.verify), indent=1, default=str))
+        return
+    if not a.data:
+        ap.error("--data is required for " + a.cmd)
     if a.cmd == "backtest":
         rep = run_backtest(a.data, a.out, a.split, a.only.split(",") if a.only else None, merge_state=a.merge_state,
                            cal_end=a.cal_end or None)

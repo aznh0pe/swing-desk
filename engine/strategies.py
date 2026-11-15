@@ -572,7 +572,7 @@ def all_plans(ind: dict, P: dict) -> dict:
 
 FEATURES = ["rsi2", "depth_atr", "dist200", "slope200", "atr_pct", "rs_pct", "ibs",
             "streak", "adx14", "vol_ratio", "dist50", "ret5", "spy_above200", "spy_dist200",
-            "spy_ret5", "breadth50", "vix", "vix_ratio", "sector_up", "is_etf"]
+            "spy_ret5", "breadth50", "vix", "vix_ratio", "sector_up", "is_etf", "spy_bear_age"]
 
 
 def features_at(ind: dict, t_idx: np.ndarray, j_idx: np.ndarray) -> pd.DataFrame:
@@ -590,6 +590,7 @@ def features_at(ind: dict, t_idx: np.ndarray, j_idx: np.ndarray) -> pd.DataFrame
         "spy_dist200": mk["spy_dist200"].values[t_idx],
         "spy_ret5": mk["spy_ret5"].values[t_idx],
         "breadth50": mk["breadth50"].values[t_idx],
+        "spy_bear_age": (mk["spy_bear_age"].values[t_idx] if "spy_bear_age" in mk else np.zeros(len(t_idx))),
         "vix": mk["vix"].values[t_idx], "vix_ratio": mk["vix_ratio"].values[t_idx],
         "sector_up": g("sector_up"),
         "is_etf": ind["is_etf"].values[t_idx, j_idx].astype(float),

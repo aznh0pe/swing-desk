@@ -725,7 +725,7 @@ function runHealth() {
   if (!out.closed) for (const p of RUN_PLAN) {
     const at = (out.half && p.half?.at) || p.at, from = (out.half && p.half?.from) || p.from || p.at;
     let hit = null, failed = null;
-    if (p.journal) { const j = S.journal.find((x) => x.date === day && !String(x.id).endsWith("-weekly")); if (j) hit = journalHM(j) || at; }
+    if (p.journal) { const j = S.journal.find((x) => x.date === day && !/-(weekly|checks)$/.test(String(x.id))); if (j) hit = journalHM(j) || at; }
     else for (const sc of S.scans) {
       const t = ptParts(sc.started_at); if (!t || t.day !== day || t.hm < from || !p.modes.includes(sc.mode)) continue;
       if (sc.status === "failed") { if (!failed || t.hm < failed) failed = t.hm; } else if (!hit || t.hm < hit) hit = t.hm;
@@ -800,8 +800,10 @@ function attentionBanner() {
   if (ri.length || lastRun?.status === "failed") out += `<div class="banner crit" style="margin-bottom:12px"><b>Problem in the last scan (${dtShort(lastRun.started_at)}):</b> ${lastRun.status === "failed" ? "the scan failed. " : ""}${ri.map((t) => esc(t)).join(" ")} ${lastRun.status === "failed" ? "" : "The scan still finished and its results are complete. "}Tell Claude in the Swing Desk chat so it gets fixed.</div>`;
   else out += fixedNote(rsScan, "scan");
   // problems in the daily learning review or the weekly recalibration: shown until that job's next clean run
-  for (const [weekly, name] of [[false, "daily learning review"], [true, "weekly recalibration"]]) {
-    const j = S.journal.find((x) => String(x.id).endsWith("-weekly") === weekly);
+  // each kind of run is named for what it is (Nov 14, 2026: a problem in an on-demand checks run showed as a problem in the daily review)
+  const jKind = (x) => String(x.id).endsWith("-weekly") ? "weekly" : String(x.id).endsWith("-checks") ? "checks" : "daily";
+  for (const [kind, name] of [["daily", "daily learning review"], ["weekly", "weekly recalibration"], ["checks", "promotion and wider-list check"]]) {
+    const j = S.journal.find((x) => jKind(x) === kind);
     const [ji, rs] = openOf(Array.isArray(j?.issues) ? j.issues : [], j);
     if (ji.length) out += `<div class="banner crit" style="margin-bottom:12px"><b>Problem in the last ${name} (${j.date ? dShort(j.date) : "latest"}):</b> ${ji.map((t) => esc(t)).join(" ")} Tell Claude in the Swing Desk chat so it gets fixed.</div>`;
     else out += fixedNote(rs, `${name} (${j?.date ? dShort(j.date) : "latest"})`);
@@ -1649,11 +1651,18 @@ function ideaCard({ i, r, st }) {
 }
 function journalEntry(j) {
   const li = (arr) => (arr || []).map((x) => `<li>${esc(x)}</li>`).join("");
+  // which run wrote the entry: the weekly recalibration and the on-demand checks have no shadow or live tallies of their own
+  const kind = /-weekly$/.test(String(j.id)) ? "Weekly recalibration" : /-checks$/.test(String(j.id)) ? "Promotion and wider-list check" : "";
+  const fixed = Array.isArray(j.issues_resolved) ? j.issues_resolved : [];
+  const openIssues = (Array.isArray(j.issues) ? j.issues : []).filter((t) => !fixed.some((r) => r.issue === t));
+  const meta = kind ? `${kind}${Array.isArray(j.runs) && j.runs.length > 1 ? ` · ${j.runs.length} runs that day` : ""}`
+    : `Shadow ${j.shadow?.n ? `${pct(100 * j.shadow.win_rate)} of ${esc(j.shadow.n)}` : "–"} · live ${j.live?.n ? `${pct(100 * j.live.win_rate)} of ${esc(j.live.n)}` : "–"}`;
   return `<article class="panel" style="display:flex;flex-direction:column;gap:6px"><div class="section-head"><h3>${dShort(j.date)}</h3>
-    <span class="meta">Shadow ${j.shadow?.n ? `${pct(100 * j.shadow.win_rate)} of ${esc(j.shadow.n)}` : "–"} · live ${j.live?.n ? `${pct(100 * j.live.win_rate)} of ${esc(j.live.n)}` : "–"}</span></div>
+    <span class="meta">${meta}</span></div>
     ${j.market_condition ? `<div class="small"><b>Market:</b> ${esc(COND_LABEL[j.market_condition] || j.market_condition)}</div>` : ""}
     ${j.by_grade ? `<div class="small"><b>By grade:</b> ${[["aplus", "A+"], ["topup", "Top-ups"], ["watch", "Watchlist"]].map(([k, l]) => { const r = j.by_grade[k] || {}; return `${l} ${r.n ? `${esc(r.wins)}/${esc(r.n)} (${pct(100 * r.win_rate, 0)})` : "–"}`; }).join(" · ")}</div>` : ""}
-    ${Array.isArray(j.issues) && j.issues.length ? `<div class="small" style="color:var(--crit)"><b>Run problems:</b><ul style="margin:2px 0 0;padding-left:18px">${li(j.issues)}</ul></div>` : ""}
+    ${openIssues.length ? `<div class="small" style="color:var(--crit)"><b>Run problems:</b><ul style="margin:2px 0 0;padding-left:18px">${li(openIssues)}</ul></div>` : ""}
+    ${fixed.length ? `<div class="small"><b>Run problems, fixed:</b><ul style="margin:2px 0 0;padding-left:18px">${li(fixed.map((r) => r.fix || r.issue))}</ul></div>` : ""}
     ${j.worked?.length ? `<div class="small"><b>Worked:</b><ul style="margin:2px 0 0;padding-left:18px">${li(j.worked)}</ul></div>` : ""}
     ${j.didnt_work?.length ? `<div class="small"><b>Didn't work:</b><ul style="margin:2px 0 0;padding-left:18px">${li(j.didnt_work)}</ul></div>` : ""}
     <div class="small"><b>Insights:</b><ul style="margin:2px 0 0;padding-left:18px">${li(j.insights)}</ul></div>

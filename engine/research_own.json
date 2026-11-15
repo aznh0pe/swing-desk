@@ -1,0 +1,353 @@
+[
+ {
+  "id": "R_BEAR_FEAR_FADE_LEADER",
+  "label": "Leader as Fear Fades, Bear Market",
+  "family": "Momentum / bear market",
+  "about": "The fear-fade entry (VIX falling hard over three days) applied under the 200-day: when panic drains out of a bear market, leaders still above their own 200-day lead the relief rally. Buy near the close; take profits at 2 ATR or the 7-day high.",
+  "source": {
+   "title": "Swing Desk own design (bear-market research, Nov 14 2026)",
+   "url": "https://claude.ai/artifact/Kren5ttP4TJUL4EerX17oA"
+  },
+  "universe": "stock",
+  "conditions": [
+   "rs_pct >= 0.8",
+   "close > sma200",
+   "spy_above200 < 0.5",
+   "(vix / vix[3] - 1) <= -{d}"
+  ],
+  "entry": {
+   "kind": "close"
+  },
+  "stop": {
+   "atr": 3.5
+  },
+  "target": {
+   "atr": "{t}"
+  },
+  "exit": "high7",
+  "max_hold": 8,
+  "valid_days": 1,
+  "regime": [],
+  "params": {
+   "d": 0.12,
+   "t": 2.0
+  },
+  "grid": {
+   "d": [
+    0.1,
+    0.15
+   ],
+   "t": [
+    1.0,
+    2.0
+   ]
+  }
+ },
+ {
+  "id": "R_BEAR_ETF_WASHOUT",
+  "label": "ETF Washout in a Bear Market",
+  "family": "Mean reversion / bear market",
+  "about": "Index and sector ETFs cannot go to zero the way a stock can, so their washouts in bear markets have snapped back more reliably than single stocks. An unleveraged ETF with RSI(2) under 10 that closes near its low while SPY is under its 200-day; buy a little under the close, sell on a close above the prior day's high.",
+  "source": {
+   "title": "Swing Desk own design (bear-market research, Nov 14 2026)",
+   "url": "https://claude.ai/artifact/Kren5ttP4TJUL4EerX17oA"
+  },
+  "universe": "etf",
+  "conditions": [
+   "spy_above200 < 0.5",
+   "is_lev < 0.5",
+   "rsi2 < {r}",
+   "ibs < {i}",
+   "close < sma5"
+  ],
+  "entry": {
+   "kind": "limit_next",
+   "price": "close - {k}*atr10"
+  },
+  "stop": {
+   "atr": 3.0
+  },
+  "target": {
+   "price": "high[1]",
+   "min_atr": 0.4,
+   "cap_atr": 3
+  },
+  "exit": "prev_high",
+  "max_hold": 5,
+  "valid_days": 1,
+  "regime": [],
+  "params": {
+   "r": 10,
+   "i": 0.25,
+   "k": 0.2
+  },
+  "grid": {
+   "r": [
+    5,
+    10
+   ],
+   "i": [
+    0.2,
+    0.35
+   ],
+   "k": [
+    0.0,
+    0.3
+   ]
+  }
+ },
+ {
+  "id": "R_BEAR_YOUNG_PANIC",
+  "label": "Sharp Correction Panic, Early in a Bear",
+  "family": "Mean reversion / bear market",
+  "about": "Early in a break below the 200-day (the first weeks), a 3%+ market drop in a week has usually been a correction that snapped back; deep into a bear market the same drop kept falling. Buy a leader above its own 200-day that closes weak on such a day, only while the break is young.",
+  "source": {
+   "title": "Swing Desk own design (bear-market research, Nov 14 2026)",
+   "url": "https://claude.ai/artifact/Kren5ttP4TJUL4EerX17oA"
+  },
+  "universe": "stock",
+  "conditions": [
+   "spy_bear_age >= 1",
+   "spy_bear_age <= {a}",
+   "spy_ret5 <= -0.03",
+   "rs_pct >= 0.7",
+   "close > sma200",
+   "ibs < 0.3"
+  ],
+  "entry": {
+   "kind": "limit_next",
+   "price": "close - {k}*atr10"
+  },
+  "stop": {
+   "atr": 3.5
+  },
+  "target": {
+   "price": "sma5",
+   "min_atr": 0.3,
+   "cap_atr": 4
+  },
+  "exit": "sma5",
+  "max_hold": 6,
+  "valid_days": 1,
+  "regime": [],
+  "params": {
+   "a": 25,
+   "k": 0.3
+  },
+  "grid": {
+   "a": [
+    15,
+    25,
+    40
+   ],
+   "k": [
+    0.3,
+    0.6
+   ]
+  }
+ },
+ {
+  "id": "R_BEAR_RALLY_PULLBACK",
+  "label": "Pullback inside a Bear-Market Rally",
+  "family": "Mean reversion / bear market",
+  "about": "Bear markets have strong rallies. When SPY is under its 200-day but back above its 50-day, the short-term trend is up: buy a leader above its own 50-day on a short-term oversold reading; sell at the 5-day average.",
+  "source": {
+   "title": "Swing Desk own design (bear-market research, Nov 14 2026)",
+   "url": "https://claude.ai/artifact/Kren5ttP4TJUL4EerX17oA"
+  },
+  "universe": "stock",
+  "conditions": [
+   "spy_above200 < 0.5",
+   "spy > spy_sma50",
+   "close > sma50",
+   "rs_pct >= {rs}",
+   "rsi2 < {r}"
+  ],
+  "entry": {
+   "kind": "limit_next",
+   "price": "close - {k}*atr10"
+  },
+  "stop": {
+   "atr": 3.5
+  },
+  "target": {
+   "price": "sma5",
+   "min_atr": 0.3,
+   "cap_atr": 4
+  },
+  "exit": "sma5",
+  "max_hold": 6,
+  "valid_days": 1,
+  "regime": [],
+  "params": {
+   "rs": 0.7,
+   "r": 15,
+   "k": 0.3
+  },
+  "grid": {
+   "rs": [
+    0.7,
+    0.85
+   ],
+   "r": [
+    10,
+    20
+   ],
+   "k": [
+    0.3,
+    0.6
+   ]
+  }
+ },
+ {
+  "id": "R_BEAR_LEADER_STRETCH",
+  "label": "Bear-Market Leader, Oversold",
+  "family": "Mean reversion / bear market",
+  "about": "While SPY is under its 200-day, the few stocks still in their own uptrend (above a rising 200-day, top relative strength) are where buyers return first. Buy one when it is short-term oversold, a little under the close; sell at the 5-day average.",
+  "source": {
+   "title": "Swing Desk own design (bear-market research, Nov 14 2026)",
+   "url": "https://claude.ai/artifact/Kren5ttP4TJUL4EerX17oA"
+  },
+  "universe": "stock",
+  "conditions": [
+   "spy_above200 < 0.5",
+   "close > sma200",
+   "slope200 > 0",
+   "rs_pct >= {rs}",
+   "rsi2 < {r}"
+  ],
+  "entry": {
+   "kind": "limit_next",
+   "price": "close - {k}*atr10"
+  },
+  "stop": {
+   "atr": 3.5
+  },
+  "target": {
+   "price": "sma5",
+   "min_atr": 0.3,
+   "cap_atr": 4
+  },
+  "exit": "sma5",
+  "max_hold": 6,
+  "valid_days": 1,
+  "regime": [],
+  "params": {
+   "rs": 0.8,
+   "r": 15,
+   "k": 0.3
+  },
+  "grid": {
+   "rs": [
+    0.8,
+    0.9
+   ],
+   "r": [
+    10,
+    20
+   ],
+   "k": [
+    0.3,
+    0.6
+   ]
+  }
+ },
+ {
+  "id": "R_BEAR_AGED_BOUNCE_CONFIRMED",
+  "label": "Aged Bear, Confirmed Bounce in a Leader",
+  "family": "Price action / bear market",
+  "about": "Deep into a bear market, buying weakness fails; waiting for strength works better. A relative-strength leader that was oversold yesterday and closes above yesterday's high today has buyers in control. Buy near the close; take profits at 2 ATR or the 7-day high.",
+  "source": {
+   "title": "Swing Desk own design (bear-market research, Nov 14 2026)",
+   "url": "https://claude.ai/artifact/Kren5ttP4TJUL4EerX17oA"
+  },
+  "universe": "stock",
+  "conditions": [
+   "spy_bear_age >= {a}",
+   "rsi2[1] < 15",
+   "close > high[1]",
+   "rs_pct >= {rs}",
+   "close > sma50"
+  ],
+  "entry": {
+   "kind": "close"
+  },
+  "stop": {
+   "atr": 2.5
+  },
+  "target": {
+   "atr": 2.0
+  },
+  "exit": "high7",
+  "max_hold": 6,
+  "valid_days": 1,
+  "regime": [],
+  "params": {
+   "a": 30,
+   "rs": 0.7
+  },
+  "grid": {
+   "a": [
+    20,
+    40
+   ],
+   "rs": [
+    0.7,
+    0.85
+   ]
+  }
+ },
+ {
+  "id": "R_BEAR_DEFENSIVE_DIP",
+  "label": "Low-Volatility Uptrend Dip in a Bear Market",
+  "family": "Mean reversion / bear market",
+  "about": "In bear markets money hides in quiet, steady stocks. A low-volatility stock above its rising 200-day that gets short-term oversold while SPY is under its 200-day; buy a little under the close, sell at the 5-day average.",
+  "source": {
+   "title": "Swing Desk own design (bear-market research, Nov 14 2026)",
+   "url": "https://claude.ai/artifact/Kren5ttP4TJUL4EerX17oA"
+  },
+  "universe": "stock",
+  "conditions": [
+   "spy_above200 < 0.5",
+   "atr_pct < {v}",
+   "close > sma200",
+   "slope200 > 0",
+   "rsi2 < {r}"
+  ],
+  "entry": {
+   "kind": "limit_next",
+   "price": "close - {k}*atr10"
+  },
+  "stop": {
+   "atr": 3.5
+  },
+  "target": {
+   "price": "sma5",
+   "min_atr": 0.3,
+   "cap_atr": 4
+  },
+  "exit": "sma5",
+  "max_hold": 6,
+  "valid_days": 1,
+  "regime": [],
+  "params": {
+   "v": 0.02,
+   "r": 10,
+   "k": 0.3
+  },
+  "grid": {
+   "v": [
+    0.018,
+    0.025
+   ],
+   "r": [
+    10,
+    20
+   ],
+   "k": [
+    0.3,
+    0.6
+   ]
+  }
+ }
+]

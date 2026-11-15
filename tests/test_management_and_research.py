@@ -142,10 +142,13 @@ def test_seed_backlog_is_valid_distinct_and_consumed_in_order(tmp_path):
     assert sim and sim[0]["id"] == "R_ETF_3DAY_HL"
 
 
-def test_research_next_offers_the_backlog_when_the_queue_is_empty(tmp_path):
+def test_research_next_offers_the_backlog_when_the_queue_is_empty(tmp_path, monkeypatch):
     st = tmp_path / "state"
     (st / "research").mkdir(parents=True)
     (st / "research_results").mkdir()
+    empty = tmp_path / "own.json"
+    empty.write_text("[]")
+    monkeypatch.setattr(RS, "OWN_FILE", empty)   # no own design waiting in the repo: own designs come before the backlog
     RS.cmd_next(str(st), str(tmp_path / "out"))
     nx = json.loads((tmp_path / "out" / "next.json").read_text())
     assert nx["from_backlog"] and nx["next"] == nx["backlog"][0]

@@ -192,6 +192,12 @@ def compute(w: dict, universe: pd.DataFrame | None = None, compact: bool | None 
     mk["spy_above200"] = (spy > mk["spy_sma200"]).astype(float)
     mk["spy_dist200"] = spy / mk["spy_sma200"] - 1
     mk["spy_ret5"] = spy / spy.shift(5) - 1
+    # sessions in a row SPY has closed at or below its 200-day average: 0 in an uptrend, a few weeks in a sharp
+    # correction, months in a grinding bear market (2008-09, 2022), where dips kept failing. The first months
+    # of the history use the average of what exists (100+ sessions) so the count starts before the 200th day.
+    _sma_b = spy.rolling(200, min_periods=100).mean()
+    _below = ((spy <= _sma_b) & _sma_b.notna()).astype(int)
+    mk["spy_bear_age"] = _below.groupby((_below == 0).cumsum()).cumsum().astype(float)
     mk["spy_rsi2"] = rsi(spy.to_frame(), 2).iloc[:, 0]
     st = c.loc[:, ref]  # breadth is measured on the core tier, so it means the same with a wider universe
     mk["breadth50"] = (st > ind["sma50"].loc[:, st.columns]).sum(axis=1) / st.notna().sum(axis=1).replace(0, np.nan)
