@@ -284,6 +284,32 @@ def _growth_pick(post: pd.DataFrame, near: list, base, topup_min_week: int, risk
 
 # ----------------------------------------------------------------------------- weekly top-ups
 TOPUP_MIN_TRADES = 150   # filled top-ups 2022-now before a top-up rule can be chosen
+RESEARCH_GATE = {"win_slack": 0.005, "avg_slack": 0.0005, "per_week": 0.8,
+                 # win rate comes first: a slightly smaller average trade is accepted when the win rate rises and the
+                 # A+ set as a whole earns more on unseen data (more winning setups), never below the A+ floor
+                 "win_gain": 0.005, "avg_keep": 0.85, "avg_floor": 0.006, "profit_gain": 1.10}
+
+
+def research_gate_ok(G, G0, rules=None):
+    """Do the research strategies make the A+ set better on unseen data? G = graded with them, G0 = without.
+    Win rate must hold and the weekly count must not thin out; the average trade must hold too, unless the win
+    rate rises by half a point or more, the average keeps 85% of its size (and the +0.6% A+ floor) and the set's
+    total return (trades x average) rises by 10% or more."""
+    r = rules or RESEARCH_GATE
+    f = lambda d, k: float((d or {}).get(k) or 0)
+    w1, w0 = f(G, "oos_aplus_win_rate"), f(G0, "oos_aplus_win_rate")
+    a1, a0 = f(G, "oos_aplus_avg_ret"), f(G0, "oos_aplus_avg_ret")
+    n1, n0 = f(G, "oos_aplus_trades"), f(G0, "oos_aplus_trades")
+    if w1 < w0 - r["win_slack"]:
+        return False
+    if f(G, "oos_aplus_signals_per_week") < r["per_week"] * f(G0, "oos_aplus_signals_per_week"):
+        return False
+    if a1 >= a0 - r["avg_slack"]:
+        return True
+    return bool(w1 >= w0 + r["win_gain"] and a1 >= r["avg_keep"] * a0 and a1 >= r["avg_floor"]
+                and n1 * a1 >= r["profit_gain"] * n0 * a0)
+
+
 TOPUP_WIN_FLOOR = 0.68   # a top-up rule must have won at least this often on 2022-now data...
 TOPUP_WIN_BAND = 0.08    # ...and within this of the best rule's win rate, to be chosen for its weekly coverage
 TOPUP_MIN_AVG = 0.004    # their average trade must clear +0.4%
@@ -830,10 +856,8 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
                           "aplus_avg_oos": round(float(sub["ret"].mean()), 5) if len(sub) else None}
                 if len(sub) >= 30 and w_ < a_win - 0.03:
                     weak.append(n)
-            # keep or raise the A+ win rate and average trade without thinning out the weekly setups
-            better = (not G0) or (a_win >= float(G0.get("oos_aplus_win_rate") or 0) - 0.005
-                                  and float(G.get("oos_aplus_avg_ret") or 0) >= float(G0.get("oos_aplus_avg_ret") or 0) - 0.0005
-                                  and float(G.get("oos_aplus_signals_per_week") or 0) >= 0.8 * float(G0.get("oos_aplus_signals_per_week") or 0))
+            # keep or raise the A+ win rate and what the A+ set earns, without thinning out the weekly setups
+            better = (not G0) or research_gate_ok(G, G0)
             drop = research_on if not better else list(weak)
             # graded research strategies: replay the desk recalibrated with and without each one (its raw signals are
             # weak by design, so only the setups it would actually send, and what they do to the account, count)
@@ -872,7 +896,8 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
             for n in drop:
                 pn = per.get(n) or {}
                 why = graded_why.get(n) or (f"Off: it passed every standalone check, but adding the research strategies didn't improve the A+ set "
-                       f"on unseen data ({100 * a_win:.1f}% wins with them vs {100 * float(G0.get('oos_aplus_win_rate') or 0):.1f}% without)."
+                       f"on unseen data ({100 * a_win:.1f}% wins and {100 * float(G.get('oos_aplus_avg_ret') or 0):+.2f}% a trade with them vs "
+                       f"{100 * float(G0.get('oos_aplus_win_rate') or 0):.1f}% and {100 * float(G0.get('oos_aplus_avg_ret') or 0):+.2f}% without)."
                        if not better else
                        f"Off: it passed every standalone check, but its A+-grade trades won only {100 * (pn.get('aplus_win_oos') or 0):.1f}% "
                        f"on unseen data vs {100 * a_win:.1f}% for the whole A+ set, so it would dilute the alerts.")

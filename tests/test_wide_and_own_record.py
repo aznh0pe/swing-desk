@@ -349,3 +349,25 @@ def test_the_wider_list_is_screened_with_entry_and_stay_lines_and_a_grace_period
     # a blocked screener keeps the last good list instead of emptying it
     kept, st2 = U.build_ext(core, prev, "2026-11-14", rows=[row("ONLY", 5e9, 50, 60e6)] * 3) if False else (None, None)
     assert U.TWINS["SPYM"] == "SPY" and all(v not in U.TWINS for v in U.TWINS.values())            # twins point at primaries
+
+
+def test_research_gate_puts_win_rate_first():
+    """Nov 14, 2026: the refit dropped every research strategy because the average A+ trade slipped 1.27% -> 1.21%
+    although the win rate rose 74.4% -> 76.1% and the A+ set grew from 2,911 to 4,346 trades. Win rate comes first."""
+    from engine.calibrate import research_gate_ok
+    base = {"oos_aplus_win_rate": 0.744, "oos_aplus_avg_ret": 0.0127, "oos_aplus_trades": 2911, "oos_aplus_signals_per_week": 10.9}
+    live = {"oos_aplus_win_rate": 0.761, "oos_aplus_avg_ret": 0.0121, "oos_aplus_trades": 4346, "oos_aplus_signals_per_week": 15.9}
+    assert research_gate_ok(live, base)
+    # a lower win rate never passes, however much more it earns
+    assert not research_gate_ok(dict(live, oos_aplus_win_rate=0.730), base)
+    # same win rate with a smaller average: no win-rate gain, so the average must hold
+    assert not research_gate_ok(dict(live, oos_aplus_win_rate=0.746), base)
+    # a much thinner average, or one under the A+ floor, fails even with a higher win rate
+    assert not research_gate_ok(dict(live, oos_aplus_avg_ret=0.0100), base)
+    assert not research_gate_ok({"oos_aplus_win_rate": 0.70, "oos_aplus_avg_ret": 0.0055, "oos_aplus_trades": 5000, "oos_aplus_signals_per_week": 12},
+                                {"oos_aplus_win_rate": 0.68, "oos_aplus_avg_ret": 0.0062, "oos_aplus_trades": 2000, "oos_aplus_signals_per_week": 10})
+    # fewer setups a week fails; total profit must rise when the average slips
+    assert not research_gate_ok(dict(live, oos_aplus_signals_per_week=8.0), base)
+    assert not research_gate_ok(dict(live, oos_aplus_trades=3000), base)
+    # the old rule still passes what it passed: win rate and average both hold
+    assert research_gate_ok(dict(base, oos_aplus_win_rate=0.75, oos_aplus_avg_ret=0.0128), base)
