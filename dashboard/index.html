@@ -725,7 +725,7 @@ function runHealth() {
   if (!out.closed) for (const p of RUN_PLAN) {
     const at = (out.half && p.half?.at) || p.at, from = (out.half && p.half?.from) || p.from || p.at;
     let hit = null, failed = null;
-    if (p.journal) { const j = S.journal.find((x) => x.date === day && !/-(weekly|checks)$/.test(String(x.id))); if (j) hit = journalHM(j) || at; }
+    if (p.journal) { const j = S.journal.find((x) => x.date === day && !/-(weekly|checks(-\d+)?)$/.test(String(x.id))); if (j) hit = journalHM(j) || at; }
     else for (const sc of S.scans) {
       const t = ptParts(sc.started_at); if (!t || t.day !== day || t.hm < from || !p.modes.includes(sc.mode)) continue;
       if (sc.status === "failed") { if (!failed || t.hm < failed) failed = t.hm; } else if (!hit || t.hm < hit) hit = t.hm;
@@ -801,7 +801,8 @@ function attentionBanner() {
   else out += fixedNote(rsScan, "scan");
   // problems in the daily learning review or the weekly recalibration: shown until that job's next clean run
   // each kind of run is named for what it is (Nov 14, 2026: a problem in an on-demand checks run showed as a problem in the daily review)
-  const jKind = (x) => String(x.id).endsWith("-weekly") ? "weekly" : String(x.id).endsWith("-checks") ? "checks" : "daily";
+  // a checks entry is one whatever follows its name (Nov 14, 2026: a run saved a second entry as "...-checks-2" and it showed as the daily review)
+  const jKind = (x) => String(x.id).endsWith("-weekly") ? "weekly" : /-checks(-\d+)?$/.test(String(x.id)) ? "checks" : "daily";
   for (const [kind, name] of [["daily", "daily learning review"], ["weekly", "weekly recalibration"], ["checks", "promotion and wider-list check"]]) {
     const j = S.journal.find((x) => jKind(x) === kind);
     const [ji, rs] = openOf(Array.isArray(j?.issues) ? j.issues : [], j);
@@ -1652,7 +1653,7 @@ function ideaCard({ i, r, st }) {
 function journalEntry(j) {
   const li = (arr) => (arr || []).map((x) => `<li>${esc(x)}</li>`).join("");
   // which run wrote the entry: the weekly recalibration and the on-demand checks have no shadow or live tallies of their own
-  const kind = /-weekly$/.test(String(j.id)) ? "Weekly recalibration" : /-checks$/.test(String(j.id)) ? "Promotion and wider-list check" : "";
+  const kind = /-weekly$/.test(String(j.id)) ? "Weekly recalibration" : /-checks(-\d+)?$/.test(String(j.id)) ? "Promotion and wider-list check" : "";
   const fixed = Array.isArray(j.issues_resolved) ? j.issues_resolved : [];
   const openIssues = (Array.isArray(j.issues) ? j.issues : []).filter((t) => !fixed.some((r) => r.issue === t));
   const meta = kind ? `${kind}${Array.isArray(j.runs) && j.runs.length > 1 ? ` · ${j.runs.length} runs that day` : ""}`

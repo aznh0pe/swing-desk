@@ -79,7 +79,8 @@ def test_second_run_the_same_day_is_merged_and_pins_the_version(tmp_path):
     assert doc["changes"] == ["Promoted Morning Dip.", WL]          # the day's changes accumulate
     assert doc["insights"][-1] == WL and "morning result" not in doc["insights"]   # the headline is the latest run
     assert doc["runs"][0]["insights"] == ["morning result"] and doc["runs"][0]["issues"] == ["the first write failed"]
-    assert doc["runs"][1]["changes"] == [WL] and all(WL not in i for i in doc["runs"][1].get("insights", []))   # a run's record does not repeat itself
+    assert doc["runs"][1]["n_changes"] == 1 and "changes" not in doc["runs"][1]      # a run's record counts its changes; the entry lists them once
+    assert all(WL not in i for i in doc["runs"][1].get("insights", [])) and doc["runs"][0]["n_changes"] == 1
     assert doc["issues"] == ["the data feed is not the wide list yet"]      # the banner follows the latest run
     assert doc["issues_resolved"] == prev["issues_resolved"] and doc["evening"] == {"kept": True}   # nothing else is lost
     # a clean third run clears the open problem
@@ -141,6 +142,7 @@ def test_the_checks_prompt_saves_the_engine_entry_with_its_version_and_confirms_
     step = text[text.index("7. Journal"):text.index("Run problems:")]
     assert "engine.calibrate checksnote --promo" in step and "--prev $W/jv" in step and "--verify $W/jc" in step
     assert "if_version" in step and "exists" in step and "NOT SAVED" in step and "could not be saved" in step
+    assert "always exactly that doc_id" in step and "never a second document under another name" in step
     # the run composes nothing by hand: no report file or key is named in the journal step
     assert not re.search(r"tiers_report\.json|promote_report\.json|changelog_entry|tiers\.ext", step)
 
@@ -150,3 +152,11 @@ def test_every_journal_write_in_a_prompt_is_confirmed():
     for name in ("checks", "weekly", "learning"):
         text = (ROOT / "ops" / "generated" / f"{name}.md").read_text()
         assert re.search(r"[Cc]onfirm: ArtifactData \"get\" (strategy/params and )?journal/", text), name
+
+
+def test_the_dashboard_treats_any_checks_entry_as_a_checks_entry():
+    """Nov 14, 2026: a run saved a second entry as 2026-11-14-checks-2; the dashboard showed its note as a problem in
+    the daily learning review and counted it as the day's review."""
+    html = (ROOT / "dashboard" / "index.html").read_text()
+    assert html.count("checks(-\\d+)?") >= 3
+    assert 'endsWith("-checks")' not in html and "/-checks$/" not in html

@@ -2305,18 +2305,21 @@ def checks_note(promo_dir=None, tiers_dir=None, rs_dir=None, prev_dir=None, issu
         issues = [ln.strip() for ln in pathlib.Path(issues_file).read_text().splitlines() if ln.strip()]
     # each run's record: what it changed, any insight that is not just one of those changes again, and its problems
     extra = [x for x in insights if not any(c in x or x in c for c in changes)]
-    run = {"at": stamp, "changes": changes, **({"insights": extra} if extra else {}), **({"issues": issues} if issues else {})}
+    real = [c for c in changes if c != NO_CHANGE]
+    run = {"at": stamp, "n_changes": len(real), **({"insights": extra} if extra else {}), **({"issues": issues} if issues else {})}
     prev, ver = _find_doc(prev_dir, doc_id)
     if prev:
         doc = dict(prev)
         runs = list(prev.get("runs") or [])
+        before = [c for c in (prev.get("changes") or []) if c != NO_CHANGE]
         if not runs:   # a document written before runs were listed: its content is the first run
-            runs.append({"at": prev.get("created_at"), "changes": list(prev.get("changes") or []),
-                         "insights": list(prev.get("insights") or []), **({"issues": list(prev["issues"])} if prev.get("issues") else {})})
+            pi = [x for x in (prev.get("insights") or []) if not any(c in x or x in c for c in before)]
+            runs.append({"at": prev.get("created_at"), "n_changes": len(before), **({"insights": pi} if pi else {}),
+                         **({"issues": list(prev["issues"])} if prev.get("issues") else {})})
         runs.append(run)
-        day_changes = [c for r in runs for c in (r.get("changes") or []) if c != NO_CHANGE]
+        # the day's changes add up in the entry itself; a run's record only counts its own, so the entry stays small
         doc.update(id=doc_id, date=prev.get("date") or day, updated_at=stamp, insights=insights, runs=runs[-12:],
-                   changes=list(dict.fromkeys(day_changes)) or [NO_CHANGE])
+                   changes=list(dict.fromkeys(before + real)) or [NO_CHANGE])
         doc.pop("issues", None)   # the banner follows the latest run; earlier problems stay under "runs"
     else:
         doc = {"id": doc_id, "date": day, "created_at": stamp, "updated_at": stamp, "changes": changes, "insights": insights, "runs": [run]}
