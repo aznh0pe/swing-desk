@@ -783,6 +783,9 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
     f = funds(state)
     gov = risk_governor(state, f["capital"], state["settings"])
     f["risk_pct"], f["risk_reason"] = gov["risk_pct"], gov["reason"]
+    # the position limit the entries were built with: the owner's setting, not the engine default (Nov 16, 2026: the
+    # digest printed "open positions 2/5" after the setting had been raised to 7; the slots themselves used 7)
+    f["max_open"] = int((state.get("settings") or {}).get("max_open_positions") or P["risk"]["max_open"])
     positions = []
     for tid, v in state["trades"].items():
         t = dict(v["doc"])
@@ -1175,7 +1178,7 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
             line += " | paused today: " + ", ".join(S.meta(n, P)["label"] for n in mc["paused"])
         lines.append(line)
     lines.append(f"Capital {_money(f['capital'])} | cash free {_money(f['cash'])} | open positions {f['open_count']}"
-                 f"/{P['risk']['max_open']}" + (f" | risk per trade {f['risk_pct']:g}% ({f['risk_reason']})" if f.get("risk_pct") else ""))
+                 f"/{f.get('max_open') or P['risk']['max_open']}" + (f" | risk per trade {f['risk_pct']:g}% ({f['risk_reason']})" if f.get("risk_pct") else ""))
     d = scan["data"]
     for i, t in enumerate(scan.get("run_issues") or []):
         lines.insert(1 + i, f"⚠ RUN PROBLEM: {t}")

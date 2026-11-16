@@ -855,3 +855,18 @@ def test_a_recalibration_replaces_the_live_setup_only_if_it_does_at_least_as_wel
     assert CB.adoption_gate(live, same)[0]
     src = pathlib.Path(CB.__file__).read_text()
     assert "ok_a, checks_a = adoption_gate(champ, chall)" in src and 'P_old["source"] = "backtest (live setup kept)"' in src
+
+
+def test_digest_shows_the_owners_position_limit_not_the_engine_default():
+    """Nov 16, 2026: the setting had been raised from 5 to 7 positions; the slots used 7 but the digest still printed
+    "open positions 2/5"."""
+    import datetime as _dt
+    from engine import scan as SC
+    base = {"data": {"status": "ok", "notes": []}, "market": {"label": "Bull", "spy": 1, "spy_vs_200d_pct": 1, "spy_5d_pct": 1,
+            "breadth_above_50d_pct": 60, "vix": 15}, "counts": {}, "mode": "preclose", "alert_updates": {}}
+    P = S.params_with_defaults(None)
+    f = {"capital": 5000.0, "cash": 4000.0, "open_count": 2}
+    txt = SC.make_digest({**base, "funds": {**f, "max_open": 7}}, [], [], [], [], 0, P, _dt.datetime(2026, 11, 16, 5, 24))
+    assert "open positions 2/7" in txt and "2/5" not in txt
+    old = SC.make_digest({**base, "funds": f}, [], [], [], [], 0, P, _dt.datetime(2026, 11, 16, 5, 24))   # a scan saved before the field
+    assert f"open positions 2/{P['risk']['max_open']}" in old
