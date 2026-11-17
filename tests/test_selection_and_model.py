@@ -198,7 +198,9 @@ def test_beta_and_downside_capture_describe_how_a_ticker_moves_with_the_market()
     assert abs(b["SPY"] - 1) < 0.02 and 1.6 < b["HIGH"] < 2.0 and 0.25 < b["LOW"] < 0.55
     assert abs(d["SPY"] - 1) < 0.02 and d["HIGH"] > 1.5 > 0.7 > d["LOW"]
     assert ind["beta250"].iloc[:100].isna().all().all()                  # no value before there is a history
-    assert {"beta250", "dcap250"} <= R.FRAME_NAMES and RS.STATE_STOCK_EXTRA == ("beta250", "dcap250")
+    assert {"beta250", "dcap250", "attn"} <= R.FRAME_NAMES and RS.STATE_STOCK_EXTRA == ("beta250", "dcap250", "attn")
+    a = ind["attn"].iloc[-1]                                              # steady volume: trading at its own norm
+    assert abs(a["SPY"] - 1) < 0.25 and "attn" not in S.FEATURES
     assert not {"beta250", "dcap250"} & set(S.FEATURES) and not {"beta250", "dcap250"} & set(M.LOGIT_FEATURES)
     own = {x["id"] for x in __import__("json").load(open(RS.OWN_FILE))} if isinstance(__import__("json").load(open(RS.OWN_FILE)), list) else set()
     assert not own or {"R_BEAR_ANY_HIGH_CAPTURE_DIP", "R_SELLOFF_HIGH_BETA_LEADER"} <= own

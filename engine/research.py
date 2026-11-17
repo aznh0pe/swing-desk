@@ -696,7 +696,7 @@ STATE_MARKET = {
     "breadth200": lambda mk: mk["breadth200"],
 }
 STATE_STOCK = ("rsi2", "atr_pct", "dist50", "dist200", "rs_pct", "ret5", "ibs", "adx14", "vol_ratio", "streak", "depth_atr", "slope200")
-STATE_STOCK_EXTRA = ("beta250", "dcap250")   # stock states that are not model features: looked up from the indicator frames
+STATE_STOCK_EXTRA = ("beta250", "dcap250", "attn")   # stock states that are not model features: looked up from the indicator frames
 STATE_EXPR = {"vix_chg3": "(vix / vix[3] - 1)", "vix_ratio_max5": "rmax(vix_ratio, 5)", "spy_ret3": "(spy / spy[3] - 1)",
               "spy_ret20": "(spy / spy[20] - 1)", "spy_below_20d_high": "(spy / rmax(spy, 20) - 1)",
               "breadth50_chg5": "(breadth50 - breadth50[5])"}

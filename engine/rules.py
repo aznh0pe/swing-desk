@@ -33,7 +33,9 @@ params (defaults) or the grid (variants tried on 2008-2021 data only).
 How a ticker behaves, not only how the market does: beta250 is the ticker's beta to SPY over the last 250
 sessions and dcap250 its downside capture (1.5 = it falls 1.5x SPY on days SPY drops 1%+). A ticker can suit one
 market condition and not another: in bear-market selloffs the dips of high-capture stocks bounce most. Combine
-them with "market_conditions" to build a strategy for the tickers that suit a condition.
+them with "market_conditions" to build a strategy for the tickers that suit a condition. attn is attention: the
+ticker's 20-day dollar volume over its own one-year median (1.5 = trading 50% above its norm, "in play"); A+ setups
+in high-attention stocks won more and paid more in both periods.
 """
 from __future__ import annotations
 
@@ -52,7 +54,7 @@ FRAME_NAMES = {"open", "high", "low", "close", "volume", "sma5", "sma10", "sma20
                "max7c", "hh10", "hh20", "hh252", "ll20", "mean4", "streak", "slope200", "slope50", "dist200",
                "dist50", "v20", "v5", "dv20", "vol_ratio", "ret5", "ret63", "ret126", "adx14", "vwap20",
                "vstd20", "gap_up", "rs_pct", "sector_up", "is_etf", "is_stock", "is_lev", "range",
-               "beta250", "dcap250"}   # beta and downside capture vs SPY over 250 sessions (see indicators.py)
+               "beta250", "dcap250", "attn"}   # beta and downside capture vs SPY over 250 sessions (see indicators.py)
 MARKET_NAMES = {"spy", "spy_sma200", "spy_sma50", "spy_above200", "spy_dist200", "spy_ret5", "spy_rsi2",
                 "breadth50", "breadth200", "vix", "vix_ratio", "spy_bear_age"}
 CAL_NAMES = {"dow", "tdom", "tdom_rev"}

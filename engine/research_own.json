@@ -593,5 +593,57 @@
     10
    ]
   }
+ },
+ {
+  "family": "Mean reversion",
+  "source": {
+   "title": "Swing Desk own design (2026-11-16)",
+   "url": "https://github.com/aznh0pe/swing-desk"
+  },
+  "universe": "stock",
+  "regime": [],
+  "valid_days": 1,
+  "entry": {
+   "kind": "limit_next",
+   "price": "close"
+  },
+  "stop": {
+   "atr": 3.5
+  },
+  "target": {
+   "price": "sma5",
+   "min_atr": 0.5,
+   "cap_atr": 4
+  },
+  "exit": "sma5",
+  "max_hold": 7,
+  "id": "R_IN_PLAY_INSIDE_DAY_CALM",
+  "label": "In-Play Leader Pauses after a Dip, Calm Bull Market",
+  "about": "Own design from the Nov 16 attention study. After a short dip a high-attention leader prints an inside day in a calm bull market: selling has paused. Buy the next session at the close price, sell at the 5-day average.",
+  "market_conditions": [
+   "bull_calm"
+  ],
+  "conditions": [
+   "attn >= {a}",
+   "rs_pct >= 0.7",
+   "close > sma200",
+   "high < high[1]",
+   "low > low[1]",
+   "rsi2[1] <= {r}"
+  ],
+  "params": {
+   "a": 1.4,
+   "r": 15
+  },
+  "grid": {
+   "a": [
+    1.3,
+    1.7
+   ],
+   "r": [
+    10,
+    20
+   ]
+  }
  }
 ]

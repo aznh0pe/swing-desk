@@ -197,6 +197,11 @@ def compute(w: dict, universe: pd.DataFrame | None = None, compact: bool | None 
     ind["dcap250"] = _r.mul(_dn, axis=0).rolling(250, min_periods=20).mean().div(
         (_rs * _dn).rolling(250, min_periods=20).mean(), axis=0)   # 1.5 = falls 1.5x the market on its bad days
     del _r, _mr, _cov
+    # Attention (Nov 16, 2026): today's 20-day dollar volume against the ticker's own one-year median. A+ setups in
+    # stocks trading well above their norm won more and paid about twice as much in both periods (top two fifths
+    # 79% / 77% against 76% for the quietest in 2008-2021, 82% / 81% against 72% in 2022-now); recent returns and
+    # distance from the 52-week high did not hold up.
+    ind["attn"] = ind["dv20"] / (c * v).rolling(250, min_periods=120).median()
     mk = pd.DataFrame(index=c.index)
     mk["spy"] = spy
     mk["spy_sma200"] = spy.rolling(200, min_periods=150).mean()
