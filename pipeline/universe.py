@@ -76,8 +76,13 @@ ISHARES = {  # fallback when the screener is unreachable: index-fund holdings (n
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 
 # entry and stay thresholds (hysteresis keeps the list from flapping around a line)
-EXT_RULES = {"cap_in": 2.0e9, "cap_stay": 1.0e9, "price_in": 8.0, "price_stay": 5.0,
-             "dv_in": 25e6, "dv_stay": 12e6, "keep_days": 90, "max_ext": 1600}
+# Nov 16, 2026: the size line moved from $2B to $1B. On the wider list's A+ setups at its own bar (2022-now) the
+# smallest names were as good as the rest: $2-4B companies won 91% of 92, $4-8B 90% of 203, $8-20B 91% of 257; by
+# dollar volume, $30-50M a day won 90% of 172 against 88-94% above. Quality did not fall off at the edge of the
+# list, so the edge was not where it should stop. The engine's own daily filter (price $10+, $30M+ a day) and the
+# weekly tier check still decide what trades.
+EXT_RULES = {"cap_in": 1.0e9, "cap_stay": 0.7e9, "price_in": 8.0, "price_stay": 5.0,
+             "dv_in": 25e6, "dv_stay": 12e6, "keep_days": 90, "max_ext": 2400}
 
 NASDAQ_SECTOR = {  # Nasdaq's sector names -> the GICS names the engine keys sector ETFs and caps on
     "Technology": "Information Technology", "Health Care": "Health Care", "Finance": "Financials",
