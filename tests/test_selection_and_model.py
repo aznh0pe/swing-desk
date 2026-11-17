@@ -178,3 +178,27 @@ def test_own_designs_in_the_repo_are_queued_logged_and_credited(tmp_path, monkey
     monkeypatch.setattr(sys, "argv", ["research", "test", "--id", two[1]["id"], "--data", "data", "--state", str(state), "--out", str(tmp_path / "t2")])
     RS.main()
     assert [sp["id"] for sp in seen["specs"]] == [two[1]["id"]] and seen["by_idea"] == {two[1]["id"]: RS.OWN_BY}
+
+
+def test_beta_and_downside_capture_describe_how_a_ticker_moves_with_the_market():
+    """Nov 16, 2026: in bear-market selloffs the dips of high-capture stocks bounce most (both periods); the two
+    frames are rule inputs and state-scan dimensions, not model features."""
+    import numpy as np
+    import pandas as pd
+    from engine import indicators as I, rules as R, research as RS, strategies as S, model as M
+    rng = np.random.default_rng(3)
+    idx = pd.bdate_range("2024-01-02", periods=420)
+    m = rng.normal(0.0003, 0.012, len(idx))
+    px = {"SPY": 100 * np.cumprod(1 + m), "HIGH": 50 * np.cumprod(1 + 1.8 * m + rng.normal(0, 0.002, len(idx))),
+          "LOW": 80 * np.cumprod(1 + 0.4 * m + rng.normal(0, 0.002, len(idx)))}
+    c = pd.DataFrame(px, index=idx)
+    w = {"close": c, "open": c * 0.999, "high": c * 1.01, "low": c * 0.99, "volume": c * 0 + 1e6}
+    ind = I.compute(w)
+    b, d = ind["beta250"].iloc[-1], ind["dcap250"].iloc[-1]
+    assert abs(b["SPY"] - 1) < 0.02 and 1.6 < b["HIGH"] < 2.0 and 0.25 < b["LOW"] < 0.55
+    assert abs(d["SPY"] - 1) < 0.02 and d["HIGH"] > 1.5 > 0.7 > d["LOW"]
+    assert ind["beta250"].iloc[:100].isna().all().all()                  # no value before there is a history
+    assert {"beta250", "dcap250"} <= R.FRAME_NAMES and RS.STATE_STOCK_EXTRA == ("beta250", "dcap250")
+    assert not {"beta250", "dcap250"} & set(S.FEATURES) and not {"beta250", "dcap250"} & set(M.LOGIT_FEATURES)
+    own = {x["id"] for x in __import__("json").load(open(RS.OWN_FILE))} if isinstance(__import__("json").load(open(RS.OWN_FILE)), list) else set()
+    assert not own or {"R_BEAR_ANY_HIGH_CAPTURE_DIP", "R_SELLOFF_HIGH_BETA_LEADER"} <= own

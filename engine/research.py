@@ -696,6 +696,7 @@ STATE_MARKET = {
     "breadth200": lambda mk: mk["breadth200"],
 }
 STATE_STOCK = ("rsi2", "atr_pct", "dist50", "dist200", "rs_pct", "ret5", "ibs", "adx14", "vol_ratio", "streak", "depth_atr", "slope200")
+STATE_STOCK_EXTRA = ("beta250", "dcap250")   # stock states that are not model features: looked up from the indicator frames
 STATE_EXPR = {"vix_chg3": "(vix / vix[3] - 1)", "vix_ratio_max5": "rmax(vix_ratio, 5)", "spy_ret3": "(spy / spy[3] - 1)",
               "spy_ret20": "(spy / spy[20] - 1)", "spy_below_20d_high": "(spy / rmax(spy, 20) - 1)",
               "breadth50_chg5": "(breadth50 - breadth50[5])"}
@@ -715,6 +716,15 @@ def state_scan(spec: dict, ind: dict, P: dict, split, buckets=(0, 0.1, 0.25, 0.5
         except Exception:
             continue
     t = t.join(pd.DataFrame(cols), on="signal_date")
+    for k in STATE_STOCK_EXTRA:   # how the ticker itself behaves (a ticker can suit one market condition and not another)
+        df = ind.get(k)
+        if df is None or not len(t):
+            continue
+        ii, jj = df.index.get_indexer(t["signal_date"]), df.columns.get_indexer(t["ticker"])
+        ok = (ii >= 0) & (jj >= 0)
+        v = np.full(len(t), np.nan)
+        v[ok] = df.values[ii[ok], jj[ok]]
+        t[k] = v
 
     def cell(g):
         if not len(g):
@@ -724,7 +734,7 @@ def state_scan(spec: dict, ind: dict, P: dict, split, buckets=(0, 0.1, 0.25, 0.5
                 "day_win": round(float(days.mean()), 3), "avg": round(float(g["ret"].mean()), 4)}
     tr, te = t[t["signal_date"] < split], t[t["signal_date"] >= split]
     out = {"base": {"train": cell(tr), "oos": cell(te)}, "market": {}, "stock": {}, "standouts": []}
-    for kind, names in (("market", ["mkt_" + k for k in STATE_MARKET if "mkt_" + k in t.columns]), ("stock", [f for f in STATE_STOCK if f in t.columns])):
+    for kind, names in (("market", ["mkt_" + k for k in STATE_MARKET if "mkt_" + k in t.columns]), ("stock", [f for f in STATE_STOCK + STATE_STOCK_EXTRA if f in t.columns])):
         for col in names:
             v = tr[col].dropna()
             if len(v) < 200:
