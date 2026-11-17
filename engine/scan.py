@@ -823,7 +823,7 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
             errors.append(f"fill check {a.get('ticker')}: {e!r}"[:200])
         # placed orders always get their verdict; an order you never marked placed only when it would have filled in
         # the session that just ended (in case you placed it and forgot to mark it), and never a withdrawn setup
-        unmarked_ok = (fc and fc.get("filled") and fc["last_day"] >= str(last_session)
+        unmarked_ok = (fc and fc.get("filled") and ask_unmarked(fc["last_day"], last_session)
                        and not (prev_ov.get(aid) or {}).get("withdrawn") and not a.get("withdrawn"))
         if fc and (a.get("status") == "placed" or unmarked_ok):
             fc["id"] = fc.get("alert_id") or aid
@@ -974,6 +974,17 @@ def closed_run(mode: str, now, out: pathlib.Path, run_token: str | None = None) 
             "status": "closed", "data_status": "n/a", "errors": [], "headline": email_headline(scan_doc)}
 
 
+UNMARKED_ASK_SESSIONS = 3
+
+
+def ask_unmarked(last_day, last_session) -> bool:
+    """An order never marked placed whose limit traded through: keep asking for UNMARKED_ASK_SESSIONS sessions
+    after its day, or until it is answered. Nov 16, 2026: the question used to be asked for one session only,
+    so by that evening's post-close scan Friday's order had dropped out of the digest unanswered, and by the
+    next morning it had left the dashboard too. A filled order nobody recorded is a position no scan watches."""
+    return str(last_day) >= str(cal.prev_trading_day(last_session, UNMARKED_ASK_SESSIONS - 1))
+
+
 def order_fill_check(a: dict, ind: dict, today, mode: str, partial_bar: bool) -> dict | None:
     """Once an entry order's session is over: did its limit trade through? Same rule as the backtest and the
     shadow grader: a buy limit fills only when the session's low trades BELOW it (a touch is not a fill).
@@ -1018,7 +1029,8 @@ def order_fill_check(a: dict, ind: dict, today, mode: str, partial_bar: bool) ->
         out["text"] = (("Probably FILLED" if mine else "If you placed it, it probably filled") + f": the low ${lo:.2f} traded "
                        f"below your ${lim:.2f} limit on {_day(last)}.{at_open} "
                        f"If it filled, set the stop ${a.get('stop')} and target ${a.get('target')} as a bracket and press "
-                       "Mark done (filled) with your fill price, so the scans watch the position. If it didn't, press Didn't fill.")
+                       "Mark done (filled) with your fill price, so the scans watch the position. If it didn't, press Didn't fill"
+                       + ("." if mine else "; if you never placed it, press I didn't place it."))
     elif touched:
         out["text"] = (f"Probably didn't fill: the low ${lo:.2f} touched your ${lim:.2f} limit without trading below it. "
                        "A touch sometimes fills, so check your brokerage: press Mark done (filled) if it did, Didn't fill if not.")

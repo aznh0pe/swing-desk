@@ -434,7 +434,9 @@ function entryLive(a) {
 // orders whose session ended without a recorded result: a clear "didn't fill" is recorded on its own
 // (autoExpireOrders); a probable fill, or no price check yet, asks you one question
 function orderResolutions() {
-  const fcm = fillCheckMap(), out = [], recent = prevTD(todayPT());
+  // an order never marked placed that probably filled is asked about for 3 sessions after its day (engine: UNMARKED_ASK_SESSIONS),
+  // not one: a filled order nobody recorded is a position no scan watches
+  const fcm = fillCheckMap(), out = [], recent = prevTD(prevTD(prevTD(todayPT())));
   for (const a of S.alerts) {
     if (a.type !== "entry" || !sessionOver(a)) continue;
     const fc = fcm[a.id];
@@ -1030,13 +1032,14 @@ function ladderSvg(a) {
 function resolveCard({ a, fc, kind }) {
   const day = dShort(lastValidDay(a));
   const msg = kind === "likely" ? `Probably <b>filled</b>: the low ${px(fc.low)} traded below your ${px(a.entry)} limit on ${day}.${num(fc.open) !== null && num(fc.open) < num(a.entry) ? ` It opened at ${px(fc.open)}, under your limit, so the fill was probably near that price.` : ""} If it filled, set the stop ${px(a.stop)} and target ${px(a.target)} and record the fill so the scans watch it.`
-    : kind === "unmarked" ? `You didn't mark it placed, but if you did, it probably <b>filled</b>: the low ${px(fc.low)} traded below the ${px(a.entry)} limit on ${day}.`
+    : kind === "unmarked" ? `You didn't mark it placed, but if you did, it probably <b>filled</b>: the low ${px(fc.low)} traded below the ${px(a.entry)} limit on ${day}. One tap records what happened; this stays here until you answer (3 sessions at most).`
     : fc?.text ? esc(fc.text) : `The ${day} session is over. The next scan checks the day's prices and records it on its own if it didn't fill; or answer now.`;
   const lvl = kind === "ask" ? "info" : "good";
   return `<div class="act ${lvl}"><div class="tk">${esc(a.ticker)}</div><div><div class="what">Buy limit ${px(a.entry)} for ${day} <span class="pill ${kind === "ask" ? "info" : "good"}">${kind === "ask" ? "Did it fill?" : "Probably filled"}</span></div>
     <div class="small">${msg}</div>
     <div class="t-actions" style="padding:8px 0 0;border:0"><button class="btn primary small" type="button" data-act="fill" data-id="${esc(a.id)}">Mark done (filled)</button>
-    ${kind === "unmarked" ? `<button class="btn ghost small" type="button" data-act="skip" data-id="${esc(a.id)}">I didn't place it</button>` : `<button class="btn small" type="button" data-act="nofill" data-id="${esc(a.id)}">Didn't fill</button>`}</div></div></div>`;
+    <button class="btn small" type="button" data-act="nofill" data-id="${esc(a.id)}">${kind === "unmarked" ? "Placed it, didn't fill" : "Didn't fill"}</button>
+    ${kind === "unmarked" ? `<button class="btn ghost small" type="button" data-act="skip" data-id="${esc(a.id)}">I didn't place it</button>` : ""}</div></div></div>`;
 }
 function ticket(a, today) {
   const e = num(a.entry), s = num(a.stop), t = num(a.target);
@@ -1880,7 +1883,10 @@ document.addEventListener("click", async (e) => {
     if (act === "fill" && a) fillModal(a);
     else if (act === "placed" && a) { await updDoc("alerts/" + a.id, { status: "placed", placed_at: nowIso() }); toast(`${a.ticker} marked as placed.`); }
     else if (act === "skip" && a) { await updDoc("alerts/" + a.id, { status: "skipped", skipped_at: nowIso() }); toast(`${a.ticker} skipped. The learning loop still grades it.`); }
-    else if (act === "nofill" && a) { await updDoc("alerts/" + a.id, { status: "unfilled", unfilled_at: nowIso() }); toast(`${a.ticker}: recorded as placed but not filled. It counts toward your fill rate, not as a skip.`); }
+    else if (act === "nofill" && a) {
+      const fc = fillCheckMap()[a.id];  // keep what the price check saw, so the review can compare it with what happened
+      await updDoc("alerts/" + a.id, { status: "unfilled", unfilled_at: nowIso(), ...(fc ? { fill_check: { day: fc.last_day || a.valid_for, low: fc.low ?? null, limit: fc.limit ?? null, touched: !!fc.touched, text: fc.text || "", scan_at: fc._at || null } } : {}) });
+      toast(fc?.filled ? `${a.ticker}: recorded as placed but not filled. The day's low was under your limit, so the daily review will flag it as an execution gap to look into.` : `${a.ticker}: recorded as placed but not filled. It counts toward your fill rate, not as a skip.`, fc?.filled ? 7000 : undefined); }
     else if (act === "cancelled" && a) { await updDoc("alerts/" + a.id, { status: "cancelled", cancelled_at: nowIso() }); toast(`${a.ticker}: order recorded as cancelled.`); }
     else if (act === "copy" && a) copyOrder(a);
     else if (act === "dismiss" && a) { await updDoc("alerts/" + a.id, { status: "dismissed", done_at: nowIso() }); }
