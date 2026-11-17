@@ -1578,6 +1578,7 @@ STANDALONE = {"win": 0.75,          # win rate, 2008-2021 and 2022-now, in each 
               "oos_trades": 300, "oos_days": 40, "train_days": 80,
               "cond_trades": 100,   # trades in a market condition (each period) before it can trade there
               "oos_pf": 1.4, "oos_avg": 0.004,
+              "train_pf": 1.30, "train_avg": 0.002,   # the payoff must be there in 2008-2021 too (the live rule's own floors)
               "year_win": 0.60, "year_days": 5,   # no calendar year with 5+ signal days below 60%
               "haircut": 0.02, "p_cap": 0.80}     # win estimate shown and graded on: the weakest measure minus 2 points
 
@@ -1638,6 +1639,10 @@ def standalone_record(tr: pd.DataFrame, split) -> dict:
         chk("oos_trades", "Trades 2022-now", sb_.get("trades", 0), f">= {q['oos_trades']}", sb_.get("trades", 0) >= q["oos_trades"]),
         chk("oos_days", "Signal days 2022-now", int(db), f">= {q['oos_days']}", db >= q["oos_days"]),
         chk("train_days", "Signal days 2008-2021", int(da), f">= {q['train_days']}", da >= q["train_days"]),
+        # Nov 16, 2026: a calm-market momentum idea won 78% in 2008-2021 with profit factor 1.2 and six years that
+        # lost money on average, and passed every check here. A+ means the payoff as well as the win rate, in both periods.
+        chk("train_pf", "Profit factor 2008-2021", sa_.get("profit_factor"), f">= {q['train_pf']:.2f}", _pf_at_least(sa_, q["train_pf"])),
+        chk("train_avg", "Average trade 2008-2021", sa_.get("avg_ret"), f">= +{100 * q['train_avg']:.1f}%", (sa_.get("avg_ret") or 0) >= q["train_avg"]),
         chk("oos_pf", "Profit factor 2022-now", sb_.get("profit_factor"), f">= {q['oos_pf']}", _pf_at_least(sb_, q["oos_pf"])),
         chk("oos_avg", "Average trade 2022-now", sb_.get("avg_ret"), f">= +{100 * q['oos_avg']:.1f}%", (sb_.get("avg_ret") or 0) >= q["oos_avg"]),
         chk("worst_year", "Weakest calendar year" + (f" ({worst[0]})" if worst else ""), round(worst[1], 4) if worst else None,
@@ -1859,13 +1864,17 @@ def run_promote(data_dir, state_dir, out_dir, split="2022-01-01", log=print, now
         ok, checks = promote_gate(base, new, iid)
         lab = spec.get("label") or iid
         sa = None
-        if not ok and not spec.get("graded"):
+        if not ok:
             # graded by the pooled model it could not help; is its own record A+ grade (see STANDALONE)? Then replay
             # the desk with its setups sent as A+ in the market conditions where that record holds.
+            # Nov 16, 2026: this used to be skipped for a candidate judged on its graded setups. A calm-market idea
+            # bought at the close is never a weekly top-up and the pooled model grades none of it A+, so such a
+            # candidate added no setups to the replay and was never checked on its own record either. Every
+            # candidate now gets both routes; the standards are the same.
             try:
                 sa_try = standalone_record(tr, split)
                 if sa_try["ok"]:
-                    spec_s = {**spec, "market_conditions": list(sa_try["conditions"])}
+                    spec_s = {**{k: v for k, v in spec.items() if k != "graded"}, "market_conditions": list(sa_try["conditions"])}
                     P_s = copy.deepcopy(P_new)
                     P_s.setdefault("custom", {})[iid] = {"spec": spec_s, "params": variant, "label": spec.get("label"),
                                                          "family": spec.get("family"), "about": spec.get("about"), "source": spec.get("source")}
@@ -1955,9 +1964,19 @@ def run_promote(data_dir, state_dir, out_dir, split="2022-01-01", log=print, now
                       "promoted": {"at": now.isoformat(timespec="seconds"), "by": "daily promotion check"}}
         P_new, post, base = P_c, post_c, new
     if not report["promoted"]:
-        return done("No candidate passed the promotion check today: " + "; ".join(
-            f"{c.get('label', c['id'])} missed " + ", ".join(k["label"].lower() for k in c.get("checks", []) if not k["ok"])
-            if c.get("checks") else f"{c['id']}: {c.get('note')}" for c in report["candidates"]) + ".")
+        def why_not(c):
+            if not c.get("checks"):
+                return f"{c['id']}: {c.get('note')}"
+            s_ = f"{c.get('label', c['id'])} missed " + ", ".join(k["label"].lower() for k in c["checks"] if not k["ok"])
+            sa_ = c.get("standalone") or {}   # the second route: A+ on its own tested record
+            bad = [k["label"].lower() for k in sa_.get("checks") or [] if not k.get("ok")]
+            if bad:
+                s_ += " (own record: missed " + ", ".join(bad) + ")"
+            elif sa_.get("gate"):
+                s_ += " (own record is A+ grade, but the desk replayed with those setups missed " + ", ".join(
+                    k["label"].lower() for k in sa_["gate"] if not k.get("ok")) + ")"
+            return s_
+        return done("No candidate passed the promotion check today: " + "; ".join(why_not(c) for c in report["candidates"]) + ".")
     P_new["version"] = int(time.time())
     P_new["updated"] = now.isoformat(timespec="seconds")
     (out / "doc_params.json").write_text(json.dumps({"params": P_new, "updated_at": now.isoformat(timespec="seconds"),

@@ -436,3 +436,14 @@ def test_research_gate_puts_win_rate_first():
     assert not research_gate_ok(dict(live, oos_aplus_trades=3000), base)
     # the old rule still passes what it passed: win rate and average both hold
     assert research_gate_ok(dict(base, oos_aplus_win_rate=0.75, oos_aplus_avg_ret=0.0128), base)
+
+
+def test_an_own_record_needs_the_payoff_in_the_design_years_too():
+    """Nov 16, 2026: Leader Pushing Higher on a Quiet Tape won 78% in 2008-2021 with profit factor 1.2 (six years
+    that lost money on average) and 82% with profit factor 1.7 on unseen data, and passed every own-record check."""
+    t = _own_trades()
+    t.loc[(t["ret"] < 0) & (t["signal_date"] < "2022-01-01"), "ret"] = -0.045   # 2008-2021: profit factor about 1.07
+    thin = CB.standalone_record(t, "2022-01-01")
+    failed = {c["key"] for c in thin["checks"] if not c["ok"]}
+    assert not thin["ok"] and {"train_pf", "train_avg"} & failed and "oos_pf" not in failed
+    assert {"train_pf", "train_avg"} <= {c["key"] for c in CB.standalone_record(_own_trades(), "2022-01-01")["checks"]}

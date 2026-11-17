@@ -870,3 +870,53 @@ def test_digest_shows_the_owners_position_limit_not_the_engine_default():
     assert "open positions 2/7" in txt and "2/5" not in txt
     old = SC.make_digest({**base, "funds": f}, [], [], [], [], 0, P, _dt.datetime(2026, 11, 16, 5, 24))   # a scan saved before the field
     assert f"open positions 2/{P['risk']['max_open']}" in old
+
+
+def test_a_candidate_judged_on_graded_setups_is_also_checked_on_its_own_record(tmp_path, monkeypatch):
+    """Nov 16, 2026: a calm-market idea bought at the close is never a weekly top-up and the pooled model grades none
+    of it A+, so it added nothing to the replay; the own-record check was skipped for graded candidates, so it was
+    never judged at all. Every candidate that fails the first replay now gets the own-record check."""
+    st = tmp_path / "state"
+    for c in ("strategy", "research", "research_results", "config"):
+        (st / c).mkdir(parents=True)
+    P = S.params_with_defaults(None)
+    P["grading"].update(G_TEST)
+    P["models"] = {"_pooled": {"kind": "pooled"}}
+    P["strategies"]["S"] = {"enabled": True}
+    (st / "strategy" / "params.json").write_text(json.dumps({"params": P, "changelog_entry": []}, default=str))
+    (st / "strategy" / "backtest.json").write_text(json.dumps({"strategies": {"S": {"enabled": True, "label": "S"}}}))
+    (st / "config" / "settings.json").write_text(json.dumps({"min_setups_week": 5, "risk_pct": 2, "max_open_positions": 5,
+                                                              "max_position_pct": 25}))
+    spec = {"id": "R_CALM", "label": "Calm idea", "family": "Momentum", "about": "x", "universe": "stock",
+            "conditions": ["close > open"], "entry": {"kind": "close"}, "stop": {"atr": 3}, "target": {"atr": 1}, "max_hold": 5}
+    (st / "research" / "R_CALM.json").write_text(json.dumps({"id": "R_CALM", "spec": spec}))
+    (st / "research_results" / "R_CALM-20261116-1500.json").write_text(json.dumps(
+        {"id": "R_CALM-20261116-1500", "idea_id": "R_CALM", "verdict": "candidate", "graded_ok": True, "variant": {},
+         "tested_at": "2026-11-16T15:00:00-08:00", "graded": {"checks": [], "periods": {"oos": {"win_rate": 0.8}}}}))
+
+    def weak(d, rng):  # never clears a bar, so the desk sends none of it
+        if rng.random() < 0.6:
+            return {"signal_date": d, "ticker": f"C{d.dayofyear % 9}", "strategy": "R_CALM", "score": 20.0, "p": 0.30,
+                    "filled": True, "ret": 0.01, "fill": 100.0, "stop": 94.0, "exit_date": d + pd.Timedelta(days=3)}
+    extra = {"reason": "target", "held": 3, "r_mult": 0.5, "limit": 100.0, **{f: 0.0 for f in S.FEATURES}}
+    world = _desk_world().assign(**extra)
+    new_rows = _desk_world(extra=weak)
+    new_rows = new_rows[new_rows["strategy"] == "R_CALM"].assign(**extra)
+    monkeypatch.setattr(CB.D, "load_history", lambda d: {"close": pd.DataFrame()})
+    monkeypatch.setattr(CB.D, "load_universe", lambda d: {})
+    monkeypatch.setattr(CB.I, "compute", lambda w, u: {})
+    monkeypatch.setattr(CB.S, "all_plans", lambda ind, P_: {"S": {"name": "S"}})
+    monkeypatch.setattr(CB.S, "build", lambda name, ind, P_: {"name": name})
+    monkeypatch.setattr(CB.B, "simulate", lambda plan, ind, P_, include_unfilled=True: world if plan["name"] == "S" else new_rows)
+    monkeypatch.setattr(CB, "_score_live", lambda t, pm, P_: t)
+    asked = []
+
+    def record(tr, split):
+        asked.append(len(tr))
+        return {"ok": False, "p": None, "conditions": ["bull_calm"], "record": {},
+                "checks": [{"key": "train_pf", "label": "Profit factor 2008-2021", "value": 1.2, "need": ">= 1.30", "ok": False}], "note": ""}
+    monkeypatch.setattr(CB, "standalone_record", record)
+    rep = CB.run_promote("data", st, tmp_path / "out", now=pd.Timestamp("2026-11-16T15:30:00-08:00"))
+    assert rep["promoted"] == [] and asked == [len(new_rows)]
+    cand = rep["candidates"][0]
+    assert cand["id"] == "R_CALM" and cand["graded"] and cand["standalone"]["checks"][0]["key"] == "train_pf"

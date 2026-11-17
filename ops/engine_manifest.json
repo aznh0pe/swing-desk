@@ -1,5 +1,5 @@
 {
- "fingerprint": "323ff990d0f1",
+ "fingerprint": "de5a20398758",
  "files": [
   "engine/__init__.py",
   "engine/backtest.py",
