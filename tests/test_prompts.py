@@ -52,3 +52,20 @@ def test_backups_list_every_upcoming_holiday(tmp_path):
         label = dt.date.fromisoformat(d).strftime("%a %b %-d %Y")
         for key in ("premarket", "preclose", "postclose", "learning"):
             assert label in fresh[f"backup_{key}"], (key, label)
+
+
+def test_project_doc_saves_name_a_folder_the_save_accepts(tmp_path):
+    """Nov 16: the daily review prepared the Learning Journal under /tmp/sd/pj and the project save refused it
+    (it only takes a file inside the session's working folder). Every step that saves a project doc says so."""
+    fresh = _build(tmp_path)
+    for name in ("learning", "backup_learning", "weekly", "backup_weekly"):
+        text = fresh[name]
+        assert "project_write" in text
+        assert "session's working folder" in text and "A file under /tmp or $W is refused" in text, name
+        assert "$W/pj" not in text, name
+
+
+def test_the_backup_review_check_ignores_other_journal_entries(tmp_path):
+    """A promotion-check entry written earlier the same day must not pass for the daily review."""
+    text = _build(tmp_path)["backup_learning"]
+    assert '"-weekly", "-checks" or "-checks-" plus a number' in text

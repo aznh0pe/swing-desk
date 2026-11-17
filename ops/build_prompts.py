@@ -181,7 +181,9 @@ BACKUPS = {
     "backup_learning": {
         "TARGET_ID": "trig_01V9Hsf7VTMtsod6AoHQnyiP", "TARGET": "learning", "TARGET_LABEL": "today's daily learning review", "DUE": "3:12 PM PT", "CHECK_COLLECTION": "journal",
         "CHECK_ORDER": "date", "CLOSED_RULE": WEEKDAY_CLOSED,
-        "CHECK_RULE": 'It ran if one of those documents has date equal to today (YYYY-MM-DD) and an id that doesn\'t end in "-weekly".',
+        "CHECK_RULE": ('It ran if one of those documents has date equal to today (YYYY-MM-DD) and an id that is the date alone or the date '
+                       'plus a time (such as 2026-11-16-1513). Ids ending in "-weekly", "-checks" or "-checks-" plus a number are other '
+                       'runs and do not count.'),
         "OK_LINE": "today's daily review ran (journal <its id>).", "URGENCY": ""},
     "backup_weekly": {
         "TARGET_ID": "trig_01QZiuM65EDHm187zYcSY7Kk", "TARGET": "weekly", "TARGET_LABEL": "this week's Saturday recalibration", "DUE": "Saturday 10:14 AM PT",
