@@ -441,7 +441,11 @@ function orderResolutions() {
     if (a.type !== "entry" || !sessionOver(a)) continue;
     const fc = fcm[a.id];
     if (a.status === "placed") { if (fc?.filled === false && !fc.touched) continue; out.push({ a, fc, kind: fc?.filled ? "likely" : "ask" }); }
-    else if (a.status === "new" && fc?.filled && !a.withdrawn && (lastValidDay(a) || "") >= recent) out.push({ a, fc, kind: "unmarked" });
+    else if (a.status === "new" && !a.withdrawn && (lastValidDay(a) || "") >= recent) {
+      if (fc?.filled) out.push({ a, fc, kind: "unmarked" });
+      // bought near the close: no price check can tell whether you bought it, so it is asked about the same way
+      else if (a.entry_kind === "close" || fc?.at_close) out.push({ a, fc, kind: "unmarked_close" });
+    }
   }
   return out.sort((x, y) => String(y.a.valid_for).localeCompare(String(x.a.valid_for)));
 }
@@ -1032,14 +1036,16 @@ function ladderSvg(a) {
 function resolveCard({ a, fc, kind }) {
   const day = dShort(lastValidDay(a));
   const msg = kind === "likely" ? `Probably <b>filled</b>: the low ${px(fc.low)} traded below your ${px(a.entry)} limit on ${day}.${num(fc.open) !== null && num(fc.open) < num(a.entry) ? ` It opened at ${px(fc.open)}, under your limit, so the fill was probably near that price.` : ""} If it filled, set the stop ${px(a.stop)} and target ${px(a.target)} and record the fill so the scans watch it.`
+    : kind === "unmarked_close" ? `This one was a buy near the ${day} close, and nothing was recorded for it. If you bought it, record the fill so the scans watch the position and tell you when to sell. One tap; this stays here until you answer (3 sessions at most).`
     : kind === "unmarked" ? `You didn't mark it placed, but if you did, it probably <b>filled</b>: the low ${px(fc.low)} traded below the ${px(a.entry)} limit on ${day}. One tap records what happened; this stays here until you answer (3 sessions at most).`
     : fc?.text ? esc(fc.text) : `The ${day} session is over. The next scan checks the day's prices and records it on its own if it didn't fill; or answer now.`;
   const lvl = kind === "ask" ? "info" : "good";
-  return `<div class="act ${lvl}"><div class="tk">${esc(a.ticker)}</div><div><div class="what">Buy limit ${px(a.entry)} for ${day} <span class="pill ${kind === "ask" ? "info" : "good"}">${kind === "ask" ? "Did it fill?" : "Probably filled"}</span></div>
+  const un = kind === "unmarked" || kind === "unmarked_close";
+  return `<div class="act ${kind === "unmarked_close" ? "info" : lvl}"><div class="tk">${esc(a.ticker)}</div><div><div class="what">${kind === "unmarked_close" ? `Buy near the close on ${day}` : `Buy limit ${px(a.entry)} for ${day}`} <span class="pill ${kind === "ask" || kind === "unmarked_close" ? "info" : "good"}">${kind === "unmarked_close" ? "Did you buy it?" : kind === "ask" ? "Did it fill?" : "Probably filled"}</span></div>
     <div class="small">${msg}</div>
     <div class="t-actions" style="padding:8px 0 0;border:0"><button class="btn primary small" type="button" data-act="fill" data-id="${esc(a.id)}">Mark done (filled)</button>
-    <button class="btn small" type="button" data-act="nofill" data-id="${esc(a.id)}">${kind === "unmarked" ? "Placed it, didn't fill" : "Didn't fill"}</button>
-    ${kind === "unmarked" ? `<button class="btn ghost small" type="button" data-act="skip" data-id="${esc(a.id)}">I didn't place it</button>` : ""}</div></div></div>`;
+    <button class="btn small" type="button" data-act="nofill" data-id="${esc(a.id)}">${un ? "Placed it, didn't fill" : "Didn't fill"}</button>
+    ${un ? `<button class="btn ghost small" type="button" data-act="skip" data-id="${esc(a.id)}">I didn't place it</button>` : ""}</div></div></div>`;
 }
 function ticket(a, today) {
   const e = num(a.entry), s = num(a.stop), t = num(a.target);

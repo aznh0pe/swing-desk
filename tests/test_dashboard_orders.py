@@ -41,17 +41,17 @@ def _functions():
     return "\n".join(out)
 
 
-def _cards(now, tmp_path, status="new"):
+def _cards(now, tmp_path, status="new", extra=None):
     js = """
 const RealDate = Date, NOW = %s;
 global.Date = class extends RealDate { constructor(...a) { if (a.length) super(...a); else super(NOW); } };
 const esc = (v) => String(v);
-const S = { alerts: [{ id: "A1", type: "entry", status: %s, valid_for: "2026-11-13", valid_days: 1, ticker: "IFF", entry: 80.38, stop: 70.73, target: 82.66 }],
+const S = { alerts: [{ id: "A1", type: "entry", status: %s, valid_for: "2026-11-13", valid_days: 1, ticker: "IFF", entry: 80.38, stop: 70.73, target: 82.66 }].concat(%s),
   scans: [{ started_at: "2026-11-16T14:06:46-08:00", fill_checks: [] },
           { started_at: "2026-11-16T12:26:44-08:00", fill_checks: [{ alert_id: "A1", filled: true, last_day: "2026-11-13", low: 79.94, limit: 80.38, touched: false }] }] };
 %s
 console.log(JSON.stringify(orderResolutions().map((r) => ({ kind: r.kind, html: resolveCard(r) }))));
-""" % (json.dumps(now), json.dumps(status), _functions())
+""" % (json.dumps(now), json.dumps(status), json.dumps(extra or []), _functions())
     f = tmp_path / "t.js"
     f.write_text(js)
     r = subprocess.run(["node", str(f)], capture_output=True, text=True, env={"TZ": "America/Los_Angeles", "PATH": "/usr/bin:/bin:/opt/node22/bin"})
@@ -90,3 +90,32 @@ def test_the_unmarked_text_names_all_three_answers():
     assert fc["filled"] and "press Didn't fill; if you never placed it, press I didn't place it." in fc["text"]
     mine = SC.order_fill_check({**a, "status": "placed"}, ind, dt.date(2026, 11, 16), "premarket", False)
     assert mine["text"].endswith("If it didn't, press Didn't fill.")
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_a_buy_at_the_close_setup_nobody_recorded_is_asked_about(tmp_path):
+    """Nov 16, 2026: XOP (A+, buy near the close) left the dashboard at 1 PM with status new. No price check can say
+    whether a buy-at-the-close order was bought, so nothing ever asked, and a bought position would go unwatched."""
+    xop = {"id": "X1", "type": "entry", "status": "new", "valid_for": "2026-11-16", "valid_days": 1, "ticker": "XOP",
+           "entry": 179.99, "stop": 163.44, "target": 184.13, "entry_kind": "close"}
+    before = _cards("2026-11-16T12:40:00-08:00", tmp_path, "unfilled", [xop])
+    assert before == []                                              # its session is still running: the ticket is live
+    for now in ("2026-11-16T18:59:00-08:00", "2026-11-19T12:00:00-08:00"):
+        cards = _cards(now, tmp_path, "unfilled", [xop])
+        assert [c["kind"] for c in cards] == ["unmarked_close"], now
+        assert "Did you buy it?" in cards[0]["html"] and "Buy near the close" in cards[0]["html"]
+        assert all(f'data-act="{a}"' in cards[0]["html"] for a in ("fill", "nofill", "skip"))
+    assert _cards("2026-11-20T06:00:00-08:00", tmp_path, "unfilled", [xop]) == []
+    assert _cards("2026-11-17T06:00:00-08:00", tmp_path, "unfilled", [{**xop, "status": "skipped"}]) == []
+    assert _cards("2026-11-17T06:00:00-08:00", tmp_path, "unfilled", [{**xop, "withdrawn": True}]) == []
+
+
+def test_the_scan_asks_about_an_unrecorded_buy_at_the_close_too():
+    a = {"id": "X1", "ticker": "XOP", "type": "entry", "status": "new", "valid_for": "2026-11-16", "entry": 179.99,
+         "entry_kind": "close", "stop": 163.44, "target": 184.13}
+    assert SC.order_fill_check(a, {}, dt.date(2026, 11, 16), "preclose", True) is None       # session still running
+    fc = SC.order_fill_check(a, {}, dt.date(2026, 11, 17), "premarket", False)
+    assert fc["at_close"] and fc["filled"] is None and "if you never placed it, press I didn't place it." in fc["text"]
+    src = pathlib.Path(SC.__file__).read_text()
+    assert '(fc.get("filled") or fc.get("at_close")) and ask_unmarked(' in src
+    assert 'how = "buy near the close" if c.get("at_close")' in src

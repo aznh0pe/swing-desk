@@ -823,7 +823,9 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
             errors.append(f"fill check {a.get('ticker')}: {e!r}"[:200])
         # placed orders always get their verdict; an order you never marked placed only when it would have filled in
         # the session that just ended (in case you placed it and forgot to mark it), and never a withdrawn setup
-        unmarked_ok = (fc and fc.get("filled") and ask_unmarked(fc["last_day"], last_session)
+        # a buy-at-the-close order has no price check that can answer for it (Nov 16, 2026: XOP, an A+ setup bought
+        # near the close, was never asked about at all once its session ended), so it is asked about the same way
+        unmarked_ok = (fc and (fc.get("filled") or fc.get("at_close")) and ask_unmarked(fc["last_day"], last_session)
                        and not (prev_ov.get(aid) or {}).get("withdrawn") and not a.get("withdrawn"))
         if fc and (a.get("status") == "placed" or unmarked_ok):
             fc["id"] = fc.get("alert_id") or aid
@@ -905,7 +907,7 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
                    "topups": sum(1 for e in entries if e.get("topup_note") and not e.get("sent_earlier")),
                    "sent_earlier": sum(1 for e in entries if e.get("sent_earlier")), "near_misses": len(near), **signal_counts(positions),
                    "orders_to_record": sum(1 for c in fill_checks if c.get("filled")),
-                   "orders_to_check": sum(1 for c in fill_checks if c.get("status") == "placed"
+                   "orders_to_check": sum(1 for c in fill_checks if (c.get("status") == "placed" or c.get("at_close"))
                                           and (c.get("filled") is None or c.get("touched"))),
                    "orders_unfilled": sum(1 for c in fill_checks if c.get("filled") is False and not c.get("touched")),
                    "open_positions": len(positions), "expired": len(expire), "week_aplus": week_aplus,
@@ -1005,8 +1007,10 @@ def order_fill_check(a: dict, ind: dict, today, mode: str, partial_bar: bool) ->
     mine = out["status"] == "placed"
     kind = a.get("entry_kind") or ("close" if str(a.get("order", "")).startswith("Buy near the close") else "limit")
     if kind == "close" or not lim:
+        out["at_close"] = True
         out["text"] = (("A" if mine else "If you placed it: a") + " buy-near-the-close order, so only your brokerage "
-                       "knows whether it was bought. If it was, press Mark done (filled) with the price; if not, press Didn't fill.")
+                       "knows whether it was bought. If it was, press Mark done (filled) with the price; if not, press Didn't fill"
+                       + ("." if mine else "; if you never placed it, press I didn't place it."))
         return out
     lows, opens = ind["low"], ind["open"]
     days = [d for d in lows.index if vf <= d.date() <= last]
@@ -1233,11 +1237,12 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
             lines.append(f"- {p['ticker']}: {sg['action']}. {sg['text']} {pos_line(p)}")
     fcs = scan.get("fill_checks") or []
     rec = [c for c in fcs if c.get("filled")]
-    ask = [c for c in fcs if (c.get("filled") is None or c.get("touched")) and c.get("status") == "placed"]
+    ask = [c for c in fcs if (c.get("filled") is None or c.get("touched")) and (c.get("status") == "placed" or c.get("at_close"))]
     if rec or ask:
         lines += ["", numbered("ORDERS TO RECORD (did your buy order fill?)")]
         for c in rec + ask:
-            lines.append(f"- {c['ticker']} (buy limit {_money(c.get('limit'))}, {_day(c['valid_for'])}{', marked placed' if c.get('status') == 'placed' else ''}): {c['text']}")
+            how = "buy near the close" if c.get("at_close") else f"buy limit {_money(c.get('limit'))}"
+            lines.append(f"- {c['ticker']} ({how}, {_day(c['valid_for'])}{', marked placed' if c.get('status') == 'placed' else ''}): {c['text']}")
     recent_day = str(now.date() if scan["mode"] == "postclose" and not (scan.get("data") or {}).get("partial_bar")
                      else cal.prev_trading_day(now.date()))
     gone = [c for c in fcs if c.get("filled") is False and not c.get("touched") and c.get("status") == "placed"
