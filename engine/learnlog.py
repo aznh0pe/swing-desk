@@ -242,7 +242,10 @@ def portfolio_stats(alerts: list, shadow: list, trades: list, ledger: list, toda
             gaps.append((float(t["exit_price"]) / float(t["entry_price"]) - 1) - (float(s["exit"]) / float(s["fill"]) - 1))
     beyond = [sret(a) for a in past if str(a.get("capacity_note", "")).startswith("Ranked #")]
     within = [sret(a) for a in past if a.get("rank") and not str(a.get("capacity_note", "")).startswith("Ranked #")]
-    skipped = [sret(a) for a in past if ostate[a.get("id")] == "skipped"
+    # "skipped" is a choice; a setup that reached the owner too late (dashboard: Didn't see it in time) is a delivery
+    # problem and is counted on its own (Nov 16, 2026: XOP, an A+ buy-near-the-close setup, was live for 33 minutes)
+    missed = [a for a in past if a.get("missed")]
+    skipped = [sret(a) for a in past if (ostate[a.get("id")] == "skipped" and not a.get("missed"))
                or (ostate[a.get("id")] == "cancelled" and not a.get("withdrawn"))]
     # unfilled orders the grader counts as filled: the low traded through the limit on the order's day,
     # so a resting day order at the alert price should have filled (an execution gap worth checking)
@@ -265,7 +268,9 @@ def portfolio_stats(alerts: list, shadow: list, trades: list, ledger: list, toda
                    "unfilled_through_limit": [{"ticker": a.get("ticker"), "day": a.get("valid_for"), "limit": a.get("entry")}
                                               for a in through],
                    "probably_filled_unrecorded": [{"ticker": a.get("ticker"), "day": a.get("valid_for"), "limit": a.get("entry")}
-                                                  for a in unrecorded]},
+                                                  for a in unrecorded],
+                   "not_seen_in_time": [{"ticker": a.get("ticker"), "day": a.get("valid_for"), "grade": a.get("grade"),
+                                         "at_close": a.get("entry_kind") == "close", "result": sret(a)} for a in missed]},
         "entry_vs_alert": {"n": len(entry_gap), "avg_pct": round(100 * float(np.mean(entry_gap)), 3) if entry_gap else None},
         "stop_slippage": {"n": len(stop_exits), "avg_pct": round(100 * float(np.mean(stop_exits)), 3) if stop_exits else None,
                           "assumed_pct": -float(P.get("risk", {}).get("slippage_pct", 0.05))},
@@ -303,6 +308,13 @@ def portfolio_stats(alerts: list, shadow: list, trades: list, ledger: list, toda
         lessons.append(f"{len(through)} order(s) recorded as not filled traded through the limit on their day ({names}): "
                        "a day limit order at the alert price, placed before the open, should have filled. "
                        "Check the order's price, time in force and when it went in.")
+    if missed:
+        names = ", ".join(f"{a.get('ticker')} {a.get('valid_for')}" for a in missed)
+        rs = [r for r in (sret(a) for a in missed) if r is not None]
+        lessons.append(f"{len(missed)} setup(s) reached you too late to act on ({names})"
+                       + (f"; {sum(r > 0 for r in rs)} of {len(rs)} graded since would have won" if rs else "")
+                       + ". A buy-near-the-close setup is sent about 12:27 PM PT and can only be bought until the 1:00 PM close: "
+                       "tell the Swing Desk chat if the phone alert or email came late, so the timing can be fixed.")
     if unrecorded:
         names = ", ".join(f"{a.get('ticker')} {a.get('valid_for')}" for a in unrecorded)
         lessons.append(f"Probably filled but not recorded ({names}): the low traded through the limit. If you hold it, "

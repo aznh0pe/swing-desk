@@ -1010,7 +1010,8 @@ def order_fill_check(a: dict, ind: dict, today, mode: str, partial_bar: bool) ->
         out["at_close"] = True
         out["text"] = (("A" if mine else "If you placed it: a") + " buy-near-the-close order, so only your brokerage "
                        "knows whether it was bought. If it was, press Mark done (filled) with the price; if not, press Didn't fill"
-                       + ("." if mine else "; if you never placed it, press I didn't place it."))
+                       + ("." if mine else "; if you never placed it, press I didn't place it, or Didn't see it in time "
+                          "if the alert reached you too late."))
         return out
     lows, opens = ind["low"], ind["open"]
     days = [d for d in lows.index if vf <= d.date() <= last]

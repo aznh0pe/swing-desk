@@ -18,7 +18,8 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 HTML = (ROOT / "dashboard" / "index.html").read_text()
 WANT = ("const fmtPT", "const todayPT", "const fmtHM", "const nowHM", "const HOLIDAYS", "const EARLY_CLOSES", "function isTradingDay",
         "function addDays", "function nextTD", "function prevTD", "function lastValidDay", "function sessionOver",
-        "function fillCheckMap", "function orderResolutions", "function resolveCard", "const num", "const px", "function dShort")
+        "function fillCheckMap", "function orderResolutions", "function resolveCard", "const num", "const px", "const pct",
+        "function dShort", "function dtShort")
 
 
 def _functions():
@@ -97,14 +98,17 @@ def test_a_buy_at_the_close_setup_nobody_recorded_is_asked_about(tmp_path):
     """Nov 16, 2026: XOP (A+, buy near the close) left the dashboard at 1 PM with status new. No price check can say
     whether a buy-at-the-close order was bought, so nothing ever asked, and a bought position would go unwatched."""
     xop = {"id": "X1", "type": "entry", "status": "new", "valid_for": "2026-11-16", "valid_days": 1, "ticker": "XOP",
-           "entry": 179.99, "stop": 163.44, "target": 184.13, "entry_kind": "close"}
+           "entry": 179.99, "stop": 163.44, "target": 184.13, "entry_kind": "close", "grade": "A+", "score": 77.3,
+           "win_pct": 77.8, "strategy_label": "ETF Close-at-Low Snapback", "created_at": "2026-11-16T12:26:44-08:00"}
     before = _cards("2026-11-16T12:40:00-08:00", tmp_path, "unfilled", [xop])
     assert before == []                                              # its session is still running: the ticket is live
     for now in ("2026-11-16T18:59:00-08:00", "2026-11-19T12:00:00-08:00"):
         cards = _cards(now, tmp_path, "unfilled", [xop])
         assert [c["kind"] for c in cards] == ["unmarked_close"], now
         assert "Did you buy it?" in cards[0]["html"] and "Buy near the close" in cards[0]["html"]
-        assert all(f'data-act="{a}"' in cards[0]["html"] for a in ("fill", "nofill", "skip"))
+        assert all(f'data-act="{a}"' in cards[0]["html"] for a in ("fill", "nofill", "skip", "missed"))
+        # the card says what the setup was and when it was sent: the owner may be seeing it for the first time
+        assert all(x in cards[0]["html"] for x in ("A+ setup, ETF Close-at-Low Snapback", "score 77.3", "Nov 16", "12:26", "$163.44", "$184.13"))
     assert _cards("2026-11-20T06:00:00-08:00", tmp_path, "unfilled", [xop]) == []
     assert _cards("2026-11-17T06:00:00-08:00", tmp_path, "unfilled", [{**xop, "status": "skipped"}]) == []
     assert _cards("2026-11-17T06:00:00-08:00", tmp_path, "unfilled", [{**xop, "withdrawn": True}]) == []
@@ -115,7 +119,27 @@ def test_the_scan_asks_about_an_unrecorded_buy_at_the_close_too():
          "entry_kind": "close", "stop": 163.44, "target": 184.13}
     assert SC.order_fill_check(a, {}, dt.date(2026, 11, 16), "preclose", True) is None       # session still running
     fc = SC.order_fill_check(a, {}, dt.date(2026, 11, 17), "premarket", False)
-    assert fc["at_close"] and fc["filled"] is None and "if you never placed it, press I didn't place it." in fc["text"]
+    assert fc["at_close"] and fc["filled"] is None and "press I didn't place it, or Didn't see it in time" in fc["text"]
     src = pathlib.Path(SC.__file__).read_text()
     assert '(fc.get("filled") or fc.get("at_close")) and ask_unmarked(' in src
     assert 'how = "buy near the close" if c.get("at_close")' in src
+
+
+def test_the_overview_never_calls_a_buy_at_the_close_setup_probably_filled():
+    """Nov 16, 2026: the first version of this card put XOP under 'did this order fill? The day's low traded below
+    the limit, so it probably filled', for a setup the owner had never seen."""
+    assert 'resFill = res.filter((r) => r.kind !== "unmarked_close")' in HTML
+    assert "nothing was recorded for" in HTML and 'act === "missed"' in HTML and "missed: true" in HTML
+
+
+def test_a_setup_that_arrived_too_late_is_counted_as_missed_not_as_a_choice():
+    from engine import learnlog as LL
+    from engine import strategies as S
+    alerts = [{"id": "X1", "type": "entry", "ticker": "XOP", "valid_for": "2026-11-16", "status": "skipped", "missed": True,
+               "entry_kind": "close", "grade": "A+", "entry": 179.99, "strategy": "ETF_IBS"},
+              {"id": "S1", "type": "entry", "ticker": "AAA", "valid_for": "2026-11-16", "status": "skipped", "entry": 10.0, "strategy": "ETF_IBS"}]
+    shadow = [{"alert_id": "X1", "status": "closed", "fill": 180.0, "exit": 183.6}, {"alert_id": "S1", "status": "closed", "fill": 10.0, "exit": 9.0}]
+    doc = LL.portfolio_stats(alerts, shadow, [], [], "2026-11-17", S.params_with_defaults(None))
+    assert [m["ticker"] for m in doc["orders"]["not_seen_in_time"]] == ["XOP"] and doc["orders"]["not_seen_in_time"][0]["at_close"]
+    assert doc["skipped"]["n"] == 1                      # only the one that was a choice
+    assert any("reached you too late" in x and "1 of 1 graded since would have won" in x for x in doc["lessons"])

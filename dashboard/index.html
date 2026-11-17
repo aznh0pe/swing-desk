@@ -815,7 +815,10 @@ function attentionBanner() {
     if (ji.length) out += `<div class="banner crit" style="margin-bottom:12px"><b>Problem in the last ${name} (${j.date ? dShort(j.date) : "latest"}):</b> ${ji.map((t) => esc(t)).join(" ")} Tell Claude in the Swing Desk chat so it gets fixed.</div>`;
     else out += fixedNote(rs, `${name} (${j?.date ? dShort(j.date) : "latest"})`);
   }
-  if (res.length) out += `<div class="banner info" style="margin-bottom:12px"><b>${res.map((r) => esc(r.a.ticker)).join(", ")}: ${res.length === 1 ? "did this order fill?" : "did these orders fill?"}</b> ${res.some((r) => r.kind !== "ask") ? "The day's low traded below the limit, so it probably filled. " : ""}Record it so the scans watch the position. <button class="btn small" type="button" data-tab="alerts">Answer</button></div>`;
+  const resFill = res.filter((r) => r.kind !== "unmarked_close"), resClose = res.filter((r) => r.kind === "unmarked_close");
+  if (resFill.length) out += `<div class="banner info" style="margin-bottom:12px"><b>${resFill.map((r) => esc(r.a.ticker)).join(", ")}: ${resFill.length === 1 ? "did this order fill?" : "did these orders fill?"}</b> ${resFill.some((r) => r.kind !== "ask") ? "The day's low traded below the limit, so it probably filled. " : ""}Record it so the scans watch the position. <button class="btn small" type="button" data-tab="alerts">Answer</button></div>`;
+  // a buy-near-the-close setup whose window has passed with nothing recorded: say what it was, never "probably filled"
+  if (resClose.length) out += `<div class="banner info" style="margin-bottom:12px"><b>${resClose.map((r) => `${esc(r.a.ticker)} (${esc(r.a.grade || "setup")}, sent ${dtShort(r.a.created_at)})`).join(", ")}: nothing was recorded for ${resClose.length === 1 ? "this buy-near-the-close setup" : "these buy-near-the-close setups"}.</b> The buying window ended at that day's close. One tap says what happened: bought it, didn't place it, or didn't see it in time. <button class="btn small" type="button" data-tab="alerts">Answer</button></div>`;
   return out;
 }
 function modeLabel(m) { return { premarket: "Pre-market", preclose: "Pre-close", postclose: "Post-close", learning: "Learning", weekly: "Recalibration", manual: "Manual" }[m] || m || "Scan"; }
@@ -1036,7 +1039,7 @@ function ladderSvg(a) {
 function resolveCard({ a, fc, kind }) {
   const day = dShort(lastValidDay(a));
   const msg = kind === "likely" ? `Probably <b>filled</b>: the low ${px(fc.low)} traded below your ${px(a.entry)} limit on ${day}.${num(fc.open) !== null && num(fc.open) < num(a.entry) ? ` It opened at ${px(fc.open)}, under your limit, so the fill was probably near that price.` : ""} If it filled, set the stop ${px(a.stop)} and target ${px(a.target)} and record the fill so the scans watch it.`
-    : kind === "unmarked_close" ? `This one was a buy near the ${day} close, and nothing was recorded for it. If you bought it, record the fill so the scans watch the position and tell you when to sell. One tap; this stays here until you answer (3 sessions at most).`
+    : kind === "unmarked_close" ? `<b>${esc(a.grade || "")} setup, ${esc(a.strategy_label || "")}</b>${num(a.score) !== null ? `, score ${esc(a.score)}` : ""}${num(a.win_pct) !== null ? `, win est. ${pct(a.win_pct)}` : ""}. Sent ${dtShort(a.created_at)} PT by the pre-close scan as a buy near that day's close (about ${px(a.entry)}), so its buying window ended at the close and nothing was recorded. If you bought it, record the fill (stop ${px(a.stop)}, target ${px(a.target)}) so the scans watch the position. If it reached you too late, say so: the desk counts those. This stays here until you answer (3 sessions at most).`
     : kind === "unmarked" ? `You didn't mark it placed, but if you did, it probably <b>filled</b>: the low ${px(fc.low)} traded below the ${px(a.entry)} limit on ${day}. One tap records what happened; this stays here until you answer (3 sessions at most).`
     : fc?.text ? esc(fc.text) : `The ${day} session is over. The next scan checks the day's prices and records it on its own if it didn't fill; or answer now.`;
   const lvl = kind === "ask" ? "info" : "good";
@@ -1045,7 +1048,8 @@ function resolveCard({ a, fc, kind }) {
     <div class="small">${msg}</div>
     <div class="t-actions" style="padding:8px 0 0;border:0"><button class="btn primary small" type="button" data-act="fill" data-id="${esc(a.id)}">Mark done (filled)</button>
     <button class="btn small" type="button" data-act="nofill" data-id="${esc(a.id)}">${un ? "Placed it, didn't fill" : "Didn't fill"}</button>
-    ${un ? `<button class="btn ghost small" type="button" data-act="skip" data-id="${esc(a.id)}">I didn't place it</button>` : ""}</div></div></div>`;
+    ${un ? `<button class="btn ghost small" type="button" data-act="skip" data-id="${esc(a.id)}">I didn't place it</button>` : ""}
+    ${kind === "unmarked_close" ? `<button class="btn ghost small" type="button" data-act="missed" data-id="${esc(a.id)}">Didn't see it in time</button>` : ""}</div></div></div>`;
 }
 function ticket(a, today) {
   const e = num(a.entry), s = num(a.stop), t = num(a.target);
@@ -1888,6 +1892,7 @@ document.addEventListener("click", async (e) => {
   try {
     if (act === "fill" && a) fillModal(a);
     else if (act === "placed" && a) { await updDoc("alerts/" + a.id, { status: "placed", placed_at: nowIso() }); toast(`${a.ticker} marked as placed.`); }
+    else if (act === "missed" && a) { await updDoc("alerts/" + a.id, { status: "skipped", skipped_at: nowIso(), missed: true }); toast(`${a.ticker}: recorded as not seen in time. The daily review counts these, so alerts that arrive too late get fixed.`, 6000); }
     else if (act === "skip" && a) { await updDoc("alerts/" + a.id, { status: "skipped", skipped_at: nowIso() }); toast(`${a.ticker} skipped. The learning loop still grades it.`); }
     else if (act === "nofill" && a) {
       const fc = fillCheckMap()[a.id];  // keep what the price check saw, so the review can compare it with what happened
