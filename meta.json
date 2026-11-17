@@ -1,0 +1,41 @@
+{
+ "universe_built": "2026-11-17",
+ "universe_mode": "wide",
+ "universe_stats": {
+  "mode": "wide",
+  "source": "nasdaq-screener",
+  "rows": 5556,
+  "ext": 1172,
+  "trending": 1,
+  "trending_tickers": [
+   "SHAZ"
+  ],
+  "added": 1,
+  "dropped": 0
+ },
+ "universe_added": [
+  "SHAZ"
+ ],
+ "universe_dropped": [],
+ "history_asof": "2026-11-17T01:46-05:00",
+ "history_tickers": 1862,
+ "history_failed": [],
+ "daily_last_date": "2026-11-16",
+ "daily_tickers": 1862,
+ "daily_failed": [],
+ "daily_status": "ok",
+ "daily_updated_utc": "2026-11-17T06:52:37+00:00",
+ "earnings_asof": "2026-11-17T01:46-05:00",
+ "earnings_source": "nasdaq",
+ "earnings_count": 259,
+ "generated_utc": "2026-11-17T06:53:34+00:00",
+ "generated_et": "2026-11-17T01:46-05:00",
+ "modes_run": [
+  "history",
+  "daily",
+  "earnings"
+ ],
+ "universe": 1862,
+ "errors": [],
+ "version": 1
+}
