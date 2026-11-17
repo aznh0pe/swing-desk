@@ -82,7 +82,13 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 # list, so the edge was not where it should stop. The engine's own daily filter (price $10+, $30M+ a day) and the
 # weekly tier check still decide what trades.
 EXT_RULES = {"cap_in": 1.0e9, "cap_stay": 0.7e9, "price_in": 8.0, "price_stay": 5.0,
-             "dv_in": 25e6, "dv_stay": 12e6, "keep_days": 90, "max_ext": 2400}
+             "dv_in": 25e6, "dv_stay": 12e6, "keep_days": 90, "max_ext": 2400,
+             # "In play" names (Nov 16, 2026): a smaller company the market is trading heavily right now gets in on
+             # volume alone. A+ setups in stocks whose dollar volume runs well above its own one-year norm won as
+             # often or more, and paid more, in both periods (top two fifths by that ratio: 79%/77% of 4,399 at +1.2%
+             # in 2008-2021 and 81% of 3,541 at +2.3% in 2022-now, against 76% and 73% at +1.0% for the quietest fifth).
+             # The list is rebuilt from this every day, so it follows what is trading now.
+             "hot_cap": 0.3e9, "hot_dv": 60e6}
 
 NASDAQ_SECTOR = {  # Nasdaq's sector names -> the GICS names the engine keys sector ETFs and caps on
     "Technology": "Information Technology", "Health Care": "Health Care", "Finance": "Financials",
@@ -226,12 +232,13 @@ def build_ext(core: set, previous_items: list[dict], today: str, daily_path: pat
     own = _own_liquidity(daily_path)
     prev = {i["ticker"]: i for i in previous_items if i.get("tier") == "ext" and i.get("type") == "stock"}
     cutoff = (dt.date.fromisoformat(today) - dt.timedelta(days=R["keep_days"])).isoformat()
-    items, seen = [], set()
+    items, seen, hot_now = [], set(), []
     for r in rows:
         t = r["ticker"]
         if t in core or t in seen:
             continue
         seen.add(t)
+        hot = False
         o = own.get(t) or {}
         dv = o.get("dv") if o.get("dv") else r.get("dv")
         px = o.get("price") or r.get("price")
@@ -242,6 +249,10 @@ def build_ext(core: set, previous_items: list[dict], today: str, daily_path: pat
         else:
             ok_in = (cap or 0) >= R["cap_in"] and (px or 0) >= R["price_in"] and (dv or 0) >= R["dv_in"]
             ok_stay = (cap or 0) >= R["cap_stay"] and (px or 0) >= R["price_stay"] and (dv or 0) >= R["dv_stay"]
+            hot = (not ok_in and (cap or 0) >= R["hot_cap"] and (px or 0) >= R["price_in"] and (dv or 0) >= R["hot_dv"])
+            ok_in = ok_in or hot
+        if hot:
+            hot_now.append(t)
         if ok_in or (was and ok_stay):
             last_ok = today
         elif was and str(was.get("last_ok", "")) >= cutoff:
@@ -258,7 +269,9 @@ def build_ext(core: set, previous_items: list[dict], today: str, daily_path: pat
     items.sort(key=lambda i: -(i.get("dv_m") or 0))
     items = items[:R["max_ext"]]
     now = {i["ticker"] for i in items}
-    return items, {"source": src, "rows": len(rows), "ext": len(items), "added": len(now - set(prev)),
+    hot_in = sorted(set(hot_now) & now)
+    return items, {"source": src, "rows": len(rows), "ext": len(items), "trending": len(hot_in), "trending_tickers": hot_in[:40],
+                   "added": len(now - set(prev)),
                    "dropped": len(set(prev) - now), "added_tickers": sorted(now - set(prev))[:40],
                    "dropped_tickers": sorted(set(prev) - now)[:40]}
 

@@ -2222,6 +2222,9 @@ def run_learning(data_dir, state_dir, out_dir, now=None) -> dict:
         if ui.get("added") or ui.get("dropped"):
             line += (f" Today's screen added {ui['added']}" + (f" ({', '.join(ui['added_tickers'][:8])}{'...' if ui['added'] > 8 else ''})" if ui.get("added_tickers") else "")
                      + f" and dropped {ui['dropped']}" + (f" ({', '.join(ui['dropped_tickers'][:8])}{'...' if ui['dropped'] > 8 else ''})" if ui.get("dropped_tickers") else "") + ".")
+        if ui.get("trending"):
+            line += (f" {ui['trending']} of the wider list are smaller companies trading heavily right now"
+                     + (f" ({', '.join(ui['trending_tickers'][:8])}{'...' if ui['trending'] > 8 else ''})" if ui.get("trending_tickers") else "") + ".")
         ts_ = (stats or {}).get("tier_summary") or {}
         if (ts_.get("ext") or {}).get("n"):
             e_, c_ = ts_["ext"], ts_.get("core") or {}

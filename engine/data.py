@@ -132,7 +132,9 @@ def universe_info(d) -> dict:
            "mode": js.get("mode") or ("wide" if ext else "core"), "built": js.get("built"),
            "source": stats.get("source"), "added": int(stats.get("added") or 0), "dropped": int(stats.get("dropped") or 0),
            "added_tickers": list(stats.get("added_tickers") or [])[:40],
-           "dropped_tickers": list(stats.get("dropped_tickers") or [])[:40]}
+           "dropped_tickers": list(stats.get("dropped_tickers") or [])[:40],
+           # smaller companies on the list because the market is trading them heavily right now (pipeline/universe.py)
+           "trending": int(stats.get("trending") or 0), "trending_tickers": list(stats.get("trending_tickers") or [])[:40]}
     return out
 
 

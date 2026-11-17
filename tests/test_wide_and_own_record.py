@@ -392,7 +392,8 @@ def test_the_wider_list_is_screened_with_entry_and_stay_lines_and_a_grace_period
     def row(t, cap, px, dv, name=None):
         return {"ticker": t, "name": name or f"{t} Corp", "sector": "Technology", "cap": cap, "price": px, "dv": dv}
     rows = [row(f"X{i:04d}", 5e9, 50, 60e6) for i in range(2100)]
-    rows += [row("AAA", 9e11, 100, 9e9), row("SMALL", 0.8e9, 50, 60e6), row("THIN", 5e9, 50, 5e6), row("CHEAP", 5e9, 4, 60e6),
+    rows += [row("AAA", 9e11, 100, 9e9), row("SMALL", 0.8e9, 50, 30e6), row("HOT", 0.5e9, 50, 80e6), row("TINY", 0.1e9, 50, 200e6),
+             row("MID", 1.2e9, 50, 30e6), row("THIN", 5e9, 50, 5e6), row("CHEAP", 5e9, 4, 60e6),
              row("SLIP", 1.5e9, 50, 15e6), row("GONE", 0.5e9, 50, 1e6)]
     prev = [{"ticker": "SLIP", "tier": "ext", "type": "stock", "last_ok": "2026-11-01", "name": "Slip"},
             {"ticker": "GONE", "tier": "ext", "type": "stock", "last_ok": "2026-06-01", "name": "Gone"},
@@ -407,6 +408,10 @@ def test_the_wider_list_is_screened_with_entry_and_stay_lines_and_a_grace_period
     got = {i["ticker"]: i for i in items}
     assert "AAA" not in got and "SMALL" not in got and "THIN" not in got and "CHEAP" not in got   # core, too small, too thin, too cheap
     assert "X0001" in got and got["X0001"]["tier"] == "ext" and got["X0001"]["cap_b"] == 5.0
+    # Nov 16, 2026: the size line is $1B, and a smaller company trading heavily right now ("in play") gets in on volume
+    assert "MID" in got                                   # $1.2B, normal volume: in since the line moved from $2B
+    assert "HOT" in got and stats["trending"] == 1 and stats["trending_tickers"] == ["HOT"]   # $0.5B, $80M a day
+    assert "TINY" not in got                              # under $300M: not even on volume
     assert got["SLIP"]["last_ok"] == "2026-11-14"        # already in, still above the stay line
     assert "GONE" not in got                             # below the line for more than 90 days
     assert "HALT" in got                                 # missing from today's source: kept through the grace period
