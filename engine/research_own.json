@@ -645,5 +645,106 @@
     20
    ]
   }
+ },
+ {
+  "source": {
+   "title": "Swing Desk own design (2026-11-17)",
+   "url": "https://github.com/aznh0pe/swing-desk"
+  },
+  "regime": [],
+  "valid_days": 1,
+  "entry": {
+   "kind": "close"
+  },
+  "market_conditions": [
+   "bull_calm"
+  ],
+  "id": "R_TOM_LEADER_DIP_CALM",
+  "label": "Leader Dip into the Turn of the Month, Calm Bull Market",
+  "family": "Calendar",
+  "about": "Own design for quiet weeks (Nov 17). In the last sessions of the month, in a calm bull market, a relative-strength leader above its 50-day average closes down with a low RSI(2). Month-end buying tends to lift it within days: the same dip on other days of the month won 7 to 9 points less often in both test periods. Buy near the close, sell at the 5-day average.",
+  "universe": "stock",
+  "conditions": [
+   "tdom_rev <= {d}",
+   "rs_pct >= 0.8",
+   "close > sma50",
+   "close < close[1]",
+   "rsi2 < {r}"
+  ],
+  "stop": {
+   "atr": 3.0
+  },
+  "target": {
+   "price": "sma5",
+   "min_atr": 0.5,
+   "cap_atr": 4
+  },
+  "exit": "sma5",
+  "max_hold": 6,
+  "params": {
+   "d": 2,
+   "r": 20
+  },
+  "grid": {
+   "d": [
+    1,
+    3
+   ],
+   "r": [
+    10,
+    25
+   ]
+  }
+ },
+ {
+  "source": {
+   "title": "Swing Desk own design (2026-11-17)",
+   "url": "https://github.com/aznh0pe/swing-desk"
+  },
+  "regime": [],
+  "valid_days": 1,
+  "entry": {
+   "kind": "close"
+  },
+  "market_conditions": [
+   "bull_calm"
+  ],
+  "id": "R_TOM_LEADER_WEAK_CLOSE_CALM",
+  "label": "Leader Closes Weak into the Turn of the Month, Calm Bull Market",
+  "family": "Calendar",
+  "about": "Own design for quiet weeks (Nov 17). In the last two sessions of the month, in a calm bull market, a relative-strength leader above its 50-day average closes down, in the lower part of the day's range, with a low RSI(2). Month-end buying tends to lift it within days: the same dip on other days of the month won 7 to 9 points less often in both test periods. Buy near the close, sell at the 5-day average.",
+  "universe": "stock",
+  "conditions": [
+   "tdom_rev <= 1",
+   "rs_pct >= 0.8",
+   "close > sma50",
+   "close < close[1]",
+   "rsi2 < {r}",
+   "ibs < {i}"
+  ],
+  "stop": {
+   "atr": 3.0
+  },
+  "target": {
+   "price": "sma5",
+   "min_atr": 0.5,
+   "cap_atr": 4
+  },
+  "exit": "sma5",
+  "max_hold": 6,
+  "params": {
+   "r": 18,
+   "i": 0.4
+  },
+  "grid": {
+   "r": [
+    18,
+    25
+   ],
+   "i": [
+    0.4,
+    0.5
+   ]
+  }
  }
 ]
