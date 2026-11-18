@@ -856,7 +856,7 @@ function viewOverview() {
   <div class="grid g-kpi">
     ${kpi("Trading capital", money(f.capital), `Equity incl. open P&L ${money(f.equity)}`)}
     ${kpi("Cash free for new trades", money(f.cash), `${money(f.openCost)} in ${f.open.length} open position${f.open.length === 1 ? "" : "s"}`)}
-    ${kpi("Net trading result", smoney(ret), `Realized ${smoney(f.pnl)} · income taken ${money(-f.income)}`)}
+    ${kpi("Net trading result", pnlHtml(ret), `Realized ${smoney(f.pnl)} · income taken ${money(-f.income)}`)}
     ${kpi("Win rate (all time)", hist.n ? pct(hist.winRate) : "–", hist.n ? `${hist.wins} of ${hist.n} closed trades` : "No closed trades yet")}
     ${kpi("Profit factor", hist.pf ? hist.pf.toFixed(2) : (hist.n ? "∞" : "–"), "Gross wins ÷ gross losses")}
     ${kpi("Open P&L", pnlHtml(f.unreal), last ? `Marked at ${dtShort(last.started_at)}` : "Marks arrive with the first scan")}

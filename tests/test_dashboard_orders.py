@@ -143,3 +143,18 @@ def test_a_setup_that_arrived_too_late_is_counted_as_missed_not_as_a_choice():
     assert [m["ticker"] for m in doc["orders"]["not_seen_in_time"]] == ["XOP"] and doc["orders"]["not_seen_in_time"][0]["at_close"]
     assert doc["skipped"]["n"] == 1                      # only the one that was a choice
     assert any("reached you too late" in x and "1 of 1 graded since would have won" in x for x in doc["lessons"])
+
+
+def test_net_trading_result_is_green_when_up_and_red_when_down():
+    """Nov 18, 2026, the owner: the Net trading result tile shows green when positive, red when negative.
+    It uses the same rule as Open P&L (pnlHtml: rounded to the cent, grey at exactly zero)."""
+    import pathlib, re, subprocess, json, shutil
+    src = (pathlib.Path(__file__).resolve().parents[1] / "dashboard" / "index.html").read_text()
+    assert '${kpi("Net trading result", pnlHtml(ret), `Realized' in src
+    assert ".pnl-up { color: var(--good); } .pnl-dn { color: var(--crit); }" in src
+    if not shutil.which("node"):
+        return
+    fns = "\n".join(re.search(rf"^const {n} = .*$", src, re.M).group(0) for n in ("num", "smoney", "cents", "pnlCls", "pnlHtml"))
+    js = fns + "\nconsole.log(JSON.stringify([pnlHtml(19.29), pnlHtml(-7.5), pnlHtml(0.004)]));"
+    out = json.loads(subprocess.run(["node", "-e", js], capture_output=True, text=True, check=True).stdout)
+    assert out == ['<span class="pnl-up">+$19.29</span>', '<span class="pnl-dn">−$7.50</span>', '<span class="pnl-flat">$0.00</span>']
