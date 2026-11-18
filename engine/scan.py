@@ -598,6 +598,32 @@ def withdrawn_core(reason) -> str:
     return r or "it no longer qualifies."
 
 
+CARRY_WITHDRAWN_SESSIONS = 5   # longer than any question about an order (3 sessions) and the dashboard's view of it
+
+
+def carry_withdrawn(ups: dict, prev_ov: dict, state: dict, today) -> dict:
+    """Withdrawals of setups still unanswered, copied forward into this scan's alert_updates, marked "carried".
+    Nov 18, 2026: Monday's pre-market check withdrew MRNA (news: guidance change; "cancel today's order"). A scan
+    loads only the newest 6 scans, so by Tuesday evening the withdrawal had dropped out of its view and the scans
+    asked "did your MRNA order fill?" for two days, while the dashboard, which loads 40 scans, still knew it was
+    withdrawn and offered no button to answer. A withdrawal is now carried by every scan while the setup is
+    unanswered and recent, so no scan can forget it. Carried entries are not news: the email and the headline list
+    only this scan's own withdrawals."""
+    cut = str(cal.prev_trading_day(today, CARRY_WITHDRAWN_SESSIONS))
+    for aid, u in (prev_ov or {}).items():
+        if aid in ups or not (u or {}).get("withdrawn"):
+            continue
+        a = ((state.get("alerts") or {}).get(aid) or {}).get("doc") or {}
+        if a.get("type") != "entry" or a.get("status") not in ("new", "placed", None):
+            continue
+        if str(a.get("valid_for") or "")[:10] < cut:
+            continue
+        ups[aid] = {"withdrawn": True, "withdrawn_reason": u.get("withdrawn_reason"), "rank": None,
+                    "ticker": u.get("ticker") or a.get("ticker"), "carried": True,
+                    "withdrawn_at": u.get("withdrawn_at") or u.get("_at")}
+    return ups
+
+
 def build_overlay(scan_doc: dict, entries: list, ctx: dict) -> dict:
     ups = {}
     live = {e["id"] for e in entries}
@@ -663,7 +689,7 @@ def headline(scan_doc: dict) -> str:
     dont = sum(1 for x in pmc if x.get("verdict") == "withdrawn" and not x.get("placed"))
     if dont:
         bits.append(f"{dont} withdrawn setup{'s' if dont != 1 else ''} not to place")
-    wd = sum(1 for v in (scan_doc.get("alert_updates") or {}).values() if v.get("withdrawn"))
+    wd = sum(1 for v in (scan_doc.get("alert_updates") or {}).values() if v.get("withdrawn") and not v.get("carried"))
     if wd:
         bits.append(f"{wd} withdrawn")
     out = " · ".join(bits) if bits else "No action needed"
@@ -937,7 +963,7 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
     pn = carried_position_news(state, [p.get("ticker") for p in positions])
     if pn:
         scan_doc["position_news"] = pn
-    scan_doc["alert_updates"] = build_overlay(scan_doc, entries, ctx)
+    scan_doc["alert_updates"] = carry_withdrawn(build_overlay(scan_doc, entries, ctx), prev_ov, state, today)
     digest = make_digest(scan_doc, entries, positions, near, pm_checks, week_aplus, P, now)
     scan_doc["digest"] = digest
     _write(out, writes, "set", "scans", scan_id, scan_doc)
@@ -1369,7 +1395,7 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
         for c in pm_checks:
             verdict = {"withdrawn": "WITHDRAWN, CANCEL IT" if c.get("placed") else "WITHDRAWN, DON'T PLACE"}.get(c["verdict"], c["verdict"].upper())
             lines.append(f"- {c['ticker']}{' (marked placed)' if c.get('placed') else ''}: {verdict}. {c['text']}")
-    wd = [(k, v) for k, v in (scan.get("alert_updates") or {}).items() if v.get("withdrawn")]
+    wd = [(k, v) for k, v in (scan.get("alert_updates") or {}).items() if v.get("withdrawn") and not v.get("carried")]
     if wd:
         lines += ["", "=== WITHDRAWN SETUPS (cancel these orders if you placed them) ==="]
         for k, v in wd:
