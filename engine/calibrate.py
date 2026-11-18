@@ -792,7 +792,8 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
         train_only = M.fit(filled[filled["signal_date"] < split])
         feats = tr[S.FEATURES]
         tr = tr.assign(p=M.predict(train_only, feats))
-        rr = ((tr["target"] - tr["fill"]) / (tr["fill"] - tr["stop"])).where(tr["filled"],
+        st0 = tr["stop0"] if "stop0" in tr.columns else tr["stop"]  # the planned stop, not one raised later
+        rr = ((tr["target"] - tr["fill"]) / (tr["fill"] - st0)).where(tr["filled"],
               (tr["target"] - tr["limit"]) / (tr["limit"] - tr["stop"]))
         tr = tr.assign(score=M.score(tr["p"].values, feats, train_only, rr.fillna(1).values),
                        entry_close=(P["strategies"][name].get("entry_kind") == "close"))

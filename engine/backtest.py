@@ -79,7 +79,7 @@ def simulate(plan: dict, ind: dict, P: dict, last_signal_row: int | None = None,
                     break
         if fill_i < 0:
             if include_unfilled:
-                rows.append((t, j, -1, np.nan, -1, np.nan, "unfilled", 0, np.nan, np.nan, limit))
+                rows.append((t, j, -1, np.nan, -1, np.nan, "unfilled", 0, np.nan, np.nan, limit, np.nan))
             continue
         # stops / targets
         if STOP_LV is not None:
@@ -95,6 +95,7 @@ def simulate(plan: dict, ind: dict, P: dict, last_signal_row: int | None = None,
             tgt = lo_t if not np.isfinite(tgt) else min(max(tgt, lo_t), hi_t)
         else:
             tgt = fill + tgt_spec["mult"] * atr
+        stop0 = stop  # the planned stop: position management below may raise `stop`, the risk taken at entry stays this
         exit_i, exit_p, reason = -1, np.nan, "open"
         start = fill_i if not entry_close else t + 1
         held = 0
@@ -144,7 +145,7 @@ def simulate(plan: dict, ind: dict, P: dict, last_signal_row: int | None = None,
                 stop = fill + lock_to * atr
             elif be_atr and cl - fill >= be_atr * atr and stop < fill:
                 stop = fill
-        rows.append((t, j, fill_i, fill, exit_i, exit_p, reason, held, stop, tgt, limit))
+        rows.append((t, j, fill_i, fill, exit_i, exit_p, reason, held, stop, tgt, limit, stop0))
 
     if not rows:
         return pd.DataFrame()
@@ -154,7 +155,7 @@ def simulate(plan: dict, ind: dict, P: dict, last_signal_row: int | None = None,
         "fill": a[:, 3].astype(float), "exit_i": a[:, 4].astype(int),
         "exit": a[:, 5].astype(float), "reason": a[:, 6], "held": a[:, 7].astype(int),
         "stop": a[:, 8].astype(float), "target": a[:, 9].astype(float),
-        "limit": a[:, 10].astype(float),
+        "limit": a[:, 10].astype(float), "stop0": a[:, 11].astype(float),
     })
     dates = ind["close"].index
     tick = ind["close"].columns
@@ -164,7 +165,9 @@ def simulate(plan: dict, ind: dict, P: dict, last_signal_row: int | None = None,
     df["filled"] = df["fill_i"] >= 0
     ok = df["filled"] & (df["exit_i"] >= 0)
     df["ret"] = np.where(ok, df["exit"] / df["fill"] - 1, np.nan)
-    risk = (df["fill"] - df["stop"]).where(df["fill"] > df["stop"])
+    # risk = the planned stop. Nov 17, 2026: with the final stop, a winner whose stop had been raised above its
+    # fill had no risk at all: no R multiple, and the account replay dropped it (422 trades, all winners).
+    risk = (df["fill"] - df["stop0"]).where(df["fill"] > df["stop0"])
     df["r_mult"] = np.where(ok, (df["exit"] - df["fill"]) / risk, np.nan)
     df["win"] = df["ret"] > 0
     df["exit_date"] = pd.NaT
@@ -266,7 +269,8 @@ def portfolio(trades: pd.DataFrame, start_capital=5000.0, max_open=5, risk_pct=1
                 break
             if r["ticker"] in used_tickers:
                 continue
-            risk_ps = r["fill"] - r["stop"]
+            s0 = r["stop0"] if "stop0" in r.index and r["stop0"] == r["stop0"] else r["stop"]  # sized on the planned stop
+            risk_ps = r["fill"] - s0
             if risk_ps <= 0:
                 continue
             mult = float(r["size_mult"]) if has_mult and r["size_mult"] == r["size_mult"] else 1.0  # e.g. the wider list at part size
@@ -280,6 +284,8 @@ def portfolio(trades: pd.DataFrame, start_capital=5000.0, max_open=5, risk_pct=1
     for ex, pnl in sorted(open_pos, key=lambda x: x[0]):
         capital += pnl
         curve.append((ex, capital))
+    if not taken:  # every setup was skipped (no risk to size on): the same answer as an empty list, not a crash
+        return {"trades": 0}
     tk = pd.DataFrame(taken)
     cv = pd.DataFrame(curve, columns=["date", "equity"]).sort_values("date")
     peak = cv["equity"].cummax()

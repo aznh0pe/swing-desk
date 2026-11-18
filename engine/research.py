@@ -36,6 +36,14 @@ from . import strategies as S
 from .portfolio import load_collection, load_state
 
 QUALITY = {"oos_win": 0.62, "oos_pf": 1.15, "oos_trades": 80, "max_overlap": 0.70}
+# Reward against risk (Nov 17, 2026). The owner's challenge: every A+ setup risked more than it could make. The record
+# agreed: A+ setups won 81% on 2022-now data with wins averaging +2.8% and losses -4.9% (payoff 0.58; break-even at 63%
+# wins). A high win rate bought with a near target and a far stop is not the same thing as an edge, so every test now
+# reports the payoff, and an idea built with reward >= risk is judged in a lane of its own: its break-even is 50%, so
+# 70%+ wins there is A+ quality (a 20-point cushion; the classic A+ set has 18) and 60%+ a candidate.
+# Signal days count too: a crash week gives a thousand trades on five days, and five days are not a record.
+EVEN = {"plan_rr": 1.0, "payoff": 1.0, "aplus_win": 0.70, "cand_win": 0.60, "cand_avg": 0.008, "cand_pf": 1.5,
+        "oos_trades": 150, "oos_days": 30, "train_days": 60}
 SEED_FILE = pathlib.Path(__file__).resolve().parent / "research_seed.json"
 SEED_FILES = sorted(pathlib.Path(__file__).resolve().parent.glob("research_seed*.json"))  # the curated backlog
 # Own designs made in the Swing Desk chat are committed to engine/research_own.json. The runs log and test them like
@@ -397,6 +405,92 @@ def condition_sentence(bc: dict | None) -> str:
     return (" By market condition, 2022-now: " + ", ".join(bits) + ".") if bits else ""
 
 
+def payoff_profile(tr: pd.DataFrame, split) -> dict:
+    """What the winners make against what the losers cost, 2008-2021 and 2022-now, and (for an idea built with
+    reward >= risk) how it stands in that lane. `planned_rr` is the distance to the target over the distance to the
+    planned stop at entry; `breakeven_win` the win rate at which average win and average loss cancel out."""
+    split = pd.Timestamp(split)
+
+    def one(g):
+        g = g[g["filled"] & g["ret"].notna()]
+        if len(g) == 0:
+            return {"trades": 0}
+        w, l = g.loc[g["ret"] > 0, "ret"], g.loc[g["ret"] <= 0, "ret"]
+        aw, al = (float(w.mean()) if len(w) else 0.0), (float(l.mean()) if len(l) else 0.0)
+        s0 = g["stop0"] if "stop0" in g.columns else g["stop"]
+        risk = g["fill"] - s0
+        rr = ((g["target"] - g["fill"]) / risk).where(risk > 0)
+        be = abs(al) / (aw + abs(al)) if (aw + abs(al)) > 0 else None
+        win = len(w) / len(g)
+        gl = float(-l.sum())
+        return {"trades": int(len(g)), "win_rate": round(win, 4), "avg_win": round(aw, 4), "avg_loss": round(al, 4),
+                "payoff": round(aw / abs(al), 2) if al < 0 else None,
+                "planned_rr": round(float(rr.median()), 2) if rr.notna().any() else None,
+                "breakeven_win": round(be, 4) if be is not None else None,
+                "cushion": round(win - be, 4) if be is not None else None,
+                "avg_ret": round(float(g["ret"].mean()), 5),
+                "profit_factor": round(float(w.sum()) / gl, 3) if gl > 0 else None,
+                "days": int(g["signal_date"].nunique()),
+                "day_win": round(float((g["ret"] > 0).groupby(g["signal_date"]).mean().mean()), 4),
+                "stopped_out": round(float((g["reason"] == "stop").mean()), 4)}
+    a, b = one(tr[tr["signal_date"] < split]), one(tr[tr["signal_date"] >= split])
+    out = {"train": a, "oos": b, "even": False, "lane": None}
+    if not b.get("trades"):
+        return out
+    out["sentence"] = (f" Reward against risk, 2022-now: wins average {100 * b['avg_win']:+.2f}% and losses {100 * b['avg_loss']:+.2f}%"
+                       + (f" (payoff {b['payoff']:.2f}; it needs {100 * b['breakeven_win']:.0f}% wins to break even and won "
+                          f"{100 * b['win_rate']:.0f}%)" if b.get("payoff") is not None and b.get("breakeven_win") is not None else "")
+                       + (f"; the plan risks 1 to make {b['planned_rr']:.2f}." if b.get("planned_rr") is not None else "."))
+    pers = [x for x in (a, b) if x.get("trades")]
+    out["even"] = bool(pers) and all((x.get("planned_rr") or 0) >= EVEN["plan_rr"] for x in pers)
+    if out["even"]:
+        both = (len(pers) == 2 and b["trades"] >= EVEN["oos_trades"] and b["days"] >= EVEN["oos_days"]
+                and a["days"] >= EVEN["train_days"])
+        pay = all((x.get("payoff") or 0) >= EVEN["payoff"] for x in pers)
+        wins = min(min(x["win_rate"], x["day_win"]) for x in pers)  # by trade and with every signal day counting once
+        if both and pay and wins >= EVEN["aplus_win"]:
+            out["lane"] = "aplus"
+        elif both and pay and wins >= EVEN["cand_win"] and all(x["avg_ret"] >= EVEN["cand_avg"] for x in pers) \
+                and all((x.get("profit_factor") or 0) >= EVEN["cand_pf"] for x in pers):
+            out["lane"] = "candidate"
+        else:
+            out["lane"] = "no"
+        said = {"aplus": f"A+ quality for a setup of this kind ({100 * EVEN['aplus_win']:.0f}%+ wins in both periods with wins at least as large as losses)",
+                "candidate": f"a candidate of this kind ({100 * EVEN['cand_win']:.0f}%+ wins in both periods, wins at least as large as losses, a real average trade)",
+                "no": (f"not there yet: this kind needs {100 * EVEN['cand_win']:.0f}%+ wins in both periods with wins at least as large "
+                       f"as losses ({100 * EVEN['aplus_win']:.0f}%+ for A+ quality), by trade and by signal day, on {EVEN['oos_trades']}+ "
+                       f"trades and {EVEN['oos_days']}+ signal days of unseen data ({EVEN['train_days']}+ days in 2008-2021)")}[out["lane"]]
+        out["sentence"] += (f" Built with a reward at least as large as its risk: it won {100 * a.get('win_rate', 0):.1f}% in 2008-2021 and "
+                            f"{100 * b['win_rate']:.1f}% in 2022-now ({a.get('days', 0)} and {b['days']} signal days; with every day "
+                            f"counting once {100 * a.get('day_win', 0):.1f}% and {100 * b['day_win']:.1f}%); {said}.")
+    return out
+
+
+def payoff_track() -> dict:
+    """The standing daily task of the research runs (printed by `research next`): one new idea a day built with a
+    reward at least as large as its risk, and what the desk already knows about that trade-off."""
+    return {
+        "every_day": ("At least one of the new ideas you design today must be built with a reward at least as large as its "
+                      "risk: the target at least as far from the entry as the stop (for example stop 2 ATR and target 2 ATR "
+                      "or more, or a stop under the setup's low and a target a multiple of that distance), with exit \"none\" "
+                      "or an exit that does not cut the winners short. Use the family \"Reward at least the risk\"."),
+        "how_it_is_judged": (f"In its own lane, in the test's \"payoff\" block: with reward >= risk the break-even is 50% wins, so "
+                             f"{100 * EVEN['aplus_win']:.0f}%+ wins in both periods (2008-2021 and 2022-now) with wins at least as "
+                             f"large as losses is A+ quality, and {100 * EVEN['cand_win']:.0f}%+ a candidate. Report the lane's "
+                             "result in the journal whatever the main verdict says."),
+        "what_the_desk_knows": [
+            "The A+ setups won 81% on 2022-now data, but wins averaged +2.8% and losses -4.9% (payoff 0.58, break-even at 63% wins). The win rate comes largely from near targets and far stops.",
+            "The same A+ signals with a 2 ATR stop and a 2 ATR target and no early exit won 60% (2008-2021) and 65% (2022-now) for about the same money; with a 1 ATR stop they lost a third of the profit (tight stops get hit 40%+ of the time); at 1:2 they won about 50%.",
+            "Only the highest-confidence setups (model win estimate 80%+, panic lows in market selloffs) kept high win rates at reward = risk: 70% in 2008-2021 and 85% in 2022-now.",
+            "Rules alone, first batch (Nov 17, 2026): panic-low designs at reward = risk won 56-63% (payoff 1.1-1.2, average +1.0 to +1.7%); general oversold dips 53-57%; a classic 1:2 pullback-and-reclaim in leaders 38-42% with almost no edge; buying 1 ATR lower with a 1:1.5 plan 48-50%.",
+            "Setups whose planned reward:risk is higher have paid more per trade in both periods, at similar win rates.",
+        ],
+        "look_for": ("setups with a strong multi-day drift, where price travels 2 ATR up before 2 ATR down far more often than "
+                     "not: panic lows and forced selling, capitulation followed by a strong close, the turn of the month, and "
+                     "filters that raise the win rate at reward = risk. A tighter stop on an existing idea is not a new idea."),
+    }
+
+
 def research_focus(state_dir) -> dict | None:
     """What the desk needs most from new strategies right now, from the live grades and their records."""
     try:
@@ -608,6 +702,12 @@ def evaluate_spec(spec: dict, ind: dict, P: dict, P_live: dict, split, now, by="
     aws = S.all_weather_sentence(aw)
     if aws and not special:
         summary += " " + aws
+    try:  # reward against risk: reported for every idea, and a lane of its own for ideas built with reward >= risk
+        po = payoff_profile(tr, split)
+    except Exception as ex:
+        po = {"error": repr(ex)[:200]}
+    if po.get("sentence"):
+        summary += po["sentence"]
     variant = res["variant"]
     path = None
     if verdict != "candidate":
@@ -624,7 +724,7 @@ def evaluate_spec(spec: dict, ind: dict, P: dict, P_live: dict, split, now, by="
            "live_reason": live_reason, "variant": variant, "rules": R.describe({**spec, "params": variant, "grid": {}}),
            "train": _compact(st_train), "oos": _compact(st_test), "overlap_live": round(overlap, 3),
            "oos_signals_per_week": round(per_week, 2), "grade_preview": gp, "by_condition": bc, "all_weather": aw,
-           "graded": gc, "graded_ok": graded_ok,
+           "graded": gc, "graded_ok": graded_ok, "payoff": {k: v for k, v in po.items() if k != "sentence"},
            **({"market_conditions": special["conditions"], "specialist": special} if special else
               ({"market_conditions": spec_conds} if spec_conds else {})),
            "yearly": B.yearly(tr).reset_index().to_dict("records")[-20:],
@@ -803,8 +903,11 @@ def cmd_next(state_dir, out_dir):
     families = sorted({str(d.get("family", "")).split("/")[0].strip() for d in ideas.values()} - {""})
     res["families_covered"] = families
     focus = research_focus(state_dir)
+    track = payoff_track()
     if focus:
+        focus["reward_at_least_risk"] = track["every_day"] + " " + track["how_it_is_judged"]
         res["focus"] = focus  # when designing a new idea, serve this first
+    res["reward_at_least_risk"] = track  # the standing daily task, whatever the focus is
     try:  # what the desk already knows for good: read before designing anything
         from . import lessons as LS
         res["lessons"] = LS.brief(LS.load(state_dir))

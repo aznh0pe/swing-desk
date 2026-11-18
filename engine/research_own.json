@@ -746,5 +746,175 @@
     0.5
    ]
   }
+ },
+ {
+  "id": "R_EVEN_THIN_BREADTH_LEADER",
+  "label": "Leader when Few Stocks Hold Their 50-Day, Reward Equal to Risk",
+  "family": "Reward at least the risk",
+  "about": "Own design (Nov 17). Fewer than 15% of stocks are above their 50-day average: a washed-out market. A leader above its 200-day average is oversold. Stop 2 ATR, target 2 ATR, no early exit.",
+  "source": {
+   "title": "Swing Desk own design (2026-11-17, reward at least the risk)",
+   "url": "https://github.com/aznh0pe/swing-desk"
+  },
+  "universe": "stock",
+  "conditions": [
+   "breadth50 <= {b}",
+   "rs_pct >= 0.8",
+   "close > sma200",
+   "rsi2 < 15",
+   "close < sma5"
+  ],
+  "entry": {
+   "kind": "limit_next",
+   "price": "close - 0.3*atr10"
+  },
+  "stop": {
+   "atr": 2.0
+  },
+  "target": {
+   "atr": 2.0
+  },
+  "exit": "none",
+  "max_hold": 10,
+  "valid_days": 1,
+  "regime": [],
+  "params": {
+   "b": 0.15
+  },
+  "grid": {
+   "b": [
+    0.12,
+    0.2
+   ]
+  }
+ },
+ {
+  "id": "R_EVEN_CRASH_WEEK_LEADER",
+  "label": "Leader in a Crash Week, Reward Equal to Risk",
+  "family": "Reward at least the risk",
+  "about": "Own design (Nov 17). The market has fallen hard in a week; a relative-strength leader still above its 200-day average is deeply oversold. Buy a little under the close, stop 2 ATR below, target 2 ATR above, no early exit: the snap-back after forced selling travels far enough that the reward is as large as the risk.",
+  "source": {
+   "title": "Swing Desk own design (2026-11-17, reward at least the risk)",
+   "url": "https://github.com/aznh0pe/swing-desk"
+  },
+  "universe": "stock",
+  "conditions": [
+   "spy_ret5 <= {m}",
+   "rs_pct >= 0.7",
+   "close > sma200",
+   "rsi2 < 15"
+  ],
+  "entry": {
+   "kind": "limit_next",
+   "price": "close - 0.3*atr10"
+  },
+  "stop": {
+   "atr": 2.0
+  },
+  "target": {
+   "atr": "{g}"
+  },
+  "exit": "none",
+  "max_hold": 10,
+  "valid_days": 1,
+  "regime": [],
+  "params": {
+   "m": -0.08,
+   "g": 2.0
+  },
+  "grid": {
+   "m": [
+    -0.06,
+    -0.08
+   ],
+   "g": [
+    2.0,
+    3.0
+   ]
+  }
+ },
+ {
+  "id": "R_EVEN_FEAR_SPIKE_LEADER",
+  "label": "Leader on a Fear Spike, Reward Equal to Risk",
+  "family": "Reward at least the risk",
+  "about": "Own design (Nov 17). Fear is far above normal (VIX well above its 20-day average) and the market is down on the week; a leader above its 200-day average is oversold. Stop 2 ATR, target 2 ATR, no early exit.",
+  "source": {
+   "title": "Swing Desk own design (2026-11-17, reward at least the risk)",
+   "url": "https://github.com/aznh0pe/swing-desk"
+  },
+  "universe": "stock",
+  "conditions": [
+   "vix_ratio >= {v}",
+   "spy_ret5 <= -0.04",
+   "rs_pct >= 0.7",
+   "close > sma200",
+   "rsi2 < 15"
+  ],
+  "entry": {
+   "kind": "limit_next",
+   "price": "close - 0.3*atr10"
+  },
+  "stop": {
+   "atr": 2.0
+  },
+  "target": {
+   "atr": 2.0
+  },
+  "exit": "none",
+  "max_hold": 10,
+  "valid_days": 1,
+  "regime": [],
+  "params": {
+   "v": 1.5
+  },
+  "grid": {
+   "v": [
+    1.4,
+    1.7
+   ]
+  }
+ },
+ {
+  "id": "R_EVEN_CRASH_WEEK_ETF",
+  "label": "ETF in a Crash Week, Reward Equal to Risk",
+  "family": "Reward at least the risk",
+  "about": "Own design (Nov 17). The market has fallen hard in a week and an unleveraged ETF is deeply oversold. Buy near the close, stop 2 ATR below, target 2 ATR above, no early exit.",
+  "source": {
+   "title": "Swing Desk own design (2026-11-17, reward at least the risk)",
+   "url": "https://github.com/aznh0pe/swing-desk"
+  },
+  "universe": "etf",
+  "conditions": [
+   "spy_ret5 <= {m}",
+   "is_lev < 0.5",
+   "rsi2 < 10"
+  ],
+  "entry": {
+   "kind": "close"
+  },
+  "stop": {
+   "atr": 2.0
+  },
+  "target": {
+   "atr": "{g}"
+  },
+  "exit": "none",
+  "max_hold": 10,
+  "valid_days": 1,
+  "regime": [],
+  "params": {
+   "m": -0.08,
+   "g": 2.0
+  },
+  "grid": {
+   "m": [
+    -0.06,
+    -0.08
+   ],
+   "g": [
+    2.0,
+    3.0
+   ]
+  }
  }
 ]
