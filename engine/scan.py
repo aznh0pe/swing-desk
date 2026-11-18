@@ -923,6 +923,14 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
         "session_day": str(session_day), "engine": engine_version.info(),
     }
     scan_doc["below_bar"] = dict(BELOW_BAR)  # kept with the scan so a later news check explains withdrawals the same way
+    if mode == "postclose" and not partial:
+        n_err = len(errors)
+        cdr = close_drift(ind, P, plans, state, errors)
+        if cdr:
+            scan_doc["close_drift"] = cdr
+        if len(errors) > n_err:  # the lists above were cut before this ran: a failed measurement is still reported
+            scan_doc["errors"] = errors[:40]
+            scan_doc["run_issues"] = [f"The scanner hit {len(errors)} error(s) and carried on without those items; the first: {errors[0]}"]
     # news a check found on a position still held stays in every later scan until a news check looks at that stock
     # again (Nov 13: the 7:01 AM and 2:07 PM scans, which news-checked nothing or only new setups, left it out)
     from .postprocess import carried_position_news  # late import: postprocess imports this module
@@ -985,6 +993,77 @@ def ask_unmarked(last_day, last_session) -> bool:
     so by that evening's post-close scan Friday's order had dropped out of the digest unanswered, and by the
     next morning it had left the dashboard too. A filled order nobody recorded is a position no scan watches."""
     return str(last_day) >= str(cal.prev_trading_day(last_session, UNMARKED_ASK_SESSIONS - 1))
+
+
+def close_drift(ind, P, plans, state, errors) -> dict | None:
+    """Post-close, on the final bar: what happened to buy-near-the-close setups between the pre-close scan's prices
+    (about 12:20 PM PT) and the close. Which of the setups that were sent still qualify, and which setups qualify
+    on the final bar that the pre-close scan never saw. Measurement only: it sends nothing and changes nothing.
+    Nov 17, 2026: eight ETFs met the close-at-low rule on the final bar and the pre-close scan had sent two (one of
+    them, XLE, had stopped qualifying by the close). The feed keeps no earlier snapshots, so this is recorded daily."""
+    try:
+        c = ind["close"]
+        T = len(c) - 1
+        asof = str(c.index[T].date())
+        G = P["grading"]
+        pm = P.get("models", {}).get("_pooled")
+        adj = M.grading_offsets(P.get("live_adjust") or {})
+        tiers = ind["tier"].to_dict() if ind.get("tier") is not None else {}
+        ext = S.ext_rule(P)
+        ext_out, ext_bar = set(ext.get("excluded") or []), float(G.get("aplus_pwin", 0)) + float(ext.get("pwin_add") or 0)
+        mk_ = ind["market"].iloc[-1]
+        cond = S.condition_of(mk_.get("spy_above200"), mk_.get("vix_ratio"), mk_.get("spy_ret5"))
+        PC = P.get("conditions") or {}
+        paused = {n for src in ("gates", "gates_live") for n, v in (PC.get(src) or {}).items() if cond in (v or {})}
+        final = {}
+        for name, plan in plans.items():
+            if plan["entry_kind"] != "close" or name in paused:
+                continue
+            js = np.nonzero(plan["mask"].values[T])[0]
+            if len(js) == 0:
+                continue
+            grades = [None] * len(js)
+            if pm and pm.get("kind") == "pooled":
+                feats = S.features_at(ind, np.full(len(js), T), js)
+                names = [name] * len(js)
+                p_, _e, ep_ = M.predict_pooled(pm, feats, names, adj)
+                sc_ = M.score_pooled(p_, ep_)
+                p_, sc_, _own = M.apply_standalone(P, names, p_, sc_, adj)
+                grades = [M.grade(float(s), float(p), G) for s, p in zip(sc_, p_)]
+                grades = [("A" if (g == "A+" and tiers.get(c.columns[j]) == "ext" and float(p) < ext_bar) else g)
+                          for g, j, p in zip(grades, js, p_)]
+            for k, j in enumerate(js):
+                tk = c.columns[j]
+                if name in ext_out and tiers.get(tk) == "ext":
+                    continue
+                final[(name, tk)] = {"grade": grades[k], "close": round(float(c.values[T, j]), 2)}
+        sent = []
+        for aid, v in state["alerts"].items():
+            d = v["doc"]
+            at_close = d.get("entry_kind") == "close" or str(d.get("order", "")).startswith("Buy near the close")
+            if d.get("type") != "entry" or not at_close or str(d.get("valid_for")) != asof:
+                continue
+            tk = d.get("ticker")
+            fin = final.get((d.get("strategy"), tk))
+            cl = float(c[tk].values[T]) if tk in c.columns else float("nan")
+            sent.append({"ticker": tk, "strategy": d.get("strategy"), "grade": d.get("grade"), "alert_price": d.get("entry"),
+                         "close": round(cl, 2) if math.isfinite(cl) else None, "still_qualifies": fin is not None,
+                         "grade_at_close": (fin or {}).get("grade"),
+                         "close_vs_alert_pct": (round(100 * (cl / float(d["entry"]) - 1), 2)
+                                                if math.isfinite(cl) and d.get("entry") else None)})
+        sent_keys = {(s["strategy"], s["ticker"]) for s in sent}
+        late = [{"ticker": tk, "strategy": n, **v} for (n, tk), v in final.items() if (n, tk) not in sent_keys]
+        late.sort(key=lambda x: (x["grade"] != "A+", x["ticker"]))
+        if not sent and not late:
+            return None
+        return {"day": asof, "sent": sent, "late": late[:40],
+                "counts": {"sent": len(sent), "sent_aplus": sum(1 for s in sent if s["grade"] == "A+"),
+                           "still_qualify": sum(1 for s in sent if s["still_qualifies"]),
+                           "final_bar": len(final), "final_bar_aplus": sum(1 for v in final.values() if v["grade"] == "A+"),
+                           "late": len(late), "late_aplus": sum(1 for x in late if x["grade"] == "A+")}}
+    except Exception as e:  # a measurement must never cost a scan
+        errors.append(f"close drift check failed: {e!r}"[:200])
+        return None
 
 
 def close_order_text(entry, stop, target) -> str:

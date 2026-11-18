@@ -92,3 +92,36 @@ def test_the_review_tells_the_two_kinds_of_unfilled_order_apart():
             "order": SC.close_order_text(63.16, 59.5, 64.3)}]
     doc = LL.portfolio_stats(xle, [{"alert_id": "C2", "status": "unfilled"}], [], [], "2026-11-19", P)
     assert not any("recorded as not filled" in x for x in doc["lessons"])
+
+
+def test_the_post_close_scan_records_what_changed_between_the_alert_and_the_close():
+    """Nov 17, 2026: XLE was sent at 12:25 PM and had stopped qualifying by the close; four more ETFs qualified only
+    on the final bar. The feed keeps no earlier snapshots, so the post-close scan writes the comparison down daily."""
+    P = S.params_with_defaults(None)
+    P["models"] = {}                                   # no pooled model: the rule-level comparison still works
+    idx = pd.to_datetime(["2026-11-16", "2026-11-17"])
+    close = pd.DataFrame({"XLE": [63.69, 63.36], "XOP": [179.98, 177.61], "VNQ": [95.5, 94.89]}, index=idx)
+    mask = pd.DataFrame({"XLE": [False, False], "XOP": [False, True], "VNQ": [False, True]}, index=idx)
+    ind = {"close": close, "market": pd.DataFrame({"spy_above200": [1, 1], "vix_ratio": [1.2, 1.28], "spy_ret5": [-0.01, -0.023]}, index=idx)}
+    plans = {"ETF_IBS": {"entry_kind": "close", "mask": mask}, "MR_STRETCH": {"entry_kind": "limit_next", "mask": mask}}
+    mk = lambda tk, px, **kw: {"doc": {"type": "entry", "ticker": tk, "strategy": "ETF_IBS", "grade": "A+", "entry": px,
+                                       "valid_for": "2026-11-17", "entry_kind": "close", **kw}}
+    state = {"alerts": {"a1": mk("XLE", 63.16), "a2": mk("XOP", 177.25),
+                        "old": mk("XOP", 179.99, valid_for="2026-11-16"),                       # another day's alert
+                        "lim": {"doc": {"type": "entry", "ticker": "VNQ", "strategy": "MR_STRETCH", "entry": 94.0,
+                                        "valid_for": "2026-11-17", "order": "Buy LIMIT $94.00, day order"}}}}
+    errors = []
+    d = SC.close_drift(ind, P, plans, state, errors)
+    assert errors == [] and d["day"] == "2026-11-17"
+    by = {s["ticker"]: s for s in d["sent"]}
+    assert set(by) == {"XLE", "XOP"}
+    assert by["XLE"]["still_qualifies"] is False and by["XLE"]["close_vs_alert_pct"] == 0.32
+    assert by["XOP"]["still_qualifies"] is True and by["XOP"]["close"] == 177.61
+    assert [x["ticker"] for x in d["late"]] == ["VNQ"]                        # qualified on the final bar, never sent
+    assert d["counts"] == {"sent": 2, "sent_aplus": 2, "still_qualify": 1, "final_bar": 2, "final_bar_aplus": 0,
+                           "late": 1, "late_aplus": 0}
+    # nothing sent and nothing on the final bar: no record; a broken input never costs the scan
+    assert SC.close_drift(ind, P, {"MR_STRETCH": plans["MR_STRETCH"]}, {"alerts": {}}, errors) is None
+    assert SC.close_drift({}, P, plans, state, errors) is None and "close drift check failed" in errors[0]
+    src = pathlib.Path(SC.__file__).read_text()
+    assert 'if mode == "postclose" and not partial:\n        n_err = len(errors)\n        cdr = close_drift(' in src
