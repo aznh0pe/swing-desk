@@ -125,3 +125,20 @@ def test_the_post_close_scan_records_what_changed_between_the_alert_and_the_clos
     assert SC.close_drift({}, P, plans, state, errors) is None and "close drift check failed" in errors[0]
     src = pathlib.Path(SC.__file__).read_text()
     assert 'if mode == "postclose" and not partial:\n        n_err = len(errors)\n        cdr = close_drift(' in src
+
+
+def test_the_tested_fill_rate_is_compared_with_morning_limit_orders_only():
+    """The backtest buys every buy-near-the-close setup at the close (fill rate 100%); a real one is a limit at the
+    alert price that doesn't fill when the price lifts. Mixing the two made the review's comparison too harsh."""
+    P = S.params_with_defaults(None)
+    lim = [{"type": "entry", "id": f"L{i}", "ticker": f"T{i}", "valid_for": "2026-11-10", "entry": 10.0, "strategy": "MR_STRETCH",
+            "status": "filled" if i < 6 else "unfilled", "order": "Buy LIMIT $10.00, day order"} for i in range(10)]
+    cl = [{"type": "entry", "id": f"C{i}", "ticker": f"E{i}", "valid_for": "2026-11-10", "entry": 50.0, "strategy": "ETF_IBS",
+           "status": "unfilled", "entry_kind": "close", "order": SC.close_order_text(50.0, 45.0, 52.0)} for i in range(6)]
+    shadow = [{"alert_id": a["id"], "status": "unfilled"} for a in lim + cl]
+    doc = LL.portfolio_stats(lim + cl, shadow, [], [], "2026-11-19", P, {"MR_STRETCH": 0.64, "ETF_IBS": 1.0})
+    o = doc["orders"]
+    assert o["placed"] == 16 and o["filled"] == 6
+    assert o["limit_orders"] == {"placed": 10, "filled": 6, "fill_rate": 0.6} and o["close_orders"] == {"placed": 6, "filled": 0}
+    assert o["expected_fill_rate"] == 0.64                       # the morning limits' tested rate, not blended with 100%
+    assert not any("Your limit orders filled" in x for x in doc["lessons"])    # 60% vs 64%: nothing to flag

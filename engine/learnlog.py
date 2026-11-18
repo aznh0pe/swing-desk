@@ -250,7 +250,14 @@ def portfolio_stats(alerts: list, shadow: list, trades: list, ledger: list, toda
     # unfilled orders the grader counts as filled: the low traded through the limit on the order's day,
     # so a resting day order at the alert price should have filled (an execution gap worth checking)
     through = [a for a in unfilled if (smap.get(a.get("id")) or {}).get("status") in ("closed", "open")]
-    exp_fill = [float(fill_rates[a.get("strategy")]) for a in placed if fill_rates.get(a.get("strategy")) is not None]
+    def _at_close(a):
+        return a.get("entry_kind") == "close" or str(a.get("order", "")).lower().startswith("buy near the close")
+    # the tested fill rate is a morning-limit number: the backtest buys every buy-near-the-close setup at the close,
+    # while a real one is a limit at the alert price that doesn't fill when the price lifts (Nov 17, 2026: XLE).
+    # So the comparison with the backtest counts morning limit orders only.
+    lim_placed = [a for a in placed if not _at_close(a)]
+    lim_filled = [a for a in lim_placed if ostate[a.get("id")] == "filled"]
+    exp_fill = [float(fill_rates[a.get("strategy")]) for a in lim_placed if fill_rates.get(a.get("strategy")) is not None]
     by_st = {}
     for a in placed:
         r = by_st.setdefault(a.get("strategy") or "?", {"placed": 0, "filled": 0, "expected": fill_rates.get(a.get("strategy"))})
@@ -264,6 +271,9 @@ def portfolio_stats(alerts: list, shadow: list, trades: list, ledger: list, toda
                    "unfilled": len(unfilled), "cancelled": len(cancelled),
                    "fill_rate": round(len(filled) / len(placed), 3) if placed else None,
                    "expected_fill_rate": round(float(np.mean(exp_fill)), 3) if exp_fill else None,
+                   "limit_orders": {"placed": len(lim_placed), "filled": len(lim_filled),
+                                    "fill_rate": round(len(lim_filled) / len(lim_placed), 3) if lim_placed else None},
+                   "close_orders": {"placed": len(placed) - len(lim_placed), "filled": len(filled) - len(lim_filled)},
                    "by_strategy": by_st,
                    "unfilled_through_limit": [{"ticker": a.get("ticker"), "day": a.get("valid_for"), "limit": a.get("entry")}
                                               for a in through],
@@ -303,8 +313,6 @@ def portfolio_stats(alerts: list, shadow: list, trades: list, ledger: list, toda
                            f"as the ones within them ({100 * wn['win_rate']:.0f}%): more open positions at a smaller size "
                            "each would have captured them.")
     o = doc["orders"]
-    def _at_close(a):
-        return a.get("entry_kind") == "close" or str(a.get("order", "")).lower().startswith("buy near the close")
     thr_lim, thr_cl = [a for a in through if not _at_close(a)], [a for a in through if _at_close(a)]
     if thr_lim:
         names = ", ".join(f"{a.get('ticker')} {a.get('valid_for')}" for a in thr_lim)
@@ -328,10 +336,11 @@ def portfolio_stats(alerts: list, shadow: list, trades: list, ledger: list, toda
         names = ", ".join(f"{a.get('ticker')} {a.get('valid_for')}" for a in unrecorded)
         lessons.append(f"Probably filled but not recorded ({names}): the low traded through the limit. If you hold it, "
                        "press Mark done (filled) on the dashboard so the scans watch its exits.")
-    if o["placed"] >= 10 and o["fill_rate"] is not None and o["expected_fill_rate"] is not None \
-            and o["fill_rate"] < o["expected_fill_rate"] - 0.15:
-        lessons.append(f"Your limit orders filled {100 * o['fill_rate']:.0f}% of the time vs {100 * o['expected_fill_rate']:.0f}% "
-                       f"in the backtest ({o['placed']} orders). Unfilled orders cost trades, not money; if it persists, "
+    lo = o["limit_orders"]
+    if lo["placed"] >= 10 and lo["fill_rate"] is not None and o["expected_fill_rate"] is not None \
+            and lo["fill_rate"] < o["expected_fill_rate"] - 0.15:
+        lessons.append(f"Your limit orders filled {100 * lo['fill_rate']:.0f}% of the time vs {100 * o['expected_fill_rate']:.0f}% "
+                       f"in the backtest ({lo['placed']} orders). Unfilled orders cost trades, not money; if it persists, "
                        "check the orders go in before the open at the alert's limit.")
     sk = doc["skipped"]
     if sk["n"] >= 10 and sk["win_rate"] is not None and sk["win_rate"] >= 0.7:
