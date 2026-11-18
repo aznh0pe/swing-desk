@@ -411,7 +411,7 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
             "entry": _r(cd["entry"]), "stop": _r(cd["stop"]), "target": _r(cd["target"]),
             "rr": _r(cd["rr"], 2), "risk_per_share": _r(cd["entry"] - cd["stop"]),
             "reward_per_share": _r(cd["target"] - cd["entry"]),
-            "order": ("Buy near the close today (limit at about the last price)" if cd["plan"]["entry_kind"] == "close"
+            "order": (close_order_text(cd["entry"], cd["stop"], cd["target"]) if cd["plan"]["entry_kind"] == "close"
                       else f"Buy LIMIT ${cd['entry']:.2f}, day order for {session_day} "
                            f"(place before the 6:30 AM PT open). Attach stop ${cd['stop']:.2f} and "
                            f"limit-sell target ${cd['target']:.2f} once filled (bracket/OCO)."),
@@ -987,6 +987,22 @@ def ask_unmarked(last_day, last_session) -> bool:
     return str(last_day) >= str(cal.prev_trading_day(last_session, UNMARKED_ASK_SESSIONS - 1))
 
 
+def close_order_text(entry, stop, target) -> str:
+    """The order line of a buy-near-the-close alert. It must start with "Buy near the close": older code and the
+    grader recognise the kind by that prefix.
+    Nov 17, 2026: the old line said "limit at about the last price", which reads as "pay whatever it trades at".
+    The tested record buys at the closing price of setups that still qualify AT the close (for the ETF
+    close-at-low rule: still in the bottom tenth of the day's range). XLE was sent at $63.16, lifted off its low and
+    closed at $63.36; at the close it no longer qualified, so the owner's unfilled limit was the right result.
+    On 2022-now data, paying more than the close costs A+ wins fast: 83.0% at the close, 79.6% at +0.1%, 76.1% at
+    +0.2%, 72.2% at +0.3%, 65.4% at +0.5% (2,740 setups; 2008-2021: 79.7 / 74.7 / 70.0 / 65.3 / 56.6% of 7,511).
+    So: a limit at the alert price, placed late, never chased."""
+    return (f"Buy near the close today: in the last 10 minutes of the session, place a LIMIT at ${float(entry):.2f} "
+            "(day order). Never chase it above that price: the setup only counts while the price is still down "
+            "there at the close, so if it has lifted, an unfilled order is the right result. "
+            f"Attach stop ${float(stop):.2f} and limit-sell target ${float(target):.2f} once filled (bracket/OCO).")
+
+
 def order_fill_check(a: dict, ind: dict, today, mode: str, partial_bar: bool) -> dict | None:
     """Once an entry order's session is over: did its limit trade through? Same rule as the backtest and the
     shadow grader: a buy limit fills only when the session's low trades BELOW it (a touch is not a fill).
@@ -1008,8 +1024,21 @@ def order_fill_check(a: dict, ind: dict, today, mode: str, partial_bar: bool) ->
     kind = a.get("entry_kind") or ("close" if str(a.get("order", "")).startswith("Buy near the close") else "limit")
     if kind == "close" or not lim:
         out["at_close"] = True
-        out["text"] = (("A" if mine else "If you placed it: a") + " buy-near-the-close order, so only your brokerage "
-                       "knows whether it was bought. If it was, press Mark done (filled) with the price; if not, press Didn't fill"
+        hint = ""
+        closes = (ind or {}).get("close")
+        if lim and closes is not None and tk in closes.columns:
+            day_rows = [d for d in closes.index if d.date() == vf]
+            cl = float(closes.loc[day_rows[0], tk]) if day_rows else float("nan")
+            if math.isfinite(cl):
+                out["close"] = round(cl, 2)
+                # a hint, never a verdict: the order went in during the last minutes, and daily prices can't see those
+                hint = (f"It closed at ${cl:.2f}, above the ${float(lim):.2f} limit, so a limit placed near the close "
+                        "probably didn't fill, and that is the right result: the setup only counts while the price is "
+                        "still down there at the close. " if cl > float(lim) else
+                        f"It closed at ${cl:.2f}, at or under the ${float(lim):.2f} limit, so a limit placed near the "
+                        "close probably filled. ")
+        out["text"] = (("A" if mine else "If you placed it: a") + " buy-near-the-close order. " + hint + "Only your brokerage "
+                       "knows for sure whether it was bought. If it was, press Mark done (filled) with the price; if not, press Didn't fill"
                        + ("." if mine else "; if you never placed it, press I didn't place it, or Didn't see it in time "
                           "if the alert reached you too late."))
         return out
@@ -1297,7 +1326,9 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
     if entries:
         sess = _day(entries[0].get("valid_for"))
         lines += ["", f"=== NEW SETUPS FOR {sess.upper()} ({len(featured)} featured{f', {len(extra)} more below' if extra else ''}) ==="]
-        lines.append("Buy near today's close (limit at about the last price); attach the stop and target as a bracket once filled."
+        lines.append("Buy in the last 10 minutes of the session with a LIMIT at the price shown, and never chase above it: "
+                     "if the price has lifted by then, the setup no longer counts and an unfilled order is the right result. "
+                     "Attach the stop and target as a bracket once filled."
                      if scan["mode"] == "preclose" else
                      "Place each as a DAY limit order before the 6:30 AM PT open; attach the stop and target as a bracket once filled.")
         for i, e in enumerate(featured, 1):

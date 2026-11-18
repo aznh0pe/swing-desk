@@ -1196,14 +1196,19 @@ def shadow_outcome(a: dict, ind: dict) -> dict:
     entry, stop, tgt = float(a["entry"]), float(a["stop"]), float(a["target"])
     hold = int(a.get("hold_max_days") or 7)
     dyn = a.get("dyn_exit") or "none"
-    at_close = str(a.get("order", "")).lower().startswith("buy near the close")
+    at_close = a.get("entry_kind") == "close" or str(a.get("order", "")).lower().startswith("buy near the close")
     valid = max(1, int(a.get("valid_days") or 1))
-    # fill: a buy-near-the-close alert fills at that day's close; a limit fills on the first session
+    # fill: a buy-near-the-close alert is a limit at the alert price placed in the last minutes, so it fills at
+    # that day's close only when the close is at or under that price. A close above it means the price lifted off
+    # its low after the alert went out: the order as sent doesn't fill, and the setup no longer qualifies on the
+    # final bar either (Nov 17, 2026: XLE sent at $63.16, closed $63.36; it used to be graded as bought at $63.36,
+    # a trade the tested rule never takes). A limit fills on the first session
     # (within its validity) whose low trades through the limit (a touch is not a fill, as in the backtest),
     # at the better of the open and the limit
     fill_i, fill = -1, float("nan")
     if at_close:
-        fill_i, fill = d0, float(C[d0])
+        if np.isfinite(C[d0]) and C[d0] <= entry + 1e-9:
+            fill_i, fill = d0, float(C[d0])
     else:
         for d in range(d0, min(d0 + valid, len(idx))):
             if np.isfinite(L[d]) and L[d] < entry:

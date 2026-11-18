@@ -303,11 +303,20 @@ def portfolio_stats(alerts: list, shadow: list, trades: list, ledger: list, toda
                            f"as the ones within them ({100 * wn['win_rate']:.0f}%): more open positions at a smaller size "
                            "each would have captured them.")
     o = doc["orders"]
-    if through:
-        names = ", ".join(f"{a.get('ticker')} {a.get('valid_for')}" for a in through)
-        lessons.append(f"{len(through)} order(s) recorded as not filled traded through the limit on their day ({names}): "
+    def _at_close(a):
+        return a.get("entry_kind") == "close" or str(a.get("order", "")).lower().startswith("buy near the close")
+    thr_lim, thr_cl = [a for a in through if not _at_close(a)], [a for a in through if _at_close(a)]
+    if thr_lim:
+        names = ", ".join(f"{a.get('ticker')} {a.get('valid_for')}" for a in thr_lim)
+        lessons.append(f"{len(thr_lim)} order(s) recorded as not filled traded through the limit on their day ({names}): "
                        "a day limit order at the alert price, placed before the open, should have filled. "
                        "Check the order's price, time in force and when it went in.")
+    if thr_cl:
+        # only closes at or under the alert price get here: the grader no longer counts a close above it as a fill
+        names = ", ".join(f"{a.get('ticker')} {a.get('valid_for')}" for a in thr_cl)
+        lessons.append(f"{len(thr_cl)} buy-near-the-close order(s) recorded as not filled closed at or under the alert "
+                       f"price ({names}): a limit at that price in the last 10 minutes of the session should have "
+                       "filled. Check the order's price and how late it went in.")
     if missed:
         names = ", ".join(f"{a.get('ticker')} {a.get('valid_for')}" for a in missed)
         rs = [r for r in (sret(a) for a in missed) if r is not None]
