@@ -70,7 +70,9 @@ def test_the_research_runs_design_one_such_idea_every_day():
     assert "At least one of the new ideas you design today must be built with a reward at least as large as its risk" in t["every_day"]
     assert "70%+ wins in both periods" in t["how_it_is_judged"] and "60%+ a candidate" in t["how_it_is_judged"]
     assert any("payoff 0.58" in x for x in t["what_the_desk_knows"]) and any("1 ATR stop" in x for x in t["what_the_desk_knows"])
-    assert "A tighter stop on an existing idea is not a new idea" in t["look_for"]
+    assert "A tighter stop, a new exit or a scale-out on an existing idea is not a new idea" in t["look_for"]
+    assert any("Planned reward:risk is not realized reward:risk" in x for x in t["what_the_desk_knows"])
+    assert any("New exits on the same signals are not the answer" in x for x in t["what_the_desk_knows"])
     src = pathlib.Path(RS.__file__).read_text()
     assert 'res["reward_at_least_risk"] = track' in src and 'focus["reward_at_least_risk"] =' in src      # printed by `research next`
     assert '"payoff": {k: v for k, v in po.items() if k != "sentence"}' in src and 'summary += po["sentence"]' in src

@@ -484,10 +484,15 @@ def payoff_track() -> dict:
             "Only the highest-confidence setups (model win estimate 80%+, panic lows in market selloffs) kept high win rates at reward = risk: 70% in 2008-2021 and 85% in 2022-now.",
             "Rules alone, first batch (Nov 17, 2026): panic-low designs at reward = risk won 56-63% (payoff 1.1-1.2, average +1.0 to +1.7%); general oversold dips 53-57%; a classic 1:2 pullback-and-reclaim in leaders 38-42% with almost no edge; buying 1 ATR lower with a 1:1.5 plan 48-50%.",
             "Setups whose planned reward:risk is higher have paid more per trade in both periods, at similar win rates.",
+            "Scale-out (Nov 18, 2026): selling half at +1 ATR, stop to breakeven, rest to +3 or +4 ATR raises the planned reward:risk to 1.25-1.4, but the realized payoff stays 0.65-0.85 at 70-74% wins: the partial profit shrinks the average win. Planned reward:risk is not realized reward:risk; judge the payoff block.",
+            "Account replay, 7 slots (Nov 18, 2026): a 1:1 exit on the A+ signals in ordinary markets grew slightly faster (9.7% vs 7.5% a year 2008-2021, 29.7% vs 28.4% 2022-now) with much deeper drawdowns (-28% vs -17%, -15% vs -9%) and 61% wins instead of 77-84%; 1:1 in crash weeks only added 1.5 points with a deeper 2008-2021 drawdown. New exits on the same signals are not the answer: new entries with a larger edge are.",
+            "Rule search over 2.1 million stock-days with a 1:1.5 bracket (rules chosen on 2008-2016, checked on 2017-2021): the best ordinary-market rules won 56-60% on those years and 48-56% on 2022-now. A gradient-boosted model's top 5% won 58% on 2022-now (wins 1.3x losses, +1.4% a trade). Stock-level inputs add little; market state dominates. Grinding bear markets (2022) fail at reward >= risk even when crash weeks work.",
         ],
-        "look_for": ("setups with a strong multi-day drift, where price travels 2 ATR up before 2 ATR down far more often than "
-                     "not: panic lows and forced selling, capitulation followed by a strong close, the turn of the month, and "
-                     "filters that raise the win rate at reward = risk. A tighter stop on an existing idea is not a new idea."),
+        "look_for": ("new entries with a larger edge, where price travels 2 ATR up before 2 ATR down far more often than "
+                     "not: panic lows and forced selling, capitulation followed by a strong close, the turn of the month, events "
+                     "(an earnings gap that holds its first day, index additions), cross-asset triggers (bond or dollar moves), and "
+                     "filters that raise the win rate at reward = risk. A tighter stop, a new exit or a scale-out on an existing "
+                     "idea is not a new idea."),
     }
 
 
