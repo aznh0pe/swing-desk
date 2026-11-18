@@ -916,5 +916,226 @@
     3.0
    ]
   }
+ },
+ {
+  "id": "R_RR2_GAP_THAT_HOLDS",
+  "label": "Gap Up that Holds on Heavy Volume, Target Twice the Risk",
+  "family": "Reward at least the risk",
+  "about": "Own design (Nov 18, 2026). A stock gaps above the prior day's high (usually news or earnings) on at least {v}x normal volume and closes in the top part of the day's range, above its open: buyers kept the gap. Buy near the close, stop just under the day's low, target {m} times that risk. A gap that holds its first day tends to keep drifting for weeks.",
+  "source": {
+   "title": "Swing Desk own design (2026-11-17, reward at least the risk)",
+   "url": "https://github.com/aznh0pe/swing-desk"
+  },
+  "universe": "stock",
+  "conditions": [
+   "gap_up >= 0.02",
+   "vol_ratio >= {v}",
+   "ibs >= 0.65",
+   "close > open",
+   "close > sma50"
+  ],
+  "entry": {
+   "kind": "close"
+  },
+  "stop": {
+   "price": "low - 0.1*atr10"
+  },
+  "target": {
+   "price": "close + {m}*(close - low + 0.1*atr10)",
+   "min_atr": 0.5,
+   "cap_atr": 8
+  },
+  "exit": "none",
+  "max_hold": 15,
+  "valid_days": 1,
+  "regime": [],
+  "params": {
+   "v": 3.0,
+   "m": 2.0
+  },
+  "grid": {
+   "v": [
+    2.0,
+    3.0
+   ],
+   "m": [
+    1.5,
+    2.0
+   ]
+  }
+ },
+ {
+  "id": "R_RR2_QUIET_PULLBACK_TO_EMA20",
+  "label": "Strong Stock's Quiet Pullback to the 20-Day EMA, Room to the High",
+  "family": "Reward at least the risk",
+  "about": "Own design (Nov 18, 2026). A stock up 25%+ in three months pulls back quietly (volume under its average) and closes just above its 20-day EMA, with the 20-day high at least twice as far above as the EMA is below. Buy near the close, stop 0.5 ATR under the EMA, target the 20-day high: the reward is at least twice the risk by construction.",
+  "source": {
+   "title": "Swing Desk own design (2026-11-17, reward at least the risk)",
+   "url": "https://github.com/aznh0pe/swing-desk"
+  },
+  "universe": "stock",
+  "conditions": [
+   "ret63 >= 0.25",
+   "close > ema20",
+   "close <= ema20 + 0.5*atr10",
+   "vol_ratio <= {q}",
+   "close < close[1]",
+   "hh20 - close >= 2*(close - ema20 + 0.5*atr10)"
+  ],
+  "entry": {
+   "kind": "close"
+  },
+  "stop": {
+   "price": "ema20 - 0.5*atr10"
+  },
+  "target": {
+   "price": "hh20",
+   "min_atr": 0.5,
+   "cap_atr": 8
+  },
+  "exit": "none",
+  "max_hold": 15,
+  "valid_days": 1,
+  "regime": [],
+  "params": {
+   "q": 0.8
+  },
+  "grid": {
+   "q": [
+    0.7,
+    0.9
+   ]
+  }
+ },
+ {
+  "id": "R_RR2_CAPITULATION_REVERSAL",
+  "label": "Capitulation Volume Reversal off a 20-Day Low, Target Twice the Risk",
+  "family": "Reward at least the risk",
+  "about": "Own design (Nov 18, 2026). A stock above its 200-day average makes a new 20-day low on {v}x normal volume, then closes in the top half of the day's range: forced selling met a buyer. Buy near the close, stop just under the day's low, target {m} times that risk.",
+  "source": {
+   "title": "Swing Desk own design (2026-11-17, reward at least the risk)",
+   "url": "https://github.com/aznh0pe/swing-desk"
+  },
+  "universe": "stock",
+  "conditions": [
+   "close > sma200",
+   "low <= ll20",
+   "vol_ratio >= {v}",
+   "ibs >= 0.5",
+   "close > open"
+  ],
+  "entry": {
+   "kind": "close"
+  },
+  "stop": {
+   "price": "low - 0.1*atr10"
+  },
+  "target": {
+   "price": "close + {m}*(close - low + 0.1*atr10)",
+   "min_atr": 0.5,
+   "cap_atr": 8
+  },
+  "exit": "none",
+  "max_hold": 12,
+  "valid_days": 1,
+  "regime": [],
+  "params": {
+   "v": 2.0,
+   "m": 2.0
+  },
+  "grid": {
+   "v": [
+    1.5,
+    2.5
+   ],
+   "m": [
+    1.5,
+    2.0
+   ]
+  }
+ },
+ {
+  "id": "R_RR2_OUTSIDE_DAY_AT_50",
+  "label": "Bullish Outside Day at the 50-Day in an Uptrend, Target Twice the Risk",
+  "family": "Reward at least the risk",
+  "about": "Own design (Nov 18, 2026). In an uptrend (50-day above 200-day), a stock trades below the prior day's low and under its 50-day average, then closes above the prior day's high and back above the 50-day: a one-day reversal at support. Buy near the close, stop just under the day's low, target {m} times that risk.",
+  "source": {
+   "title": "Swing Desk own design (2026-11-17, reward at least the risk)",
+   "url": "https://github.com/aznh0pe/swing-desk"
+  },
+  "universe": "stock",
+  "conditions": [
+   "sma50 > sma200",
+   "low < low[1]",
+   "close > high[1]",
+   "low <= sma50",
+   "close > sma50"
+  ],
+  "entry": {
+   "kind": "close"
+  },
+  "stop": {
+   "price": "low - 0.1*atr10"
+  },
+  "target": {
+   "price": "close + {m}*(close - low + 0.1*atr10)",
+   "min_atr": 0.5,
+   "cap_atr": 8
+  },
+  "exit": "none",
+  "max_hold": 12,
+  "valid_days": 1,
+  "regime": [],
+  "params": {
+   "m": 2.0
+  },
+  "grid": {
+   "m": [
+    1.5,
+    2.0,
+    3.0
+   ]
+  }
+ },
+ {
+  "id": "R_RR2_ETF_OUTSIDE_DAY_SELLOFF",
+  "label": "ETF Bullish Outside Day after a Market Selloff, Target Twice the Risk",
+  "family": "Reward at least the risk",
+  "about": "Own design (Nov 18, 2026). After the market has fallen (SPY down 3%+ in a week), an unleveraged ETF trades below the prior day's low and then closes above the prior day's high: sellers exhausted. Buy near the close, stop just under the day's low, target {m} times that risk.",
+  "source": {
+   "title": "Swing Desk own design (2026-11-17, reward at least the risk)",
+   "url": "https://github.com/aznh0pe/swing-desk"
+  },
+  "universe": "etf",
+  "conditions": [
+   "spy_ret5 <= -0.03",
+   "is_lev < 0.5",
+   "low < low[1]",
+   "close > high[1]"
+  ],
+  "entry": {
+   "kind": "close"
+  },
+  "stop": {
+   "price": "low - 0.1*atr10"
+  },
+  "target": {
+   "price": "close + {m}*(close - low + 0.1*atr10)",
+   "min_atr": 0.5,
+   "cap_atr": 8
+  },
+  "exit": "none",
+  "max_hold": 10,
+  "valid_days": 1,
+  "regime": [],
+  "params": {
+   "m": 2.0
+  },
+  "grid": {
+   "m": [
+    1.5,
+    2.0
+   ]
+  }
  }
 ]
