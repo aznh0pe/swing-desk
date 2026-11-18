@@ -73,17 +73,28 @@ def latest_results(results: dict) -> dict:
     return out
 
 
-def retest_specs(state_dir, cap: int = 12) -> list[dict]:
-    """Ideas whose verdict can change with new data (they fail only on 2022-now checks): re-tested every Saturday."""
+STALE_DAYS, STALE_CAP = 28, 8
+
+
+def retest_specs(state_dir, cap: int = 12, now=None) -> list[dict]:
+    """Ideas re-tested every Saturday, oldest test first: up to `cap` whose verdict can change with new data (they
+    fail only on 2022-now checks), plus up to STALE_CAP of every other non-candidate whose last test is STALE_DAYS
+    old. Nov 18, 2026 (the owner: whatever is excluded must be checked again later): 20 of 63 ideas were marked
+    "only a different rule can fix it" and never tested again, on the reasoning that 2008-2021 never changes.
+    It does: the ticker list grows daily, and the bars and inputs change. Nothing is rejected for good."""
     ideas, latest = load_ideas(state_dir), latest_results(load_results(state_dir))
-    out = []
+    now = now or cal.now_pt()
+    cut = (now - dt.timedelta(days=STALE_DAYS)).isoformat()
+    out, stale = [], []
     for iid, r in sorted(latest.items(), key=lambda kv: str(kv[1].get("tested_at", ""))):
         if iid not in ideas or not ideas[iid].get("spec") or r.get("verdict") == "candidate":
             continue
         path = r.get("path") or {}
         if path.get("status") in ("data", "data_slow", "overlap") or (not path and r.get("verdict") in ("watch", "redundant")):
             out.append(ideas[iid]["spec"])
-    return out[:cap]
+        elif str(r.get("tested_at", "")) <= cut:
+            stale.append(ideas[iid]["spec"])
+    return out[:cap] + stale[:STALE_CAP]
 
 
 def candidate_specs(state_dir, old_params: dict | None = None, cap: int = 6, extra_results: list | None = None) -> dict:

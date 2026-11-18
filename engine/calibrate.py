@@ -1416,6 +1416,78 @@ def tier_checks(rows: dict, core: dict, new: dict) -> list:
     ]
 
 
+# The lines the scan draws once and then never looked at again (owner, Nov 18, 2026: "if you trim or exclude tickers,
+# you have to check back after a certain period, because those tickers might perform better later"). The screen
+# itself re-admits tickers daily, but the scan's own cut-offs ($10 price, $30M a day for stocks, no leveraged ETFs)
+# were fixed lines justified by one study each. Every tier check (Saturdays and on demand) now replays the live
+# strategies on the names under those lines and reports how their A+ setups did against the names above them.
+LEFT_OUT = {"min_price": 5.0, "min_dv_stock": 12e6, "min_dv_etf": 8e6, "gap": 0.02, "min_n": 150}
+
+
+def left_out_check(ind, P_all, pm, t_in, split, log=print) -> dict:
+    """A+ setups of the live strategies on names the scan's filters leave out, by reason, against the A+ setups
+    on the names it scans. `worth_adding` names a group that kept up in both periods (within 2 points of the
+    scanned names' win rate, 150+ setups each, a positive average trade): a prompt to lower that line, never an
+    automatic change."""
+    f0 = P_all["filters"]
+    P_rel = copy.deepcopy(P_all)
+    P_rel["filters"].update(min_price=LEFT_OUT["min_price"], min_dv_stock=LEFT_OUT["min_dv_stock"],
+                            min_dv_etf=LEFT_OUT["min_dv_etf"], allow_leveraged=True, min_atr_pct=0.0)
+    plans = S.all_plans(ind, P_rel)
+    trs = [B.simulate(plans[n], ind, P_rel, include_unfilled=True) for n, sp in P_rel["strategies"].items()
+           if sp.get("enabled", True) and n in plans]
+    r = mark_entry(_score_live(pd.concat([x for x in trs if not x.empty], ignore_index=True), pm, P_rel), P_rel)
+    G = P_all["grading"]
+    r = r[r["filled"] & r["ret"].notna() & (r["score"] >= G["aplus_score"]) & (r["p"] >= G["aplus_pwin"])].copy()
+    ti, ji = r["t"].to_numpy(int), r["j"].to_numpy(int)
+    px, dv = ind["close"].to_numpy()[ti, ji], ind["dv20"].to_numpy()[ti, ji]
+    def per_row(x):  # a per-ticker flag, or a day-by-ticker frame
+        a = np.asarray(x)
+        return (a[ti, ji] if a.ndim == 2 else a[ji]).astype(bool)
+    stock, lev = per_row(ind["is_stock"]), per_row(ind["is_lev"])
+    line = np.where(stock, f0["min_dv_stock"], f0["min_dv_etf"])
+    quiet = (ind["atr10"].to_numpy()[ti, ji] / px) < float(f0.get("min_atr_pct") or 0)
+    why = np.where(lev & (not f0.get("allow_leveraged", True)), "leveraged",
+                   np.where(px < f0["min_price"], "price", np.where(dv < line, "volume", np.where(quiet, "quiet", "scanned"))))
+    r["why"] = why
+    sp_ = pd.Timestamp(split)
+
+    def one(g):
+        out = {}
+        for k, m in (("train", g["signal_date"] < sp_), ("oos", g["signal_date"] >= sp_)):
+            x = g.loc[m, "ret"]
+            out[k] = {"n": int(len(x)), "win_rate": round(float((x > 0).mean()), 4) if len(x) else None,
+                      "avg_ret": round(float(x.mean()), 5) if len(x) else None,
+                      "days": int(g.loc[m, "signal_date"].nunique())}
+        return out
+    base = one(r[r["why"] == "scanned"])
+    names = {"price": f"priced ${LEFT_OUT['min_price']:.0f} to ${f0['min_price']:.0f}",
+             "volume": f"trading ${LEFT_OUT['min_dv_stock'] / 1e6:.0f}M to ${f0['min_dv_stock'] / 1e6:.0f}M a day",
+             "leveraged": "leveraged ETFs",
+             "quiet": f"moving under {100 * float(f0.get('min_atr_pct') or 0):.1f}% of their price a day"}
+    groups, worth, parts = {}, [], []
+    for k, label in names.items():
+        g = one(r[r["why"] == k])
+        ok = all((g[p]["n"] or 0) >= LEFT_OUT["min_n"] and g[p]["win_rate"] is not None and base[p]["win_rate"] is not None
+                 and g[p]["win_rate"] >= base[p]["win_rate"] - LEFT_OUT["gap"]
+                 and (g[p]["avg_ret"] or 0) >= 0.5 * (base[p]["avg_ret"] or 0) > 0
+                 for p in ("train", "oos"))
+        groups[k] = {**g, "label": label, "worth_adding": bool(ok)}
+        if ok:
+            worth.append(label)
+        if g["oos"]["n"] or g["train"]["n"]:
+            f_ = lambda d: f"{100 * d['win_rate']:.0f}% of {d['n']}" if d["n"] else "none"
+            parts.append(f"{label} {f_(g['train'])} / {f_(g['oos'])}")
+    f_ = lambda d: f"{100 * d['win_rate']:.0f}% of {d['n']}" if d["n"] else "none"
+    text = ("Names the scan leaves out, re-checked (A+ setups there, 2008-2021 / 2022-now): " + ("; ".join(parts) or "none had setups")
+            + f"; the names it scans: {f_(base['train'])} / {f_(base['oos'])}. "
+            + (("Kept up in both periods: " + ", ".join(worth) + ". Replay the desk with that line moved before changing it.") if worth
+               else "None kept up in both periods, so the lines stay."))
+    log(text)
+    return {"scanned": base, "groups": groups, "worth_adding": worth, "text": text,
+            "relaxed": {k: LEFT_OUT[k] for k in ("min_price", "min_dv_stock", "min_dv_etf")}}
+
+
 def run_tiers(data_dir, state_dir, out_dir, split="2022-01-01", log=print, now=None, params_path=None) -> dict:
     """Weekly tier check. Replays the live setup (or the just-recalibrated one in params_path, a doc_params.json)
     on every ticker in the feed and decides how the extension tier trades: the most permissive of "on",
@@ -1454,7 +1526,13 @@ def run_tiers(data_dir, state_dir, out_dir, split="2022-01-01", log=print, now=N
                if sp.get("enabled", True) and n in plans]
         t = mark_entry(_score_live(pd.concat([x for x in trs if not x.empty], ignore_index=True), pm, P_all), P_all)
         t["tier"] = t["ticker"].map(ind["tier"]).fillna("core").values
-        del ind, plans, trs, w
+        del plans, trs
+        try:  # a check on the scan's fixed lines: it must never cost the tier check
+            left_out = left_out_check(ind, P_all, pm, t, split, log=log)
+        except Exception as ex:
+            left_out = {"error": repr(ex)[:200], "text": f"The check of the names the scan leaves out failed this time ({ex!r})."[:240]}
+            log(left_out["text"])
+        del ind, w
         post = t[t["signal_date"] >= pd.Timestamp(split)]
         G = P["grading"]
         st_ = state.get("settings") or {}
@@ -1550,6 +1628,8 @@ def run_tiers(data_dir, state_dir, out_dir, split="2022-01-01", log=print, now=N
                          "desk": {"core": slim(core), "with_ext": slim(d) if d else None}, "universe": uni}}
         if add_pick and status != "off":
             block["ext"]["tiers_at_desk_bar"] = {"ext": {k: rows0["ext"].get(k) for k in ("aplus", "aplus_late")}}
+        block["ext"]["left_out"] = left_out
+        block["ext"]["reason"] = reason = reason + " " + left_out["text"]
         log(f"extension tier: {status} x{mult}{f' bar +{add_pick:.2f}' if add_pick else ''}. {reason}")
     line = "Wider list (weekly tier check): " + block["ext"]["reason"]
     (out / "tiers.json").write_text(json.dumps(block, default=str))

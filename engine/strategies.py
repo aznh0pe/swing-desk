@@ -66,7 +66,13 @@ DEFAULT_PARAMS = {
     "updated": None,
     "risk": {"risk_pct": 2.0, "risk_pct_top": 2.0, "max_position_pct": 25.0,
              "max_open": 5, "min_position_usd": 150.0, "slippage_pct": 0.05},
-    "filters": {"min_price": 10.0, "min_dv_stock": 30e6, "min_dv_etf": 20e6,
+    # min_atr_pct (Nov 18, 2026): names that move less than 1.5% of their price a day are left out. Their setups won
+    # about as often as the rest but made nothing: A+ setups there averaged +0.1% a trade in 2008-2021 and +0.2% in
+    # 2022-now (wins of +0.5% against losses of -1.5%; flat or negative in most single years), while filling
+    # position slots. Without them every measure improved in both periods (A+ wins 79.5 -> 80.0% and 81.0 -> 81.4%,
+    # average trade +1.04 -> +1.30% and +1.36 -> +1.53%, account replay 7.5 -> 8.1% and 28.4 -> 29.3% a year, same
+    # drawdown, same weeks covered). Re-checked every week with the other lines (calibrate.left_out_check).
+    "filters": {"min_price": 10.0, "min_dv_stock": 30e6, "min_dv_etf": 20e6, "min_atr_pct": 0.015,
                 "earnings_buffer_days": 1, "allow_leveraged": True},
     # position management the scans apply live, replayed in every backtest so the two never drift apart:
     # the stop moves to entry + 1 ATR once a close is 2 ATR above the fill; a limit order only counts as
@@ -169,6 +175,8 @@ def base_masks(ind: dict, P: dict) -> dict:
     min_dv = np.where(is_stock.values, f["min_dv_stock"], f["min_dv_etf"])
     liquid = (c >= f["min_price"]) & (ind["dv20"] >= min_dv) & ind["sma200"].notna() \
         & ind["atr10"].notna() & tradable
+    if float(f.get("min_atr_pct") or 0) > 0:
+        liquid &= (ind["atr10"] / c) >= float(f["min_atr_pct"])
     if not f.get("allow_leveraged", True):
         liquid &= ~is_lev
     twin = ind.get("twin")
@@ -402,8 +410,9 @@ def path_to_pass(st_train: dict, st_test: dict, oos_weeks: float, extra_checks: 
         names = [short[c["key"]] for c in fixed]
         names = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
         return {"status": "fixed", "blocking": [c["key"] for c in fixed],
-                "text": (f"New data can't switch it on: it fails the 2008-2021 {names} check{'s' if len(fixed) > 1 else ''}, and that period never "
-                         "changes. Only a different rule can fix it; rule variants go through the research pipeline.")}
+                "text": (f"New data alone is unlikely to switch it on: it fails the 2008-2021 {names} check{'s' if len(fixed) > 1 else ''}. "
+                         "A different rule is the likely fix (variants go through the research pipeline); it is still re-tested "
+                         "every four weeks, because the ticker list and the inputs change.")}
     only_overlap = all(c["key"] == "overlap" for c in failing)
     if only_overlap:
         return {"status": "overlap", "blocking": ["overlap"],
