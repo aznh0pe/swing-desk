@@ -920,3 +920,25 @@ def test_a_candidate_judged_on_graded_setups_is_also_checked_on_its_own_record(t
     assert rep["promoted"] == [] and asked == [len(new_rows)]
     cand = rep["candidates"][0]
     assert cand["id"] == "R_CALM" and cand["graded"] and cand["standalone"]["checks"][0]["key"] == "train_pf"
+
+
+def test_a_promotion_needs_enough_of_its_own_setups_on_enough_days():
+    """Nov 18, 2026: the mid-week check promoted Bearish Engulfing Day Bought as a Dip on 39 of its own setups
+    (82% won; raw rule 62%; growth +0.2 points a year). The bar is now 60+ setups on 30+ signal days."""
+    base = CB.desk_replay(_desk_world(), G_TEST, 5, ACCT)
+    assert CB.PROMOTE["own_min"] == 60 and CB.PROMOTE["own_min_days"] == 30
+
+    def thin(d, rng):  # strong but rare: about 40 setups over four years
+        if rng.random() < 0.04:
+            return {"signal_date": d, "ticker": f"G{d.dayofyear % 9}", "strategy": "NEW", "score": 90.0, "p": 0.70,
+                    "filled": True, "ret": 0.03 if rng.random() < 0.85 else -0.03, "fill": 100.0, "stop": 94.0,
+                    "exit_date": d + pd.Timedelta(days=3)}
+    new = CB.desk_replay(_desk_world(extra=thin), G_TEST, 5, ACCT)
+    own = new["by_strategy"]["NEW"]
+    assert own["trades"] < 60 and own["days"] == own["trades"]
+    ok, checks = CB.promote_gate(base, new, "NEW")
+    assert not ok and "own" in {c["key"] for c in checks if not c["ok"]}
+    lab = [c["label"] for c in checks if c["key"] == "own"][0]
+    assert "60+ on 30+ signal days" in lab
+    src = pathlib.Path(CB.__file__).read_text()
+    assert "passed every standalone check\")" not in src  # the note names the route that passed

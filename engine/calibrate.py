@@ -427,7 +427,8 @@ def _trade_stats(df: pd.DataFrame) -> dict:
     w = f["ret"] > 0
     gl = -f.loc[~w, "ret"].sum()
     return {"trades": int(len(f)), "win_rate": round(float(w.mean()), 4), "avg_ret": round(float(f["ret"].mean()), 5),
-            "profit_factor": round(float(f.loc[w, "ret"].sum() / gl), 2) if gl > 0 else None}
+            "profit_factor": round(float(f.loc[w, "ret"].sum() / gl), 2) if gl > 0 else None,
+            "days": int(f["signal_date"].nunique()) if "signal_date" in f.columns else None}
 
 
 def _topup_pwins(pw: float) -> list:
@@ -1756,7 +1757,11 @@ def standalone_record(tr: pd.DataFrame, split) -> dict:
 # replaying the desk with it (live model and bars unchanged, so nothing else about the alerts moves) keeps the
 # A+ and top-up win rates, keeps the weekly coverage and grows the simulated account faster. Win rate first:
 # any drop beyond half a point in a win rate blocks it, whatever the growth.
-PROMOTE = {"slack_win": 0.005, "slack_weeks": 0.005, "slack_dd": 0.02, "own_min": 30, "own_slack": 0.01, "max_per_day": 2}
+# own_min / own_min_days (Nov 18, 2026): a candidate's own setups in the desk replay must number 60+ on 30+ signal days.
+# At 30 setups a mid-week check put Bearish Engulfing Day Bought as a Dip live on 39 setups (82% won, raw rule 62%,
+# growth +0.2 points a year): 39 results cannot tell an 82% strategy from a 70% one, and win rate comes first.
+PROMOTE = {"slack_win": 0.005, "slack_weeks": 0.005, "slack_dd": 0.02, "own_min": 60, "own_min_days": 30, "own_slack": 0.01,
+           "max_per_day": 2}
 
 
 def desk_replay(post: pd.DataFrame, G: dict, min_week: int, acct: dict, cal_end=CAL_END) -> dict:
@@ -1843,9 +1848,10 @@ def promote_gate(base: dict, new: dict, name: str) -> tuple[bool, list]:
          "ok": nc is not None and (bc is None or nc > bc)},
         {"key": "drawdown", "label": "Worst drawdown", "base": bd, "new": nd,
          "ok": nd is not None and (bd is None or nd >= bd - q["slack_dd"])},
-        {"key": "own", "label": "Its own setups in the replay", "base": round(ref, 4), "new": own,
-         "ok": own.get("trades", 0) >= q["own_min"] and (own.get("win_rate") or 0) >= ref - q["own_slack"]
-         and (own.get("avg_ret") or 0) > 0},
+        {"key": "own", "label": f"Its own setups in the replay ({q['own_min']}+ on {q['own_min_days']}+ signal days)",
+         "base": round(ref, 4), "new": own,
+         "ok": own.get("trades", 0) >= q["own_min"] and (own.get("days") is None or own["days"] >= q["own_min_days"])
+         and (own.get("win_rate") or 0) >= ref - q["own_slack"] and (own.get("avg_ret") or 0) > 0},
     ]
     return all(c["ok"] for c in checks), checks
 
@@ -2017,7 +2023,8 @@ def run_promote(data_dir, state_dir, out_dir, split="2022-01-01", log=print, now
                 f"2022-now data over {(sa['record'].get('oos') or {}).get('days')} signal days, "
                 f"{_pct((sa['record'].get('train') or {}).get('win_rate'))} in 2008-2021") if sa is not None and sa.get("ok") else
                f"trading only in {' and '.join(S.CONDITION_PLURAL[c] for c in spec['market_conditions'])}"
-               if spec.get("market_conditions") else "passed every standalone check")
+               if spec.get("market_conditions") else
+               "it passed its research checks, then the desk replay judged it on the setups the desk would send")
         changes.append(
             f"Promoted {lab} mid-week ({how}). Replaying the desk on 2022-now signals with the live model and bars, adding it: "
             f"A+ win rate {_pct(base['aplus']['win_rate'])} -> {_pct(new['aplus']['win_rate'])}, weekly top-ups "
@@ -2026,7 +2033,8 @@ def run_promote(data_dir, state_dir, out_dir, split="2022-01-01", log=print, now
             f"{_pct(base['weeks_at_min'])} -> {_pct(new['weeks_at_min'])}, simulated account growth "
             f"{_pct(base['account']['cagr'])} -> {_pct(new['account']['cagr'])} a year (worst drawdown "
             f"{_pct(base['account']['max_dd'])} -> {_pct(new['account']['max_dd'])}). Its own setups in the replay: "
-            f"{own.get('trades', 0)}, {_pct(own.get('win_rate'))} won, average {_pct(own.get('avg_ret'), True)}. "
+            f"{own.get('trades', 0)} on {own.get('days') or 'n/a'} signal days, {_pct(own.get('win_rate'))} won, average "
+            f"{_pct(own.get('avg_ret'), True)}. "
             "It trades from the next scan; Saturday's recalibration re-checks it with everything refit.")
         report["promoted"].append({"id": iid, "label": lab, "graded": bool(spec.get("graded")),
                                    "train": {k: st_tr.get(k) for k in ("trades", "win_rate", "avg_ret", "profit_factor")},
