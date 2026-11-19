@@ -1076,6 +1076,7 @@ function ticket(a, today) {
       ${Array.isArray(a.why) && a.why.length ? `<details><summary>Why it qualifies</summary><ul>${a.why.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></details>` : ""}
     </div>
     ${a.withdrawn ? `<div class="note-strip" style="background:var(--crit-bg);color:var(--crit)"><b>Withdrawn:</b> ${hiCaution(a.withdrawn_reason || "a later scan dropped this setup.")} ${a.status === "placed" ? "Cancel the order in your brokerage, then press Cancelled." : "Don't place it."}</div>` : ""}
+    ${a.hold_note && !a.withdrawn ? `<div class="note-strip"><b>Price now above the limit:</b> ${esc(a.hold_note)}</div>` : ""}
     ${a.topup_note ? `<div class="note-strip">${esc(a.topup_note)}</div>` : ""}
     ${a.condition_note ? `<div class="small muted" style="margin-top:4px">${esc(a.condition_note)}</div>` : ""}
     ${a.grade_note ? `<div class="small muted" style="margin-top:4px">${esc(a.grade_note)}</div>` : ""}

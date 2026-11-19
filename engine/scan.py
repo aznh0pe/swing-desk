@@ -36,7 +36,7 @@ USER_FIELDS = {"status", "actual_price", "actual_shares", "done_at", "user_note"
 # document, because existing documents are never overwritten); user fields are never touched
 SCAN_OWNED = ("rank", "score", "win_pct", "model_win_pct", "grade", "news_check", "news_note", "capacity_note",
               "also_qualified", "topup_note", "shares", "fractional", "total_cost", "risk_usd", "pct_of_capital",
-              "size_note", "exp_return_pct")
+              "size_note", "exp_return_pct", "hold_note", "price_now")
 # the trade plan itself: refreshed on alerts nobody has acted on yet (a later scan on final prices can move
 # the limit, stop or target by a few cents); the dashboard keeps the original plan once an order is placed
 PLAN_FIELDS = ("entry", "stop", "target", "order", "rr", "risk_per_share", "reward_per_share", "last_close", "atr",
@@ -624,6 +624,85 @@ def carry_withdrawn(ups: dict, prev_ov: dict, state: dict, today) -> dict:
     return ups
 
 
+def _entry_id(e: dict) -> str:
+    return f"e_{e['valid_for']}_{e['ticker']}_{e['strategy']}".replace("^", "")
+
+
+def hold_at_limit(w: dict, universe, P: dict, state: dict, entries: list, earnings, session_day, mode: str, now,
+                  errors: list) -> list:
+    """Pre-close scan: a buy-near-the-close setup an earlier scan sent today is not withdrawn only because the price
+    has lifted above its limit. The order is a limit at the alert price, so it can only fill at or under it; the
+    question is whether the setup is still on at that price. Each such alert is re-tested on today's bar with the
+    price at its limit (the day's low moved down with it when needed): if it still clears its grade there, it stays
+    on with a note, and the limit does the rest. Below or at its limit and no longer a setup is a real withdrawal.
+    Nov 18, 2026: FAS was sent A+ at 7:20 AM ($161.42 limit); the 12:26 PM scan withdrew it when it traded higher;
+    it closed at $161.36, still A+, so a working order would have filled on a valid setup."""
+    today = now.date()
+    c = w["close"]
+    if not len(c) or c.index[-1].date() != today:
+        return []
+    live = {_entry_id(e) for e in entries}
+    ov = current_overlay(state)
+    cands = {}
+    for aid, v in state["alerts"].items():
+        a = v["doc"]
+        at_close = a.get("entry_kind") == "close" or str(a.get("order", "")).startswith("Buy near the close")
+        if (a.get("type") != "entry" or not at_close or str(a.get("valid_for")) != str(today) or aid in live
+                or a.get("status") not in ("new", "placed", None)):
+            continue
+        prev = ov.get(aid) or {}
+        if prev.get("withdrawn") and not str(prev.get("withdrawn_reason") or "").startswith("No longer"):
+            continue  # dropped by a news or pre-market check: the price is not the reason
+        tk = a.get("ticker")
+        try:
+            lim = float(a.get("entry"))
+        except (TypeError, ValueError):
+            continue
+        if tk not in c.columns or not (math.isfinite(lim) and lim > 0):
+            continue
+        px = float(c[tk].iloc[-1])
+        if not (math.isfinite(px) and px > lim):
+            continue  # at or under its limit and still not a setup: something other than the price changed
+        cands[aid] = (tk, lim, px, a)
+    if not cands:
+        return []
+    w2 = dict(w)
+    w2["close"], w2["low"] = w["close"].copy(), w["low"].copy()
+    for tk, lim, px, a in cands.values():
+        j = w2["close"].columns.get_loc(tk)
+        w2["close"].iat[-1, j] = lim
+        lo = float(w2["low"].iat[-1, j])
+        w2["low"].iat[-1, j] = min(lo, lim) if math.isfinite(lo) else lim
+    saved = [(g, dict(g)) for g in (CONDITION_STATE, TOPUP_STATE, BELOW_BAR, HELD_SECTORS)]
+    try:
+        ind2 = I.compute(w2, universe)
+        plans2 = S.all_plans(ind2, P)
+        e2, _ = build_entries(ind2, P, plans2, state, earnings, universe, session_day, mode, True, [])
+    finally:  # the re-test must not change what the real run reports
+        for g, snap in saved:
+            g.clear()
+            g.update(snap)
+    by_id = {_entry_id(e): e for e in e2}
+    when = now.strftime("%-I:%M %p")
+    out = []
+    for aid, (tk, lim, px, a) in cands.items():
+        e = by_id.get(aid)
+        if not e:
+            continue
+        if a.get("grade") == "A+" and e.get("grade") != "A+":
+            continue  # at its limit it would no longer be A+: withdraw it as before
+        if e.get("grade") != "A+" and not e.get("topup_note"):
+            continue
+        e["held_at_limit"], e["price_now"] = True, round(px, 2)
+        e["hold_note"] = (f"At {when} PT {tk} was ${px:.2f}, above your ${lim:.2f} limit, so it is not a setup at this "
+                          f"moment. Re-tested at ${lim:.2f} it is still {'A+' if e.get('grade') == 'A+' else 'a weekly top-up'}: "
+                          f"if it comes back to ${lim:.2f} or under by the close, it is the same setup. Keep the plan: a limit "
+                          f"at ${lim:.2f} in the last 10 minutes, never higher. If the price stays above it, the order doesn't "
+                          "fill, and that is the right result.")
+        out.append(e)
+    return out
+
+
 def build_overlay(scan_doc: dict, entries: list, ctx: dict) -> dict:
     ups = {}
     live = {e["id"] for e in entries}
@@ -669,7 +748,7 @@ def headline(scan_doc: dict) -> str:
     if n_top:
         bits.append(f"{n_top} grade-A weekly top-up{'s' if n_top != 1 else ''}")
     if c.get("sent_earlier"):
-        bits.append(f"{c['sent_earlier']} sent earlier tonight")
+        bits.append(f"{c['sent_earlier']} sent earlier" + (" tonight" if scan_doc.get("mode") != "preclose" else " today"))
     if c.get("exit_alerts"):
         bits.append(f"{c['exit_alerts']} exit alert{'s' if c['exit_alerts'] != 1 else ''}")
     if c.get("stop_raises"):
@@ -805,6 +884,11 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
     if mode == "postclose" or (mode == "preclose" and partial):
         entries, near = build_entries(ind, P, plans, state, earnings, universe, session_day, mode,
                                       partial, errors)
+    if mode == "preclose" and partial:
+        try:
+            entries += hold_at_limit(w, universe, P, state, entries, earnings, session_day, mode, now, errors)
+        except Exception as e:  # a re-test must never cost a scan
+            errors.append(f"hold-at-limit check failed: {e!r}"[:200])
     # news-check placeholders are filled by the session after web checks
     f = funds(state)
     gov = risk_governor(state, f["capital"], state["settings"])
@@ -949,6 +1033,11 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
         "session_day": str(session_day), "engine": engine_version.info(),
     }
     scan_doc["below_bar"] = dict(BELOW_BAR)  # kept with the scan so a later news check explains withdrawals the same way
+    if mode == "preclose" and partial:
+        try:
+            scan_doc["close_snapshot"] = close_snapshot(w, universe, meta.get("intraday_asof"))
+        except Exception as e:  # a record must never cost a scan
+            errors.append(f"close snapshot failed: {e!r}"[:200])
     if mode == "postclose" and not partial:
         n_err = len(errors)
         cdr = close_drift(ind, P, plans, state, errors)
@@ -1021,6 +1110,34 @@ def ask_unmarked(last_day, last_session) -> bool:
     return str(last_day) >= str(cal.prev_trading_day(last_session, UNMARKED_ASK_SESSIONS - 1))
 
 
+def close_snapshot(w: dict, universe, asof) -> dict:
+    """Pre-close scan: every ETF's day so far (high, low, last) at the prices this scan used. The data feed keeps
+    no earlier snapshots, so without this the 35 minutes between this scan and the close can never be rebuilt;
+    with it, the post-close scan says how far each buy-near-the-close setup was from qualifying when the owner
+    was told, and research can replay a later look or a price-triggered order on real days (Nov 18, 2026: four
+    ETFs met the close-at-low rule on the final bar, A+; the pre-close scan had seen none of them qualify)."""
+    c = w["close"]
+    rows = {}
+    for tk in c.columns:
+        if universe is not None and tk in universe.index and str(universe.loc[tk, "type"]) == "stock":
+            continue
+        h, l, x = (float(w[f][tk].iloc[-1]) for f in ("high", "low", "close"))
+        if all(map(math.isfinite, (h, l, x))):
+            rows[tk] = [round(h, 4), round(l, 4), round(x, 4)]
+    return {"day": str(c.index[-1].date()), "asof": asof, "fields": ["high", "low", "last"], "rows": rows}
+
+
+def _pre_close_view(state: dict, day: str) -> dict:
+    """The latest pre-close snapshot of `day` among the scans the run loaded, as {ticker: [high, low, last]}."""
+    best = None
+    for v in (state.get("scans") or {}).values():
+        d = v.get("doc") or {}
+        snap = d.get("close_snapshot") or {}
+        if d.get("mode") == "preclose" and snap.get("day") == day and (best is None or str(d.get("started_at")) > str(best[0])):
+            best = (d.get("started_at"), d.get("id"), snap)
+    return {} if best is None else {"scan_id": best[1], "asof": best[2].get("asof"), "rows": best[2].get("rows") or {}}
+
+
 def close_drift(ind, P, plans, state, errors) -> dict | None:
     """Post-close, on the final bar: what happened to buy-near-the-close setups between the pre-close scan's prices
     (about 12:20 PM PT) and the close. Which of the setups that were sent still qualify, and which setups qualify
@@ -1079,10 +1196,15 @@ def close_drift(ind, P, plans, state, errors) -> dict | None:
                                                 if math.isfinite(cl) and d.get("entry") else None)})
         sent_keys = {(s["strategy"], s["ticker"]) for s in sent}
         late = [{"ticker": tk, "strategy": n, **v} for (n, tk), v in final.items() if (n, tk) not in sent_keys]
+        pv = _pre_close_view(state, asof)  # where each one was when the pre-close scan looked
+        for x in sent + late:
+            r = pv.get("rows", {}).get(x["ticker"])
+            if r and r[0] > r[1]:
+                x["pre_close_last"], x["pre_close_ibs"] = round(r[2], 2), round((r[2] - r[1]) / (r[0] - r[1]), 3)
         late.sort(key=lambda x: (x["grade"] != "A+", x["ticker"]))
         if not sent and not late:
             return None
-        return {"day": asof, "sent": sent, "late": late[:40],
+        return {"day": asof, "sent": sent, "late": late[:40], "pre_close_scan": pv.get("scan_id"), "pre_close_asof": pv.get("asof"),
                 "counts": {"sent": len(sent), "sent_aplus": sum(1 for s in sent if s["grade"] == "A+"),
                            "still_qualify": sum(1 for s in sent if s["still_qualifies"]),
                            "final_bar": len(final), "final_bar_aplus": sum(1 for v in final.values() if v["grade"] == "A+"),
@@ -1501,7 +1623,9 @@ def setup_block(e: dict, rank) -> list[str]:
     out = ["", f"{head}{e['ticker']} | {e['name']} | {e['strategy_label']} | {grade} | score {e['score']} | win est. {e['win_pct']}%"
                 f" | exp. {e.get('exp_return_pct', '')}% per trade"]
     if e.get("sent_earlier"):
-        out.append("   ALREADY SENT  in an earlier email tonight: the same order, so place it only once.")
+        out.append("   ALREADY SENT  in an earlier email: the same order, so place it only once.")
+    if e.get("hold_note"):
+        out.append(f"   NOW      {e['hold_note']}")
     frac = " (FRACTIONAL: market hours only)" if e.get("fractional") else ""
     out.append(f"   ORDER    {e['order']}")
     out.append(f"   BRACKET  Stop ${e['stop']} ({_pct(e['stop'], e['entry'])}) | Target ${e['target']} ({_pct(e['target'], e['entry'])}) | "
