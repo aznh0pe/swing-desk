@@ -136,7 +136,13 @@ def _write(out: pathlib.Path, writes: list, coll: str, did: str, doc: dict):
 
 def _finish(out: pathlib.Path, writes: list, result: dict):
     out.mkdir(parents=True, exist_ok=True)
-    (out / "writes.json").write_text(json.dumps([writes[i:i + 45] for i in range(0, len(writes), 45)], indent=1))
+    chunks = [writes[i:i + 45] for i in range(0, len(writes), 45)]
+    (out / "writes.json").write_text(json.dumps(chunks, indent=1))
+    from .writes import problems
+    bad = problems(chunks)
+    if bad:  # never hand a session a write it cannot send
+        result = {**result, "writes_problems": bad}
+    result = {**result, "writes": "send with: python3 -m engine.writes show " + str((out / "writes.json").resolve())}
     (out / "result.json").write_text(json.dumps(result, indent=1, default=str))
     print(json.dumps(result, indent=1, default=str))
 

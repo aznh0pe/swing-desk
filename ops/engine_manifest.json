@@ -1,5 +1,5 @@
 {
- "fingerprint": "387e4c85f5eb",
+ "fingerprint": "25438110dec0",
  "files": [
   "engine/__init__.py",
   "engine/backtest.py",
@@ -18,6 +18,7 @@
   "engine/scan.py",
   "engine/strategies.py",
   "engine/version.py",
+  "engine/writes.py",
   "engine/research_own.json",
   "engine/research_seed.json",
   "engine/research_seed2.json",
@@ -43,6 +44,7 @@
   "engine/scan.py.txt",
   "engine/strategies.py.txt",
   "engine/version.py.txt",
+  "engine/writes.py.txt",
   "engine/research_own.json",
   "engine/research_seed.json",
   "engine/research_seed2.json",
