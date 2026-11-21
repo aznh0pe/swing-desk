@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import gc
 import datetime as dt
 import json
 import math
@@ -1139,6 +1140,7 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
                                                   "Off: the live setup is kept this week (the recalibrated setup did not beat it). ")
                                                  + "This week's test: " + str(rec_.get("status_reason") or ""))
                         rec_["enabled"] = live_on
+                live_variant_stats(report, ind, P_old, split, log)
                 report["grading_recalibrated"] = report.get("grading")
                 report["grading"] = P_old.get("grading")
                 P_old["version"], P_old["updated"] = P["version"], P["updated"]
@@ -1516,18 +1518,32 @@ def run_tiers(data_dir, state_dir, out_dir, split="2022-01-01", log=print, now=N
     elif not (pm and pm.get("kind") == "pooled") or not (P.get("grading") or {}).get("aplus_score"):
         raise SystemExit("live params have no pooled model or A+ bar: run the weekly recalibration first")
     else:
+        log(ensure_swap())
         w = D.load_history(data_dir, tier=None)
         ind = I.compute(w, D.load_universe(data_dir))
         log(f"history: {w['close'].shape[0]} days x {w['close'].shape[1]} tickers (both tiers)")
         P_all = copy.deepcopy(P)
         P_all["tiers"] = {"ext": {"status": "on"}}   # the replay needs the tier's signals whatever its status
         P_all["tiers_live"] = {}
-        plans = S.all_plans(ind, P_all)
-        trs = [B.simulate(plans[n], ind, P_all, include_unfilled=True) for n, sp in P_all["strategies"].items()
-               if sp.get("enabled", True) and n in plans]
-        t = mark_entry(_score_live(pd.concat([x for x in trs if not x.empty], ignore_index=True), pm, P_all), P_all)
+        # one strategy's plan at a time (Nov 21, 2026: building every plan first ran an 8 GB machine out of memory)
+        base = S.base_masks(ind, P_all)
+        trs = []
+        for n, sp in P_all["strategies"].items():
+            if not sp.get("enabled", True):
+                continue
+            pl = S.build(n, ind, P_all, base)
+            if pl is None:
+                continue
+            tr_ = B.simulate(pl, ind, P_all, include_unfilled=True)
+            del pl
+            if not tr_.empty:
+                trs.append(tr_)
+            gc.collect()
+        del base
+        t = mark_entry(_score_live(pd.concat(trs, ignore_index=True), pm, P_all), P_all)
         t["tier"] = t["ticker"].map(ind["tier"]).fillna("core").values
-        del plans, trs
+        del trs
+        gc.collect()
         try:  # a check on the scan's fixed lines: it must never cost the tier check
             left_out = left_out_check(ind, P_all, pm, t, split, log=log)
         except Exception as ex:
@@ -1791,6 +1807,72 @@ def desk_replay(post: pd.DataFrame, G: dict, min_week: int, acct: dict, cal_end=
 
 
 ADOPT = {"slack_win": 0.005, "slack_growth": 0.005, "slack_weeks": 0.02, "slack_dd": 0.02}
+
+
+def ensure_swap(gb: int = 8, path: str = "/tmp/sd_swapfile", meminfo: str = "/proc/meminfo") -> str:
+    """The tier check loads every ticker in the feed (about 2,000) and peaks near the memory of an 8 GB run machine;
+    on Sat Nov 21, 2026 it was killed on its first try and the run had to add swap by hand. Adds a swap file when
+    there is little memory and no swap. Never raises: it returns a line for the log."""
+    try:
+        info = {}
+        for ln in open(meminfo):
+            k, v = ln.split(":", 1)
+            info[k] = int(v.split()[0]) // 1024   # MB
+        if info.get("SwapTotal", 0) >= 2048 or info.get("MemAvailable", 0) >= 14_000:
+            return f"memory: {info.get('MemAvailable')} MB free, {info.get('SwapTotal')} MB swap; nothing to add"
+        import subprocess
+        cmds = [["fallocate", "-l", f"{gb}G", path], ["chmod", "600", path], ["mkswap", path], ["swapon", path]]
+        for c in cmds:
+            r = subprocess.run(c, capture_output=True, text=True)
+            if r.returncode != 0:
+                return f"memory: could not add swap ({' '.join(c)}: {(r.stderr or r.stdout).strip()[:120]}); going on without it"
+        return f"memory: added {gb} GB of swap at {path} ({info.get('MemAvailable')} MB was free)"
+    except Exception as ex:
+        return f"memory: swap check skipped ({ex!r})"[:200]
+
+
+def live_variant_stats(report: dict, ind: dict, P_live: dict, split, log=print) -> list:
+    """When the live setup is kept, a strategy's report entry must describe the variant that keeps trading, not the
+    refit's. Nov 21, 2026: ETF Close-at-Low Snapback's refit picked a limit-order variant that failed the 8-point
+    check (76.6% -> 66.9%) and the weekly sanity check nearly switched off the live buy-at-the-close variant
+    (76.2% / 73.0%, profit factor 1.48). Each live strategy whose parameters differ from the refit's is re-tested
+    as it is live; the refit's figures move to rec["refit"]. Returns the names re-tested."""
+    done = []
+    live_s = P_live.get("strategies") or {}
+    names = [n for n, rec in (report.get("strategies") or {}).items()
+             if rec.get("enabled") and not rec.get("custom") and n in live_s
+             and _variant_differs(rec.get("variant"), live_s[n])]
+    if not names:
+        return done
+    try:
+        plans = S.all_plans(ind, P_live)
+    except Exception as ex:
+        log(f"live variant re-test unavailable: {ex!r}")
+        return done
+    sp_ = pd.Timestamp(split)
+    for n in names:
+        if n not in plans:
+            continue
+        try:
+            tr = B.simulate(plans[n], ind, P_live, include_unfilled=True)
+            rec = report["strategies"][n]
+            rec["refit"] = {k: rec.get(k) for k in ("variant", "train", "test_oos", "all", "checks")}
+            st_tr, st_te = B.stats(tr[tr["signal_date"] < sp_]), B.stats(tr[tr["signal_date"] >= sp_])
+            enabled, checks, _ = S.enable_checks(st_tr, st_te)
+            rec.update(train=st_tr, test_oos=st_te, all=B.stats(tr), checks=checks, stats_of="live variant",
+                       variant={k: v for k, v in live_s[n].items() if k not in ("enabled", "paused_reason")},
+                       live_variant_passes=bool(enabled))
+            done.append(n)
+            log(f"  {n}: live variant re-tested ({st_tr.get('win_rate')} / {st_te.get('win_rate')})")
+        except Exception as ex:
+            log(f"  {n}: live variant re-test failed: {ex!r}")
+    return done
+
+
+def _variant_differs(variant, live: dict) -> bool:
+    if not isinstance(variant, dict):
+        return False
+    return any(live.get(k) != v for k, v in variant.items() if k not in ("enabled", "paused_reason"))
 
 
 def live_replay(ind: dict, P_live: dict, split, min_week: int, acct: dict) -> dict:
