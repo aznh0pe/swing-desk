@@ -55,6 +55,8 @@ def _r(x, nd=2):
 # Setups to send each week at the least. Not a ceiling: every A+ setup is always sent; when a week runs behind
 # this pace, the best grade-A setups top it up. Set "min_setups_week" in the dashboard settings to change it.
 WEEK_MIN = 5
+EXTRA_FULL = 20       # also-qualified setups shown in full in the email; the rest get one line each
+DOC_LIMIT = 240_000   # bytes; the dashboard refuses documents over 256 KB
 
 
 def week_min(settings: dict | None) -> int:
@@ -1055,6 +1057,8 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
     scan_doc["alert_updates"] = carry_withdrawn(build_overlay(scan_doc, entries, ctx), prev_ov, state, today)
     digest = make_digest(scan_doc, entries, positions, near, pm_checks, week_aplus, P, now)
     scan_doc["digest"] = digest
+    scan_doc = fit_scan_doc(scan_doc, lambda n: make_digest(scan_doc, entries, positions, near, pm_checks, week_aplus, P, now, n))
+    (out / "news_order.txt").write_text(" ".join(news_order(entries)) + "\n")
     _write(out, writes, "set", "scans", scan_id, scan_doc)
     token = run_token if (run_token and TOKEN_RE.match(run_token)) else None
     if token:  # the dashboard's progress bar finishes when this lands, together with the results
@@ -1420,7 +1424,7 @@ SIGNAL_ORDER = {"GAP_BELOW_STOP": 0, "EARNINGS": 1, "EXIT_RULE": 2, "TIME_STOP":
                 "STOP_HIT": 6, "TARGET_HIT": 7, "RAISE_STOP": 8, "NO_DATA": 9, "TIME_STOP_NEXT": 10, "MARKET_STRESS": 11}
 
 
-def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -> str:
+def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now, full_extra: int | None = None) -> str:
     """The email. Sections in the order you act on them: exits and fills first, then stop moves, then this
     morning's order checks, withdrawn setups, every open position with its full status, and finally each new
     setup with everything needed to place and manage it."""
@@ -1562,8 +1566,14 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
             lines += setup_block(e, i)
         if extra:
             lines += ["", "=== ALSO QUALIFIED (A+, outside the top 8 or sector-capped): swap in if you prefer one ==="]
-            for e in extra:
+            n_full = EXTRA_FULL if full_extra is None else max(0, int(full_extra))
+            for e in extra[:n_full]:
                 lines += setup_block(e, None)
+            rest = extra[n_full:]
+            if rest:
+                lines += ["", f"{'The next' if n_full else 'All'} {len(rest)} on one line each (order, bracket and size; "
+                              "every setup's card on the dashboard has its full details):"]
+                lines += [compact_line(e) for e in rest]
     elif scan["mode"] == "postclose":
         G = P.get("grading") or {}
         a_sc, a_pw = G.get("aplus_score", 80), round(100 * float(G.get("aplus_pwin", 0.72)))
@@ -1614,6 +1624,54 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now) -
     lines += ["", "Model-generated signals from backtested rules, not financial advice. Win % is an "
               "estimate from historical setups and can be wrong."]
     return mark_caution("\n".join(lines))
+
+
+def compact_line(e: dict) -> str:
+    """One line with everything needed to place the order (a long also-qualified list)."""
+    grade = "top-up" if e.get("topup_note") else e.get("grade", "A+")
+    frac = " fractional" if e.get("fractional") else ""
+    news = f" | news {e['news_check']}" if e.get("news_check") and e["news_check"] != "pending" else ""
+    return (f"- {e['ticker']} | {e.get('strategy_label', e.get('strategy'))} | {grade} {e.get('score')} | win {e.get('win_pct')}% | "
+            f"buy limit ${e.get('entry')}, stop ${e.get('stop')}, target ${e.get('target')} | "
+            f"{e.get('shares')}{frac} sh, risk ${e.get('risk_usd')} | hold up to {e.get('hold_max_days')} days{news}")
+
+
+def news_order(entries: list[dict], n: int = 10) -> list[str]:
+    """The setups to news-check, in order: the featured list by rank, then the also-qualified ones by score.
+    (Nov 20: 414 A+ setups tied near score 99.8 and a check by score alone missed six of the eight featured.)"""
+    feat = sorted([e for e in entries if not e.get("also_qualified")], key=lambda e: (e.get("rank") or 999, -float(e.get("score") or 0)))
+    extra = sorted([e for e in entries if e.get("also_qualified")], key=lambda e: -float(e.get("score") or 0))
+    out = []
+    for e in feat + extra:
+        if e["ticker"] not in out:
+            out.append(e["ticker"])
+    return out[:max(n, len(feat))]
+
+
+def doc_bytes(doc: dict) -> int:
+    return len(json.dumps(doc, default=str).encode())
+
+
+def fit_scan_doc(scan_doc: dict, build) -> dict:
+    """Keep the scan document under the dashboard's per-document limit (256 KB). build(n) makes the digest with
+    the first n also-qualified setups in full. Nov 20: 414 A+ setups made an 891 KB document and the save was
+    refused. The email keeps its own digest; only the dashboard copy is condensed."""
+    if doc_bytes(scan_doc) <= DOC_LIMIT:
+        return scan_doc
+    for n in (5, 0):
+        scan_doc["digest"] = build(n)
+        scan_doc["digest_condensed"] = True
+        if doc_bytes(scan_doc) <= DOC_LIMIT:
+            return scan_doc
+    d = scan_doc["digest"]
+    cut = d.find("\n=== ALSO QUALIFIED")
+    if cut > 0:
+        scan_doc["digest"] = (d[:cut] + "\n=== ALSO QUALIFIED ===\nToo many to list on the dashboard tonight: each one has its own "
+                              "card with the full order, and the email lists them all.")
+    if doc_bytes(scan_doc) > DOC_LIMIT and scan_doc.get("close_snapshot"):
+        scan_doc.pop("close_snapshot", None)
+        scan_doc.setdefault("notes", []).append("close_snapshot left out: the scan document was over the dashboard's size limit.")
+    return scan_doc
 
 
 def setup_block(e: dict, rank) -> list[str]:

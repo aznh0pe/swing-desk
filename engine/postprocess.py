@@ -21,7 +21,7 @@ import json
 import pathlib
 import re
 
-from .scan import _utc_now, build_overlay, email_headline, load_params, make_digest, mark_caution, run_done_doc
+from .scan import _utc_now, build_overlay, email_headline, fit_scan_doc, load_params, make_digest, mark_caution, news_order, run_done_doc
 from .portfolio import load_state
 from . import calendar as cal
 
@@ -289,6 +289,16 @@ def apply(out_dir: str, news: list[str], state_dir: str | None = None, issues: l
         digest += "\n\nDropped after news check: " + "; ".join(f"{d['ticker']} ({d['reason']})" for d in scan["news_dropped"])
     digest = mark_caution(digest)
     scan["digest"] = digest
+    scan.pop("digest_condensed", None)
+
+    def _small(n):
+        d = make_digest(scan, kept, scan.get("positions", []), scan.get("near_misses", []),
+                        scan.get("premarket_checks", []), scan["counts"].get("week_aplus", len(kept)), P2, now, n)
+        if scan["news_dropped"]:
+            d += "\n\nDropped after news check: " + "; ".join(f"{x['ticker']} ({x['reason']})" for x in scan["news_dropped"])
+        return mark_caution(d)
+    scan = fit_scan_doc(scan, _small)
+    (out / "news_order.txt").write_text(" ".join(news_order(kept)) + "\n")
     (out / "docs" / "scans" / f"{scan['id']}.json").write_text(json.dumps(scan, default=str))
     if scan.get("run_token"):
         rp = out / "docs" / "runs" / f"{scan['run_token']}-s6.json"
@@ -299,8 +309,13 @@ def apply(out_dir: str, news: list[str], state_dir: str | None = None, issues: l
     (out / "scan.json").write_text(json.dumps({"scan": scan, "entries": kept, "ctx": ctx}, indent=1, default=str))
     chunks = [flat[i:i + 45] for i in range(0, len(flat), 45)]
     (out / "writes.json").write_text(json.dumps(chunks, indent=1))
-    return {"kept": len(kept), "dropped": dropped, "writes": len(flat), "headline": email_headline(scan),
+    missing = [e["ticker"] for e in kept if not e.get("also_qualified") and e.get("news_check", "pending") == "pending"]
+    res = {"kept": len(kept), "dropped": dropped, "writes": len(flat), "headline": email_headline(scan),
             "withdrawn": sum(1 for v in (scan.get("alert_updates") or {}).values() if v.get("withdrawn"))}
+    if missing and verdicts:
+        res["NEWS_CHECK_MISSING"] = (f"These featured setups have no news verdict yet: {' '.join(missing)}. Run one WebSearch "
+                                     "for each, then run this command again with all verdicts (earlier ones included).")
+    return res
 
 
 def main():

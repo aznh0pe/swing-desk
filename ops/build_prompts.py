@@ -51,10 +51,13 @@ VERDICTS = (
     "these strategies buy, and in the backtest they won as often as other setups or more.")
 
 NEWS_ENTRIES = (
-    'News check: for each entry in $W/out/scan.json, highest score first (at most 10; include the "also qualified" ones, which move '
-    'up if a ranked setup is dropped), run one WebSearch "<TICKER> stock news" and judge the last few days. ' + VERDICTS + " Apply every verdict in one command (it re-ranks the list and refreshes the "
+    'News check: check the tickers in $W/out/news_order.txt, in that order (the featured setups by rank, then the next '
+    '"also qualified" ones, which move up if a ranked setup is dropped; never pick by score: on Nov 20 hundreds of setups tied '
+    'near the top score and a check by score missed six of the eight featured). Run one WebSearch "<TICKER> stock news" each '
+    'and judge the last few days. ' + VERDICTS + " Apply every verdict in one command (it re-ranks the list and refreshes the "
     'dashboard cards): `cd $C && python3 -m engine.postprocess --out $W/out --state $W/state --news "TICKER=clean" '
-    '"TICKER=caution:one-line reason" "TICKER=avoid:one-line reason"`. If there are no entries, skip this step.')
+    '"TICKER=caution:one-line reason" "TICKER=avoid:one-line reason"`. If its result has NEWS_CHECK_MISSING, check those tickers '
+    'too and run the command again with every verdict (earlier ones included). If there are no entries, skip this step.')
 
 NEWS_PREMARKET = (
     "News check on today's orders and open positions: take the tickers in scan.premarket_checks and in scan.positions in "
@@ -67,13 +70,14 @@ NEWS_PREMARKET = (
     "open position. If there is nothing to check, skip this step.")
 
 NEWS_AUTO = (
-    "News check: if $W/out/scan.json has entries, check them, highest score first (at most 10, including the \"also qualified\" "
-    "ones); if it is a pre-market "
+    "News check: if $W/out/scan.json has entries, check the tickers in $W/out/news_order.txt, in that order (featured by rank, "
+    "then the next \"also qualified\" ones; never pick by score); if it is a pre-market "
     "scan, check the tickers in scan.premarket_checks and scan.positions instead (at most 8). Run one WebSearch "
     '"<TICKER> stock news" each and judge the last few days. ' + VERDICTS + " Apply every verdict in one command (it re-ranks, "
     "withdraws what you rule out and refreshes the dashboard cards): "
     '`cd $C && python3 -m engine.postprocess --out $W/out --state $W/state --news "TICKER=clean" "TICKER=caution:one-line reason" '
-    '"TICKER=avoid:one-line reason"`. If there is nothing to check, skip this step.')
+    '"TICKER=avoid:one-line reason"`. If its result has NEWS_CHECK_MISSING, check those tickers too and run the command again '
+    'with every verdict (earlier ones included). If there is nothing to check, skip this step.')
 
 PROGRESS = '''
 Progress for the dashboard's Scan now bar: the extra message after these instructions may contain a line "Run token: rt_...". If it does, call that value T and record progress by creating small documents in collection "runs" with ArtifactData action "set" (new documents, so no if_version), each with data {"token": T, "seq": n, "state": "running", "step": "<label>", "pct": <p>, "at": "<current UTC time, e.g. 2026-11-05T23:14:05Z, from `date -u +%Y-%m-%dT%H:%M:%SZ` chained onto that step's shell command>", "by": "scan"}:
