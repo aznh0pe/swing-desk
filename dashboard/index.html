@@ -154,6 +154,8 @@ td .t { font-family: var(--f-display); font-stretch: 85%; font-weight: 700; font
 .t-notes b { color: var(--ink); font-weight: 600; }
 .t-notes ul { margin: 0; padding-left: 18px; }
 .t-actions { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 14px 12px; border-top: 1px solid var(--line); align-items: center; }
+.t-aside { padding: 10px 14px 12px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; font-size: 12.5px; line-height: 1.5; color: var(--ink-3); }
+.t-aside p { margin: 0; }
 .note-strip { padding: 7px 14px; font-size: 12.5px; border-top: 1px solid var(--line); background: var(--warn-bg); color: var(--warn); }
 
 /* action alerts */
@@ -1070,6 +1072,11 @@ function resolveCard({ a, fc, kind }) {
     ${un ? `<button class="btn ghost small" type="button" data-act="skip" data-id="${esc(a.id)}">I didn't place it</button>` : ""}
     ${kind === "unmarked_close" ? `<button class="btn ghost small" type="button" data-act="missed" data-id="${esc(a.id)}">Didn't see it in time</button>` : ""}</div></div></div>`;
 }
+// background notes (market condition record, grade, which list): one padded block, never flush against the card edge
+function ticketAside(a) {
+  const notes = [a.condition_note, a.grade_note, a.list_note].filter((x) => x);
+  return notes.length ? `<div class="t-aside">${notes.map((x) => `<p>${esc(x)}</p>`).join("")}</div>` : "";
+}
 function ticket(a, today) {
   const e = num(a.entry), s = num(a.stop), t = num(a.target);
   const riskPct = e ? (100 * (s - e)) / e : null, rewPct = e ? (100 * (t - e)) / e : null;
@@ -1097,9 +1104,7 @@ function ticket(a, today) {
     ${a.withdrawn ? `<div class="note-strip" style="background:var(--crit-bg);color:var(--crit)"><b>Withdrawn:</b> ${hiCaution(a.withdrawn_reason || "a later scan dropped this setup.")} ${a.status === "placed" ? "Cancel the order in your brokerage, then press Cancelled." : "Don't place it."}</div>` : ""}
     ${a.hold_note && !a.withdrawn ? `<div class="note-strip"><b>Price now above the limit:</b> ${esc(a.hold_note)}</div>` : ""}
     ${a.topup_note ? `<div class="note-strip">${esc(a.topup_note)}</div>` : ""}
-    ${a.condition_note ? `<div class="small muted" style="margin-top:4px">${esc(a.condition_note)}</div>` : ""}
-    ${a.grade_note ? `<div class="small muted" style="margin-top:4px">${esc(a.grade_note)}</div>` : ""}
-    ${a.list_note ? `<div class="small muted" style="margin-top:4px">${esc(a.list_note)}</div>` : ""}
+    ${ticketAside(a)}
     ${a.size_note ? `<div class="note-strip">${esc(a.size_note)}</div>` : ""}
     ${a.capacity_note ? `<div class="note-strip">${esc(a.capacity_note)}</div>` : ""}
     ${a.status === "placed" ? `<div class="note-strip">Order placed ${a.placed_at ? dtShort(a.placed_at) : ""}. It works until the ${dShort(lastValidDay(a))} close; if it hasn't filled by then it expires, and the dashboard records it as Didn't fill on its own.</div>` : ""}
