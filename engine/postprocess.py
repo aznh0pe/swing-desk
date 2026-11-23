@@ -21,23 +21,52 @@ import json
 import pathlib
 import re
 
-from .scan import _utc_now, build_overlay, email_headline, fit_scan_doc, load_params, make_digest, mark_caution, news_order, run_done_doc
+from .scan import _utc_now, build_overlay, email_headline, fit_scan_doc, load_params, make_digest, mark_caution, run_done_doc, write_news_files
 from .portfolio import load_state
 from . import calendar as cal
 
 
-def _verdicts(news: list[str]) -> dict:
-    out = {}
+VERDICT_RE = re.compile(r"^\s*(clean|caution|avoid|unverified)\s*(?:@\s*(\d{4}-\d{2}-\d{2}))?\s*$", re.IGNORECASE)
+
+
+def _verdicts(news: list[str], today: dt.date | None = None) -> tuple[dict, dict]:
+    """{TICKER: (kind, note)} and {TICKER: date of the newest dated headline read}.
+
+    A verdict is written TICKER=kind@YYYY-MM-DD:note. Nov 23, 2026: the pre-market check marked eight positions clean
+    after searches that returned only quote pages, so "clean" meant "nothing seen", not "read and nothing material".
+    Clean now needs the date of the newest dated headline actually read; without it (or with a date in the future,
+    or a word the scanner doesn't know) the verdict is recorded as unverified: shown as not verified, never as clean."""
+    today = today or cal.now_pt().date()
+    out, through = {}, {}
     for item in news:
         if "=" not in item:
             continue
         tk, rest = item.split("=", 1)
-        kind, _, note = rest.partition(":")
-        out[tk.strip().upper()] = (kind.strip().lower(), note.strip() or None)
-    return out
+        tk = tk.strip().upper()
+        head, _, note = rest.partition(":")
+        note = note.strip() or None
+        m = VERDICT_RE.match(head)
+        if not m:
+            out[tk] = ("unverified", f"unrecognized verdict '{head.strip()[:30]}'" + (f": {note}" if note else ""))
+            continue
+        kind, when = m.group(1).lower(), m.group(2)
+        d = None
+        if when:
+            try:
+                d = dt.date.fromisoformat(when)
+            except ValueError:
+                d = None
+        if d and d > today + dt.timedelta(days=1):
+            d = None
+        if kind == "clean" and d is None:
+            kind, note = "unverified", (note + "; " if note else "") + "no dated headline was cited, so it is not a clean verdict"
+        if d:
+            through[tk] = d.isoformat()
+        out[tk] = (kind, note)
+    return out, through
 
 
-SEVERITY = {"clean": 0, "caution": 1, "avoid": 2}
+SEVERITY = {"clean": 0, "unverified": 0, "caution": 1, "avoid": 2}
 # Version of the verdict rules in the scan prompts. Verdicts given under older rules are not carried
 # forward (v1 marked sector selloffs as caution; v2 judges company-specific news only).
 NEWS_RULES = 2
@@ -142,7 +171,11 @@ def apply(out_dir: str, news: list[str], state_dir: str | None = None, issues: l
     cutoff = (P or {}).get("grading", {}).get("aplus_score", 80) if P else scan.get("aplus_cutoff", 80)
     # a weekly top-up is judged against its own bar (it sits below the A+ bar by design)
     tu_floor = float(((P or {}).get("grading") or {}).get("topup_floor") or (scan.get("topup_pace") or {}).get("floor") or 0)
-    verdicts = _verdicts(news)
+    try:
+        _today = dt.date.fromisoformat(str(scan.get("started_at"))[:10])
+    except Exception:
+        _today = None
+    verdicts, through = _verdicts(news, _today)
     # a later check of the same session never softens an earlier caution or avoid (win rate first)
     kept_prior = []
     for tk, (kind, note) in prior_verdicts(state, scan.get("session_day")).items():
@@ -170,13 +203,23 @@ def apply(out_dir: str, news: list[str], state_dir: str | None = None, issues: l
                                 (f"score fell below the weekly top-up bar after news caution: {note}" if is_tu
                                  else f"score fell below A+ after news caution: {note}")})
                 continue
+        elif kind == "unverified":
+            e["news_check"] = "unverified"
+            e["news_note"] = f"no dated headline found ({note}): read the headlines yourself before placing it" if note else \
+                "no dated headline found: read the headlines yourself before placing it"
         else:
-            e["news_check"], e["news_note"] = "clean", note
+            e["news_check"] = "clean"
+            e["news_note"] = f"headlines read through {through[e['ticker'].upper()]}" + (f": {note}" if note else "") \
+                if e["ticker"].upper() in through else note
         kept.append(e)
     # pre-market: news on today's orders and open positions
     for c in scan.get("premarket_checks") or []:
-        v = verdicts.get(str(c.get("ticker", "")).upper())
-        if not v or v[0] == "clean":
+        tk_ = str(c.get("ticker", "")).upper()
+        v = verdicts.get(tk_)
+        if not v:
+            continue
+        c["news"] = {"status": v[0], "through": through.get(tk_), "note": v[1]}
+        if v[0] in ("clean", "unverified"):
             continue
         kind, note = v
         if kind == "avoid":
@@ -198,6 +241,21 @@ def apply(out_dir: str, news: list[str], state_dir: str | None = None, issues: l
             pos_news.append(carried[tk])  # not checked in this run: what an earlier check found stays
     if pos_news or carried:
         scan["position_news"] = pos_news
+    # every open position's news status for this run (the email prints it under each position, the dashboard on
+    # its card): read through a date, not verified, an ETF, or not checked by this run
+    names = scan.get("news_names") or {}
+    if scan.get("mode") == "premarket" or any(str(p.get("ticker", "")).upper() in verdicts for p in scan.get("positions") or []):
+        pst = {}
+        for pos in scan.get("positions") or []:
+            tk = str(pos.get("ticker", "")).upper()
+            v = verdicts.get(tk)
+            if (names.get(tk) or [None, "stock"])[1] == "etf":
+                pst[tk] = {"status": "etf"}
+            elif v:
+                pst[tk] = {"status": v[0], "through": through.get(tk), "note": v[1]}
+            else:
+                pst[tk] = {"status": "not_checked"}
+        scan["position_news_status"] = pst
     # re-rank on the news-adjusted scores. Every kept setup competes for the top 8 again, so a setup that was
     # only "also qualified" (sector cap or outside the top 8) moves up when the news check drops one ahead of it.
     if all("sector_key" in e for e in kept):
@@ -303,7 +361,9 @@ def apply(out_dir: str, news: list[str], state_dir: str | None = None, issues: l
             d += "\n\nDropped after news check: " + "; ".join(f"{x['ticker']} ({x['reason']})" for x in scan["news_dropped"])
         return mark_caution(d)
     scan = fit_scan_doc(scan, _small)
-    (out / "news_order.txt").write_text(" ".join(news_order(kept)) + "\n")
+    plan = write_news_files(out, scan, kept)
+    plan_tk = [i["ticker"] for i in plan["items"]]
+    scan["news_unverified"] = [t for t in plan_tk if t not in verdicts or verdicts[t][0] == "unverified"] if verdicts or plan_tk else []
     (out / "docs" / "scans" / f"{scan['id']}.json").write_text(json.dumps(scan, default=str))
     if scan.get("run_token"):
         rp = out / "docs" / "runs" / f"{scan['run_token']}-s6.json"
@@ -314,12 +374,18 @@ def apply(out_dir: str, news: list[str], state_dir: str | None = None, issues: l
     (out / "scan.json").write_text(json.dumps({"scan": scan, "entries": kept, "ctx": ctx}, indent=1, default=str))
     chunks = [flat[i:i + 45] for i in range(0, len(flat), 45)]
     (out / "writes.json").write_text(json.dumps(chunks, indent=1))
-    missing = [e["ticker"] for e in kept if not e.get("also_qualified") and e.get("news_check", "pending") == "pending"]
+    missing = [t for t in plan_tk if t not in verdicts]
     res = {"kept": len(kept), "dropped": dropped, "writes": len(flat), "headline": email_headline(scan),
             "withdrawn": sum(1 for v in (scan.get("alert_updates") or {}).values() if v.get("withdrawn"))}
-    if missing and verdicts:
-        res["NEWS_CHECK_MISSING"] = (f"These featured setups have no news verdict yet: {' '.join(missing)}. Run one WebSearch "
-                                     "for each, then run this command again with all verdicts (earlier ones included).")
+    if missing:
+        res["NEWS_CHECK_MISSING"] = (f"These tickers in news_plan.json have no news verdict yet: {' '.join(missing)}. Check "
+                                     "each one with its two queries from news_plan.json, then run this command again with all "
+                                     "verdicts (earlier ones included). A ticker with no dated headline gets TICKER=unverified:<why>.")
+    unv = [t for t in plan_tk if t in verdicts and verdicts[t][0] == "unverified"]
+    if unv:
+        res["NEWS_UNVERIFIED"] = (f"No dated headline backs the verdict on: {' '.join(unv)}. They show as not verified in the "
+                                  "email and on the dashboard. Try the second query from news_plan.json (company name, ticker and "
+                                  "date) and open a result article before settling for unverified.")
     return res
 
 

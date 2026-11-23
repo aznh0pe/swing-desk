@@ -50,34 +50,58 @@ VERDICTS = (
     'rate or AI fears, "down 13% this month"). Never mark a setup caution for market or sector weakness: those dips are what '
     "these strategies buy, and in the backtest they won as often as other setups or more.")
 
+# How every news check reads one ticker. Nov 23, 2026: the pre-market check searched "<TICKER> stock news", got only
+# quote pages with no dated headline, and marked eight positions clean on the absence of news; it also stopped at 8 of
+# 13 positions. The scanner now writes $W/out/news_plan.json (every ticker to check, in order, with the company's name
+# and two searches that return dated articles), and a clean verdict must carry the date of the newest headline read.
+NEWS_METHOD = (
+    "How to check a ticker: $W/out/news_plan.json lists, under \"items\", every ticker to check in order, each with its "
+    "company name, why it is on the list and two search queries (company name + month; company name + ticker + date). Run "
+    "the first query with WebSearch; if it returns only quote, chart or profile pages with no dated headline, run the "
+    "second. Read the newest dated headlines about the company itself, and open an article with WebFetch (a result link) "
+    "when a headline alone doesn't say what happened. Every verdict carries the date of the newest dated headline you "
+    "read: TICKER=clean@YYYY-MM-DD:<that headline in a few words>, TICKER=caution@YYYY-MM-DD:<reason>, "
+    "TICKER=avoid@YYYY-MM-DD:<reason>. If neither query turns up one dated headline about the company, the verdict is "
+    "TICKER=unverified:<what the searches returned>, never clean: a search that found nothing is not a check that found "
+    "nothing. The scanner records a clean without a date as unverified and shows it as not verified in the email and "
+    "on the dashboard. A ticker whose \"why\" names a pre-market move moved on something: find what before the verdict. "
+    "ETFs are listed apart under \"etfs\" and need no search. Check every item, with no cap: a ticker left out is "
+    "reported as not verified.")
+
 NEWS_ENTRIES = (
-    'News check: check the tickers in $W/out/news_order.txt, in that order (the featured setups by rank, then the next '
+    'News check: check every ticker in $W/out/news_plan.json, in its order (the featured setups by rank, then the next '
     '"also qualified" ones, which move up if a ranked setup is dropped; never pick by score: on Nov 20 hundreds of setups tied '
-    'near the top score and a check by score missed six of the eight featured). Run one WebSearch "<TICKER> stock news" each '
-    'and judge the last few days. ' + VERDICTS + " Apply every verdict in one command (it re-ranks the list and refreshes the "
-    'dashboard cards): `cd $C && python3 -m engine.postprocess --out $W/out --state $W/state --news "TICKER=clean" '
-    '"TICKER=caution:one-line reason" "TICKER=avoid:one-line reason"`. If its result has NEWS_CHECK_MISSING, check those tickers '
-    'too and run the command again with every verdict (earlier ones included). If there are no entries, skip this step.')
+    'near the top score and a check by score missed six of the eight featured). ' + NEWS_METHOD + " " + VERDICTS + " Apply every "
+    'verdict in one command (it re-ranks the list and refreshes the dashboard cards): `cd $C && python3 -m engine.postprocess '
+    '--out $W/out --state $W/state --news "TICKER=clean@2026-11-20:headline" "TICKER=caution@2026-11-20:one-line reason" '
+    '"TICKER=avoid@2026-11-20:one-line reason" "TICKER=unverified:what the searches returned"`. If its result has '
+    'NEWS_CHECK_MISSING, check those tickers too and run the command again with every verdict (earlier ones included); if it '
+    'has NEWS_UNVERIFIED, try once more for those (the second query, then a result article) before leaving them unverified. '
+    'If the plan has no items, skip this step.')
 
 NEWS_PREMARKET = (
-    "News check on today's orders and open positions: take the tickers in scan.premarket_checks and in scan.positions in "
-    '$W/out/scan.json (at most 8). Run one WebSearch "<TICKER> stock news" each and look at the news since the last close. '
-    "avoid = material company news (earnings surprise, guidance cut, offering, legal/FDA shock, takeover announcement); caution = "
-    "other company-specific bad news; clean = routine news or moves explained by the market or the sector (a weak market is not a "
-    "reason to cancel: the plan already allows for it). Apply every verdict in one command: "
-    '`cd $C && python3 -m engine.postprocess --out $W/out --state $W/state --news "TICKER=clean" "TICKER=avoid:one-line reason"`. '
-    "It turns avoid on a pending order into a CANCEL line and withdraws that order on the dashboard, and adds a REVIEW line for an "
-    "open position. If there is nothing to check, skip this step.")
+    "News check on open positions and today's orders: check every ticker in $W/out/news_plan.json, in its order: every open "
+    "stock position (a pre-market mover first), every order the pre-market check flagged, every order you marked placed and "
+    "today's featured orders. No cap: this check exists so that nothing you hold or are about to buy goes unread. "
+    + NEWS_METHOD + " avoid = material company news (earnings surprise, guidance cut, offering, legal/FDA shock, takeover "
+    "announcement); caution = other company-specific bad news; clean = routine news or moves explained by the market or the "
+    "sector (a weak market is not a reason to cancel: the plan already allows for it). Apply every verdict in one command: "
+    '`cd $C && python3 -m engine.postprocess --out $W/out --state $W/state --news "TICKER=clean@2026-11-20:headline" '
+    '"TICKER=avoid@2026-11-22:one-line reason" "TICKER=unverified:what the searches returned"`. It turns avoid on a pending '
+    "order into a CANCEL line and withdraws that order on the dashboard, adds a REVIEW line for an open position, and prints "
+    "each position's news status (read through a date, not verified, ETF) in the email and on its dashboard card. If its "
+    "result has NEWS_CHECK_MISSING, check those and run the command again with every verdict (earlier ones included); if it "
+    "has NEWS_UNVERIFIED, try once more for those before leaving them unverified. If the plan has no items, skip this step.")
 
 NEWS_AUTO = (
-    "News check: if $W/out/scan.json has entries, check the tickers in $W/out/news_order.txt, in that order (featured by rank, "
-    "then the next \"also qualified\" ones; never pick by score); if it is a pre-market "
-    "scan, check the tickers in scan.premarket_checks and scan.positions instead (at most 8). Run one WebSearch "
-    '"<TICKER> stock news" each and judge the last few days. ' + VERDICTS + " Apply every verdict in one command (it re-ranks, "
-    "withdraws what you rule out and refreshes the dashboard cards): "
-    '`cd $C && python3 -m engine.postprocess --out $W/out --state $W/state --news "TICKER=clean" "TICKER=caution:one-line reason" '
-    '"TICKER=avoid:one-line reason"`. If its result has NEWS_CHECK_MISSING, check those tickers too and run the command again '
-    'with every verdict (earlier ones included). If there is nothing to check, skip this step.')
+    "News check: check every ticker in $W/out/news_plan.json, in its order (for a post-close or pre-close scan: the featured "
+    "setups by rank, then the next \"also qualified\" ones; for a pre-market check: every open stock position, flagged and "
+    "placed orders and today's featured orders). " + NEWS_METHOD + " " + VERDICTS + " Apply every verdict in one command "
+    "(it re-ranks, withdraws what you rule out and refreshes the dashboard cards): "
+    '`cd $C && python3 -m engine.postprocess --out $W/out --state $W/state --news "TICKER=clean@2026-11-20:headline" '
+    '"TICKER=caution@2026-11-20:one-line reason" "TICKER=avoid@2026-11-20:one-line reason" "TICKER=unverified:what the '
+    'searches returned"`. If its result has NEWS_CHECK_MISSING, check those tickers too and run the command again with every '
+    'verdict (earlier ones included); if it has NEWS_UNVERIFIED, try once more for those. If the plan has no items, skip this step.')
 
 PROGRESS = '''
 Progress for the dashboard's Scan now bar: the extra message after these instructions may contain a line "Run token: rt_...". If it does, call that value T and record progress by creating small documents in collection "runs" with ArtifactData action "set" (new documents, so no if_version), each with data {"token": T, "seq": n, "state": "running", "step": "<label>", "pct": <p>, "at": "<current UTC time, e.g. 2026-11-05T23:14:05Z, from `date -u +%Y-%m-%dT%H:%M:%SZ` chained onto that step's shell command>", "by": "scan"}:

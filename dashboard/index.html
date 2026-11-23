@@ -517,6 +517,22 @@ function positionNews(t) {
   const r = String(n.reason || "").replace(NEWS_FROM, "").replace(/\.$/, "") || "notable news";
   return { sev: NEWS_SEV[n.verdict], verdict: n.verdict, reason: r.charAt(0).toUpperCase() + r.slice(1), at: at || d.started_at };
 }
+// What the newest news check did with an open position (Nov 23, 2026): read through a date, not verified (no dated
+// headline found), an ETF (no company news), or not checked by that run. Never shown as checked without a date.
+function positionNewsStatus(t) {
+  const tk = String(t.ticker || "").toUpperCase();
+  const sc = S.scans.find((x) => x.status !== "failed" && x.status !== "closed" && x.position_news_status && x.position_news_status[tk]);
+  return sc ? { ...sc.position_news_status[tk], at: sc.started_at } : null;
+}
+function newsStatusLine(t) {
+  const n = positionNewsStatus(t);
+  if (!n || n.status === "caution" || n.status === "avoid") return "";
+  const when = dtShort(n.at);
+  if (n.status === "clean") return `<div class="small" data-news-status="clean"><span class="pill good">News read</span> Headlines through ${esc(dShort(n.through))}: nothing material${n.note ? ` (newest: ${esc(n.note)})` : ""} · ${when} check</div>`;
+  if (n.status === "etf") return `<div class="small muted" data-news-status="etf">ETF: no company news to read (market risk only).</div>`;
+  const why = n.status === "unverified" ? `no dated headline was found${n.note ? ` (${esc(n.note)})` : ""}` : "this position was not checked";
+  return `<div class="small" data-news-status="${esc(n.status)}"><span class="pill crit">News not verified</span> ${why} by the ${when} check. Read the headlines yourself before acting.</div>`;
+}
 // The news on a position, laid out to be read at a glance: the verdict, then what it means for the trade, then why.
 const NV_ICON = {
   caution: '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 1.3c.4 0 .8.2 1 .6l6.2 11c.4.7-.1 1.6-1 1.6H1.8c-.9 0-1.4-.9-1-1.6l6.2-11c.2-.4.6-.6 1-.6Zm0 4.2a.8.8 0 0 0-.8.8v3.4a.8.8 0 0 0 1.6 0V6.3a.8.8 0 0 0-.8-.8Zm0 6a.9.9 0 1 0 0 1.8.9.9 0 0 0 0-1.8Z"/></svg>',
@@ -1231,6 +1247,7 @@ function positionCard(t, m) {
   const covered = new Set([st.code, ...(STATUS_COVERS[st.code] || [])]);
   const others = sigs.filter((s) => !covered.has(s.code));
   const sigHtml = others.map((s) => `<div class="sigline"><span class="pill ${s.level === "alert" ? "crit" : s.level === "good" ? "good" : "info"}">${esc(s.action || s.code.replace(/_/g, " ").toLowerCase())}</span> <span class="small">${hiCaution(s.text || "")}</span></div>`).join("")
+    + newsStatusLine(t)
     + `<div class="small muted">${m.scan_at ? `Status from the ${dtShort(m.scan_at)} scan; the next scan updates it.` : "No scan has marked this position yet."}</div>`;
   const stBtn = st.code === "RAISE_STOP" && st.new_stop
     ? `<div class="pc-st-act"><button class="btn primary small" type="button" data-act="cardstop" data-tid="${esc(id)}" data-px="${st.new_stop.toFixed(2)}">Stop moved to ${px(st.new_stop)}</button><span class="small muted">Press after you change it in your brokerage.</span></div>` : "";

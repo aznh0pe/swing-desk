@@ -803,6 +803,9 @@ def headline(scan_doc: dict) -> str:
     wd = sum(1 for v in (scan_doc.get("alert_updates") or {}).values() if v.get("withdrawn") and not v.get("carried"))
     if wd:
         bits.append(f"{wd} withdrawn")
+    nu = scan_doc.get("news_unverified") or []
+    if nu:
+        bits.append(f"news not verified on {len(nu)}: " + ", ".join(nu[:4]) + ("…" if len(nu) > 4 else ""))
     out = " · ".join(bits) if bits else "No action needed"
     ri = scan_doc.get("run_issues") or []
     if ri:
@@ -992,6 +995,8 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
             else:
                 c = premarket_check(a, premarket, earnings, today)
                 c["placed"] = a.get("status") == "placed"
+                c["rank"] = prev["rank"] if "rank" in prev else a.get("rank")
+                c["also_qualified"] = bool(prev.get("also_qualified", a.get("also_qualified")))
                 pm_checks.append(c)
     pm_checks.sort(key=lambda c: ({"cancel": 0, "withdrawn": 1, "caution": 2}.get(c.get("verdict"), 3), str(c.get("ticker"))))
     # writes: create-only. A document that already exists (a re-run of the same scan
@@ -1083,6 +1088,18 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
     # news a check found on a position still held stays in every later scan until a news check looks at that stock
     # again (Nov 13: the 7:01 AM and 2:07 PM scans, which news-checked nothing or only new setups, left it out)
     from .postprocess import carried_position_news  # late import: postprocess imports this module
+    # the news check's plan (written before the scan document is saved, so the document carries it)
+    scan_doc["news_names"] = news_names(universe, [p.get("ticker") for p in positions]
+                                        + [c.get("ticker") for c in pm_checks if c.get("placed") or c.get("verdict") != "keep"
+                                           or (c.get("rank") and not c.get("also_qualified"))]
+                                        + [e["ticker"] for e in entries[:60]])
+    plan = write_news_files(out, scan_doc, entries)
+    # nothing counts as checked until the news step gives a verdict with a dated headline (postprocess replaces these)
+    scan_doc["news_unverified"] = [i["ticker"] for i in plan["items"]]
+    if mode == "premarket":
+        scan_doc["position_news_status"] = {str(p.get("ticker", "")).upper(): {
+            "status": "etf" if (scan_doc["news_names"].get(str(p.get("ticker", "")).upper()) or [None, "stock"])[1] == "etf"
+            else "not_checked"} for p in positions}
     pn = carried_position_news(state, [p.get("ticker") for p in positions])
     if pn:
         scan_doc["position_news"] = pn
@@ -1090,7 +1107,6 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
     digest = make_digest(scan_doc, entries, positions, near, pm_checks, week_aplus, P, now)
     scan_doc["digest"] = digest
     scan_doc = fit_scan_doc(scan_doc, lambda n: make_digest(scan_doc, entries, positions, near, pm_checks, week_aplus, P, now, n))
-    (out / "news_order.txt").write_text(" ".join(news_order(entries)) + "\n")
     _write(out, writes, "set", "scans", scan_id, scan_doc)
     token = run_token if (run_token and TOKEN_RE.match(run_token)) else None
     if token:  # the dashboard's progress bar finishes when this lands, together with the results
@@ -1339,7 +1355,7 @@ def order_fill_check(a: dict, ind: dict, today, mode: str, partial_bar: bool) ->
 
 def premarket_check(a, premarket, earnings, today) -> dict:
     tk = a.get("ticker")
-    res = {"alert_id": a.get("id"), "ticker": tk, "verdict": "keep", "text": "No pre-market issues."}
+    res = {"alert_id": a.get("id"), "ticker": tk, "verdict": "keep", "text": "No pre-market price or earnings issue."}
     e = (earnings or {}).get(tk) or {}
     if e.get("next") and str(e["next"]) == str(today):
         res.update(verdict="cancel", text="Reports earnings today: cancel the order.")
@@ -1554,9 +1570,26 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now, f
             lines.append(f"- {p['ticker']}: {sg['action']} (from ${p.get('stop')}). {sg['text']} {pos_line(p)}")
     if pm_checks:
         lines += ["", numbered("PRE-MARKET CHECK OF TODAY'S ORDERS")]
+        # Nov 23, 2026: ~250 standing setups each printed "KEEP. No pre-market issues.", which read as checked for news.
+        # Listed one by one: anything flagged or withdrawn, orders marked placed, today's featured orders, and any
+        # order the news check read; the rest are counted in one line that says what was and wasn't checked.
+        shown, rest = [], 0
         for c in pm_checks:
+            if (c.get("verdict") != "keep" or c.get("placed") or (c.get("rank") and not c.get("also_qualified"))
+                    or (c.get("news") or {}).get("status") not in (None, "clean")):
+                shown.append(c)
+            else:
+                rest += 1
+        for c in shown:
             verdict = {"withdrawn": "WITHDRAWN, CANCEL IT" if c.get("placed") else "WITHDRAWN, DON'T PLACE"}.get(c["verdict"], c["verdict"].upper())
-            lines.append(f"- {c['ticker']}{' (marked placed)' if c.get('placed') else ''}: {verdict}. {c['text']}")
+            nt = news_status_text(c.get("news")) if c.get("verdict") != "withdrawn" else None
+            if c.get("verdict") == "keep" and not c.get("news"):
+                nt = NEWS_STATUS_TEXT["not_checked"]
+            tag = " (marked placed)" if c.get("placed") else (f" (featured #{c['rank']})" if c.get("rank") and not c.get("also_qualified") else "")
+            lines.append(f"- {c['ticker']}{tag}: {verdict}. {c['text']}" + (f" News: {nt}" if nt else ""))
+        if rest:
+            lines.append(f"- {rest} more standing setup{'s' if rest != 1 else ''} for today: no pre-market price or earnings "
+                         "issue. Their news was not checked (the pre-close scan checks news on whatever is featured then).")
     wd = [(k, v) for k, v in (scan.get("alert_updates") or {}).items() if v.get("withdrawn") and not v.get("carried")]
     if wd:
         lines += ["", "=== WITHDRAWN SETUPS (cancel these orders if you placed them) ==="]
@@ -1586,6 +1619,9 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now, f
                          f"| P&L {pnl_mark(p.get('unrealized'))} ({_pct(p['last'], p.get('entry'))}) "
                          f"| day {p.get('day_now') or min(p['days_held'] + day_add, p['max_hold'])} of {p['max_hold']}"
                          f"{f', time stop at the close of {_day(end)}' if end else ''} | stop ${p.get('stop')} | target ${p.get('target')}")
+            nst = news_status_text((scan.get("position_news_status") or {}).get(str(p["ticker"]).upper()))
+            if nst:
+                lines.append(f"    News: {nst}")
             primary = st_.get("code")
             for p2, sg in notices:  # other notices that aren't already the status line
                 if p2 is p and sg["code"] != primary and not (sg["code"] == "MARKET_STRESS" and primary == "HOLD"):
@@ -1700,6 +1736,142 @@ def news_order(entries: list[dict], n: int = 10) -> list[str]:
         if e["ticker"] not in out:
             out.append(e["ticker"])
     return out[:max(n, len(feat))]
+
+
+# --------------------------------------------------------------------------------------- the news plan
+# Nov 23, 2026: the 5:25 AM pre-market check news-checked 8 of the 13 open positions (its prompt said "at most 8"),
+# searched "<TICKER> stock news", got only quote pages with no dated headline, and marked all 8 clean. Every news
+# check now works from a plan the scanner writes: every ticker that matters, in order, with the company's name and
+# two searches built to return dated headlines (company name + month, company name + ticker + session date), and a
+# verdict is clean only with the date of the newest headline actually read (postprocess enforces it).
+NEWS_GAP = 0.03          # a pre-market move this big on a position or an order means news: find it first
+_NAME_DROP = re.compile(r"\b(inc|incorporated|corp|corporation|co|company|ltd|limited|plc|holdings?|group|n\.?v|s\.?a|"
+                        r"class [a-c]|common stock|ordinary shares|depositary shares|ads|adr)\b\.?", re.IGNORECASE)
+
+
+def short_name(name, tk: str) -> str:
+    """The company name a news search should use: 'Snowflake' for 'Snowflake Inc. Class A Common Stock'."""
+    n = str(name or "").strip()
+    if not n or n.upper() == str(tk).upper() or n.lower() in ("nan", "none"):
+        return str(tk).upper()
+    n = re.sub(r"\(.*?\)", " ", n)
+    n = _NAME_DROP.sub(" ", n).replace(",", " ")
+    n = " ".join(n.split()).strip(" .&-")
+    n = re.sub(r"^the\s+", "", n, flags=re.IGNORECASE)
+    return n or str(tk).upper()
+
+
+def news_names(universe, tickers) -> dict:
+    """{ticker: [search name, "stock" | "etf"]} for the tickers a news check may look at."""
+    look = {}
+    try:
+        u = universe.reset_index() if "ticker" not in universe.columns else universe
+        if "ticker" not in u.columns:
+            u = u.rename(columns={u.columns[0]: "ticker"})
+        for r in u.itertuples(index=False):
+            look[str(r.ticker).upper()] = (getattr(r, "name", None), getattr(r, "type", None))
+    except Exception:
+        pass
+    out = {}
+    for tk in tickers:
+        tk = str(tk or "").upper()
+        if not tk or tk in out:
+            continue
+        nm, ty = look.get(tk, (None, None))
+        out[tk] = [short_name(nm, tk), "etf" if str(ty or "").lower().startswith(("etf", "index")) else "stock"]
+    return out
+
+
+def news_queries(name: str, tk: str, session_day) -> list[str]:
+    try:
+        d = cal._d(session_day)
+    except Exception:
+        d = cal.now_pt().date()
+    month, day = d.strftime("%B %Y"), f"{d.strftime('%B')} {d.day}, {d.year}"
+    return [f"{name} stock news {month}", f"{name} {tk} news {day}"]
+
+
+def _pm_gap(p: dict):
+    try:
+        last, pm = float(p.get("last")), float(p.get("pm_last"))
+        if math.isfinite(last) and math.isfinite(pm) and last > 0:
+            return pm / last - 1
+    except Exception:
+        pass
+    return None
+
+
+def news_plan(scan_doc: dict, entries: list[dict], n: int = 10) -> dict:
+    """Every ticker this run's news check must read, in order, with no cap: open positions (a pre-market gap
+    first), orders the pre-market check flagged, orders you marked placed, today's featured orders, then the
+    featured setups and the next also-qualified ones. ETFs are listed apart: no company news to read."""
+    names = scan_doc.get("news_names") or {}
+    day = scan_doc.get("session_day")
+    items, etfs, seen = [], [], set()
+
+    def add(tk, kind, why):
+        tk = str(tk or "").upper()
+        if not tk or tk in seen:
+            return
+        seen.add(tk)
+        nm, ty = (names.get(tk) or [tk, "stock"])[:2]
+        if ty == "etf":
+            etfs.append({"ticker": tk, "kind": kind})
+            return
+        items.append({"ticker": tk, "name": nm, "kind": kind, "why": why, "queries": news_queries(nm, tk, day)})
+
+    pos = list(scan_doc.get("positions") or [])
+    for p in sorted(pos, key=lambda p: -abs(_pm_gap(p) or 0)):
+        g = _pm_gap(p)
+        add(p.get("ticker"), "position", "open position" + (f"; pre-market {g:+.1%}: find the news behind the move"
+                                                             if g is not None and abs(g) >= NEWS_GAP else ""))
+    pmc = scan_doc.get("premarket_checks") or []
+    for c in pmc:
+        if c.get("verdict") in ("cancel", "caution") and not str(c.get("text", "")).startswith("Reports earnings"):
+            add(c.get("ticker"), "flagged order", f"today's order, flagged pre-market: {c.get('text')}")
+    for c in pmc:
+        if c.get("placed") and c.get("verdict") != "withdrawn":
+            add(c.get("ticker"), "placed order", "an order you marked placed")
+    for c in sorted((c for c in pmc if c.get("verdict") == "keep" and c.get("rank") and not c.get("also_qualified")),
+                    key=lambda c: c.get("rank") or 999):
+        add(c.get("ticker"), "featured order", f"featured #{c.get('rank')} for today")
+    feat = {e["ticker"] for e in entries if not e.get("also_qualified")}
+    for tk in news_order(entries, n):
+        add(tk, "setup", "featured setup" if tk in feat else "next in line if a featured setup is dropped")
+    return {"session_day": str(day), "items": items, "etfs": etfs,
+            "how": ("Check every item in order. Run the first query; if it returns only quote or profile pages with no "
+                    "dated headline, run the second. Give each verdict with the date of the newest dated headline you "
+                    "read: TICKER=clean@YYYY-MM-DD:<headline>. No dated headline found = TICKER=unverified:<what you "
+                    "found>, never clean.")}
+
+
+def write_news_files(out: pathlib.Path, scan_doc: dict, entries: list[dict]) -> dict:
+    plan = news_plan(scan_doc, entries)
+    (out / "news_plan.json").write_text(json.dumps(plan, indent=1))
+    (out / "news_order.txt").write_text(" ".join(i["ticker"] for i in plan["items"]) + "\n")
+    scan_doc["news_plan"] = {"tickers": [i["ticker"] for i in plan["items"]], "etfs": [e["ticker"] for e in plan["etfs"]]}
+    return plan
+
+
+NEWS_STATUS_TEXT = {
+    "etf": "ETF: no company news to read (market risk only).",
+    "unverified": "NOT VERIFIED: no dated headline was found. Read the headlines yourself before acting.",
+    "not_checked": "not checked by this run. Read the headlines yourself before acting.",
+}
+
+
+def news_status_text(st: dict | None) -> str | None:
+    if not st:
+        return None
+    k = st.get("status")
+    if k == "clean":
+        return f"headlines read through {_day(st.get('through'))}: nothing material" + (f" (newest: {st['note']})" if st.get("note") else "") + "."
+    if k in ("caution", "avoid"):
+        return None   # the NEWS ON OPEN POSITIONS section says it in full
+    t = NEWS_STATUS_TEXT.get(k)
+    if t and k == "unverified" and st.get("note"):
+        t = t[:-1] + f" ({st['note']})."
+    return t
 
 
 def doc_bytes(doc: dict) -> int:

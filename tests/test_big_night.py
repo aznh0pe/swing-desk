@@ -121,7 +121,7 @@ def test_scan_prompts_check_news_in_news_order():
     gen = ROOT / "ops" / "generated"
     for f in ("preclose.md", "postclose.md", "manual.md", "weekend.md", "preclose_halfday.md"):
         t = (gen / f).read_text()
-        assert "news_order.txt" in t and "NEWS_CHECK_MISSING" in t, f
+        assert "news_plan.json" in t and "NEWS_CHECK_MISSING" in t and "@YYYY-MM-DD" in t, f
 
 
 def test_alert_refreshes_carry_only_what_differs_from_the_card():
