@@ -41,6 +41,7 @@ SCAN_OWNED = ("rank", "score", "win_pct", "model_win_pct", "grade", "news_check"
 # the limit, stop or target by a few cents); the dashboard keeps the original plan once an order is placed
 PLAN_FIELDS = ("entry", "stop", "target", "order", "rr", "risk_per_share", "reward_per_share", "last_close", "atr",
                "exit_signal", "earnings_next", "hold_max_days", "hold_typical_days")
+ALWAYS_SENT = ("withdrawn", "rank")  # an update always says whether the setup stands and where it ranks
 TOKEN_RE = __import__("re").compile(r"^rt_[a-z0-9]{6,32}$")
 
 
@@ -705,7 +706,17 @@ def hold_at_limit(w: dict, universe, P: dict, state: dict, entries: list, earnin
     return out
 
 
-def build_overlay(scan_doc: dict, entries: list, ctx: dict) -> dict:
+def overlay_diff(u: dict, card: dict | None) -> dict:
+    """Only what differs from the alert card already on the dashboard. The dashboard lays the newest scan's update
+    over the card itself (not over earlier updates), so a field equal to the card's says nothing. Nov 22, 2026: 414
+    full refreshes made a 494 KB scan document (limit 256 KB); trimmed they were about 65 KB."""
+    if not isinstance(card, dict):
+        return u
+    out = {k: v for k, v in u.items() if k in ALWAYS_SENT or card.get(k) != v}
+    return out
+
+
+def build_overlay(scan_doc: dict, entries: list, ctx: dict, alerts: dict | None = None) -> dict:
     ups = {}
     live = {e["id"] for e in entries}
     existing = set(ctx.get("existing_entry_ids") or [])
@@ -715,7 +726,8 @@ def build_overlay(scan_doc: dict, entries: list, ctx: dict) -> dict:
             if e.get("news_check") in (None, "pending"):  # not news-checked this run: keep the earlier verdict
                 u.pop("news_check", None)
                 u.pop("news_note", None)
-            ups[e["id"]] = u
+            card = ((alerts or {}).get(e["id"]) or {}).get("doc")
+            ups[e["id"]] = overlay_diff(u, card)
     dropped = {d["ticker"]: d["reason"] for d in scan_doc.get("news_dropped") or []}
     for aid, a in (ctx.get("window") or {}).items():
         if aid in live:
@@ -1054,7 +1066,7 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
     pn = carried_position_news(state, [p.get("ticker") for p in positions])
     if pn:
         scan_doc["position_news"] = pn
-    scan_doc["alert_updates"] = carry_withdrawn(build_overlay(scan_doc, entries, ctx), prev_ov, state, today)
+    scan_doc["alert_updates"] = carry_withdrawn(build_overlay(scan_doc, entries, ctx, state.get("alerts")), prev_ov, state, today)
     digest = make_digest(scan_doc, entries, positions, near, pm_checks, week_aplus, P, now)
     scan_doc["digest"] = digest
     scan_doc = fit_scan_doc(scan_doc, lambda n: make_digest(scan_doc, entries, positions, near, pm_checks, week_aplus, P, now, n))
@@ -1668,6 +1680,15 @@ def fit_scan_doc(scan_doc: dict, build) -> dict:
     if cut > 0:
         scan_doc["digest"] = (d[:cut] + "\n=== ALSO QUALIFIED ===\nToo many to list on the dashboard tonight: each one has its own "
                               "card with the full order, and the email lists them all.")
+    if doc_bytes(scan_doc) > DOC_LIMIT and scan_doc.get("alert_updates"):
+        # refreshes of setups that still stand: keep what the card needs to rank and size them, drop the rest
+        keep = set(ALWAYS_SENT) | {"score", "grade", "news_check", "news_note", "also_qualified", "shares", "total_cost",
+                                   "risk_usd", "entry", "stop", "target", "withdrawn_reason", "carried", "withdrawn_at",
+                                   "ticker", "hold_note", "price_now"}
+        scan_doc["alert_updates"] = {k: ({f: v for f, v in u.items() if f in keep} if isinstance(u, dict) and not u.get("withdrawn")
+                                         else u) for k, u in scan_doc["alert_updates"].items()}
+        scan_doc.setdefault("notes", []).append("Alert refreshes thinned to the fields the cards need: the scan document "
+                                                "was over the dashboard's size limit.")
     if doc_bytes(scan_doc) > DOC_LIMIT and scan_doc.get("close_snapshot"):
         scan_doc.pop("close_snapshot", None)
         scan_doc.setdefault("notes", []).append("close_snapshot left out: the scan document was over the dashboard's size limit.")

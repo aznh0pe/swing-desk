@@ -122,3 +122,56 @@ def test_scan_prompts_check_news_in_news_order():
     for f in ("preclose.md", "postclose.md", "manual.md", "weekend.md", "preclose_halfday.md"):
         t = (gen / f).read_text()
         assert "news_order.txt" in t and "NEWS_CHECK_MISSING" in t, f
+
+
+def test_alert_refreshes_carry_only_what_differs_from_the_card():
+    """Sun Nov 22, 2026: the weekend refresh re-scored 414 setups already on the dashboard; carried in full their
+    refreshes made a 494 KB scan document (limit 256 KB). Now each refresh holds only what differs from its card."""
+    entries, alerts = [], {}
+    for i in range(414):
+        e = _entry(i, 99.0, rank=i + 1 if i < 8 else None, also=i >= 8)
+        e.update({"order": "Buy LIMIT $100.00, day order " + "x" * 300, "exit_signal": "Sell at the close " + "y" * 300,
+                  "size_note": "No free cash at the moment: size shown assumes a slot frees up.", "hold_typical_days": 3})
+        card = dict(e)
+        if i % 3 == 0:
+            e = {**e, "score": 98.5}   # the re-score moved a few
+        entries.append(e)
+        alerts[e["id"]] = {"doc": card, "version": 1}
+    ctx = {"existing_entry_ids": list(alerts), "window": {}, "when": "4:19 pm"}
+    full = S.build_overlay({}, entries, ctx)
+    thin = S.build_overlay({}, entries, ctx, alerts)
+    assert S.doc_bytes({"alert_updates": full}) > 256_000
+    assert S.doc_bytes({"alert_updates": thin}) < 60_000
+    first = thin[entries[0]["id"]]
+    assert first == {"score": 98.5, "withdrawn": False, "rank": 1}
+    # the dashboard lays the newest update over the card: same result either way
+    for e in entries:
+        card = alerts[e["id"]]["doc"]
+        a, b = {**card, **full[e["id"]]}, {**card, **thin[e["id"]]}
+        assert {k: v for k, v in a.items() if v is not None} == {k: v for k, v in b.items() if v is not None}
+
+
+def test_fit_scan_doc_thins_alert_refreshes_as_a_last_resort():
+    big = {f"e_{i}": {"withdrawn": False, "rank": None, "score": 99.0, "order": "z" * 1500, "exit_signal": "q" * 1000}
+           for i in range(200)}
+    big["e_w"] = {"withdrawn": True, "withdrawn_reason": "No longer qualifies", "rank": None, "ticker": "W", "carried": True}
+    doc = {"id": "x", "digest": "short", "alert_updates": big}
+    out = S.fit_scan_doc(doc, lambda n: "short")
+    assert S.doc_bytes(out) <= S.DOC_LIMIT
+    assert out["alert_updates"]["e_w"]["carried"] is True and "order" not in out["alert_updates"]["e_0"]
+
+
+def test_postprocess_keeps_carried_withdrawals(tmp_path, monkeypatch):
+    monkeypatch.setattr(pp, "make_digest", lambda *a, **k: "DIGEST")
+    feat = [_entry(i, 99.8, rank=i + 1) for i in range(3)]
+    scan = {"id": "20261122-1619-auto", "mode": "postclose", "status": "ok", "started_at": "2026-11-22T16:19:00-08:00",
+            "session_day": "2026-11-23", "counts": {"aplus": 3, "week_aplus": 3}, "positions": [], "near_misses": [],
+            "premarket_checks": [], "funds": {}, "market": {}, "data": {"status": "ok"},
+            "alert_updates": {"e_old_MRNA": {"withdrawn": True, "carried": True, "ticker": "MRNA", "withdrawn_reason": "x"}}}
+    out = _out(tmp_path, feat, scan)
+    sj = json.loads((out / "scan.json").read_text())
+    sj["ctx"].update({"existing_entry_ids": [], "window": {}, "when": "4:19 pm"})
+    (out / "scan.json").write_text(json.dumps(sj))
+    pp.apply(str(out), ["T000=clean", "T001=clean", "T002=clean"])
+    doc = json.loads((out / "docs" / "scans" / "20261122-1619-auto.json").read_text())
+    assert doc["alert_updates"]["e_old_MRNA"]["carried"] is True

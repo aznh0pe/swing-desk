@@ -276,7 +276,12 @@ def apply(out_dir: str, news: list[str], state_dir: str | None = None, issues: l
     if kept_prior:
         scan["news_kept_from_earlier"] = sorted(kept_prior)
     if ctx:
-        scan["alert_updates"] = build_overlay(scan, kept, ctx)
+        prev_au = scan.get("alert_updates") or {}
+        au = build_overlay(scan, kept, ctx, (state or {}).get("alerts"))
+        for k, u in prev_au.items():  # withdrawals the scan carried forward from earlier scans stay carried
+            if isinstance(u, dict) and u.get("carried") and k not in au:
+                au[k] = u
+        scan["alert_updates"] = au
     now = cal.now_pt()
     try:
         now = dt.datetime.fromisoformat(scan["started_at"])
