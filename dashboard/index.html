@@ -485,6 +485,9 @@ function funds() {
   const unreal = open.reduce((s, t) => s + (posPnl(t, marks[t.id]) || 0), 0);
   return { ...parts, capital, openCost, cash: capital - openCost, unreal, equity: capital + unreal, open };
 }
+// a position's or a setup's size as a share of the portfolio: its cost over capital (the measure the scans size with)
+function sizePct(cost) { const c = funds().capital, v = num(cost); return v !== null && v > 0 && c > 0 ? (100 * v) / c : null; }
+function sizePctTxt(cost, given) { const g = given == null || given === "" ? null : num(given), v = g !== null ? g : sizePct(cost); return v === null ? "" : `${v.toFixed(1)}% of portfolio`; }
 // open P&L at the latest mark, on the shares you hold now (a part sale since the scan is already out of it)
 function posPnl(t, m) {
   const last = num(m?.last), entry = num(t.entry_price), sh = num(t.shares);
@@ -1014,8 +1017,8 @@ function viewAlerts() {
   const extra = entries.filter((a) => a.also_qualified);
   html += featured.length ? `<div class="grid g-tickets">${featured.map((a) => ticket(a, today)).join("")}</div>` : `<div class="empty"><b>No open A+ setups.</b> New setups land after the 2:05 PM PT post-close scan, ready to place as limit orders before the next open. If a day has none, that is the filter doing its job.</div>`;
   if (extra.length) html += `<details class="panel"><summary>Also qualified tonight (${extra.length}): A+ setups outside the top 8 or capped by sector</summary>
-    <div class="tbl-wrap" style="margin-top:10px"><table><thead><tr><th>Ticker</th><th>Strategy</th><th class="n">Score</th><th class="n">Win %</th><th class="n">Buy limit</th><th class="n">Stop</th><th class="n">Target</th><th class="n">Shares</th><th class="n">Cost</th><th>Why not featured</th><th></th></tr></thead><tbody>
-    ${extra.map((a) => `<tr><td><span class="t">${esc(a.ticker)}</span></td><td class="small">${esc(a.strategy_label)}</td><td class="n">${esc(a.score)}</td><td class="n">${pct(a.win_pct, 0)}</td><td class="n">${px(a.entry)}</td><td class="n">${px(a.stop)}</td><td class="n">${px(a.target)}</td><td class="n">${esc(a.shares)}${a.fractional ? "*" : ""}</td><td class="n">${money(a.total_cost)}</td><td class="small muted">${esc(String(a.capacity_note || "").replace(/^Also qualified \(|\)\..*$/g, ""))}</td>
+    <div class="tbl-wrap" style="margin-top:10px"><table><thead><tr><th>Ticker</th><th>Strategy</th><th class="n">Score</th><th class="n">Win %</th><th class="n">Buy limit</th><th class="n">Stop</th><th class="n">Target</th><th class="n">Shares</th><th class="n">Cost</th><th class="n">% of portfolio</th><th>Why not featured</th><th></th></tr></thead><tbody>
+    ${extra.map((a) => `<tr><td><span class="t">${esc(a.ticker)}</span></td><td class="small">${esc(a.strategy_label)}</td><td class="n">${esc(a.score)}</td><td class="n">${pct(a.win_pct, 0)}</td><td class="n">${px(a.entry)}</td><td class="n">${px(a.stop)}</td><td class="n">${px(a.target)}</td><td class="n">${esc(a.shares)}${a.fractional ? "*" : ""}</td><td class="n">${money(a.total_cost)}</td><td class="n">${esc(sizePctTxt(a.total_cost, a.pct_of_capital).replace(" of portfolio", ""))}</td><td class="small muted">${esc(String(a.capacity_note || "").replace(/^Also qualified \(|\)\..*$/g, ""))}</td>
       <td class="n" style="white-space:nowrap"><button class="btn small" type="button" data-act="fill" data-id="${esc(a.id)}">Filled</button> <button class="btn ghost small" type="button" data-act="skip" data-id="${esc(a.id)}">Skip</button></td></tr>`).join("")}
     </tbody></table></div></details>`;
   html += `</section>` + positionsSection("alerts");
@@ -1066,11 +1069,11 @@ function ticket(a, today) {
       <span class="lk">Stop</span><span class="lv">${px(s)}</span><span class="ld">${spct(riskPct)}</span>
       <span class="lk">R:R</span><span class="lv" style="font-size:13px">${esc(a.rr)}</span><span class="ld">exp. ${spct(a.exp_return_pct, 2)}</span>
     </div></div>
-    <div class="t-facts"><div><div class="k">Size</div><div class="v">${esc(a.shares)} sh${a.fractional ? "*" : ""}</div></div><div><div class="k">Cost</div><div class="v">${money(a.total_cost)}</div></div><div><div class="k">Hold</div><div class="v">≤ ${esc(a.hold_max_days)} d</div></div></div>
+    <div class="t-facts"><div><div class="k">Size</div><div class="v">${esc(a.shares)} sh${a.fractional ? "*" : ""}</div></div><div><div class="k">Cost</div><div class="v">${money(a.total_cost)}</div><div class="small muted">${esc(sizePctTxt(a.total_cost, a.pct_of_capital))}</div></div><div><div class="k">Hold</div><div class="v">≤ ${esc(a.hold_max_days)} d</div></div></div>
     <div class="t-notes">
       <div><b>Order:</b> ${esc(a.order)}</div>
       <div><b>Exit signal:</b> ${esc(a.exit_signal)}</div>
-      <div><b>Risk:</b> ${money(a.risk_usd)} (${esc(a.pct_of_capital)}% of capital in the position) · <b>Earnings:</b> ${a.earnings_next ? dShort(a.earnings_next) : "none in the hold window"}</div>
+      <div><b>Risk:</b> ${money(a.risk_usd)} (position size ${esc(sizePctTxt(a.total_cost, a.pct_of_capital))}) · <b>Earnings:</b> ${a.earnings_next ? dShort(a.earnings_next) : "none in the hold window"}</div>
       ${news}
       <div class="small muted">Last checked by the ${dtShort(a._ov_at || a.created_at)} scan</div>
       ${Array.isArray(a.why) && a.why.length ? `<details><summary>Why it qualifies</summary><ul>${a.why.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></details>` : ""}
@@ -1099,7 +1102,7 @@ function actionCard(a) {
     : `<button class="btn primary small" type="button" data-act="exitdone" data-id="${esc(a.id)}">Mark done (sold)</button><button class="btn ghost small" type="button" data-act="dismiss" data-id="${esc(a.id)}">Dismiss</button>`;
   const urg = { now: "Now", today: "Before today's close", next: "Next session", open: "At the open" }[a.urgency] || a.urgency || "";
   return `<div class="act ${lvl}"><div class="tk">${esc(a.ticker)}</div><div><div class="what">${esc(a.action)} <span class="pill ${lvl === "alert" ? "crit" : lvl === "good" ? "good" : "info"}">${esc(urg)}</span></div>
-    <div class="why">${esc(a.text)}</div><div class="small muted">${dtShort(a.created_at)} · last ${px(a.last)} · P&L ${pnlHtml(a.unrealized)} · day ${esc(a.days_held)}${a.days_left != null ? `, ${esc(Math.max(0, a.days_left))} left` : ""}</div></div>
+    <div class="why">${esc(a.text)}</div><div class="small muted">${dtShort(a.created_at)} · last ${px(a.last)} · P&L ${pnlHtml(a.unrealized)} · day ${esc(a.days_held)}${a.days_left != null ? `, ${esc(Math.max(0, a.days_left))} left` : ""}${actSize(a)}</div></div>
     <div class="btns">${btns}</div></div>`;
 }
 // ---------------------------------------------------------------- open positions: status, exit plan and recording a sale
@@ -1165,7 +1168,7 @@ function posActionCard({ t, m, st, news }) {
   return `<div class="act ${lvl}" data-pos-action="${esc(t.id)}"><div class="tk">${esc(t.ticker)}</div><div><div class="what">${esc(st.label)}${news?.verdict === "avoid" ? " · REVIEW THE NEWS" : ""}</div>
     ${news ? newsBlock(news, true) : ""}
     ${st.detail ? `<div class="why">${hiCaution(st.detail)}</div>` : ""}${st.note ? `<div class="why"><b>${esc(st.note)}</b></div>` : ""}
-    <div class="small muted">${m.scan_at ? `${esc(modeLabel(m.scan_mode))} scan ${dtShort(m.scan_at)}` : "Not scanned yet"} · last ${px(m.last)} · P&L ${pnl !== null ? pnlHtml(pnl) : "–"} · day ${esc(Math.min(held, maxH))} of ${esc(maxH)}</div></div>
+    <div class="small muted">${m.scan_at ? `${esc(modeLabel(m.scan_mode))} scan ${dtShort(m.scan_at)}` : "Not scanned yet"} · last ${px(m.last)} · P&L ${pnl !== null ? pnlHtml(pnl) : "–"} · day ${esc(Math.min(held, maxH))} of ${esc(maxH)}${actSize({ trade_id: t.id })}</div></div>
     <div class="btns">${btn}</div></div>`;
 }
 function positionStatus(t, m) {
@@ -1205,10 +1208,17 @@ function openPositions() { return S.trades.filter((t) => t.status === "open").so
 function positionsSection(where) {
   const open = openPositions();
   const meta = where === "overview" ? "Sold one, or part of one? Enter the actual sell price on its card" : "Filled orders being managed · hold days count trading sessions";
-  const head = `<div class="section-head"><h2>Open positions${open.length ? ` (${open.length})` : ""}</h2><span class="meta">${meta}</span></div>`;
+  const invested = open.reduce((x, t) => x + (num(t.entry_price) || 0) * (num(t.shares) || 0), 0), invPct = sizePct(invested);
+  const head = `<div class="section-head"><h2>Open positions${open.length ? ` (${open.length})` : ""}</h2><span class="meta">${invPct !== null ? `${money(invested)} invested = ${invPct.toFixed(1)}% of portfolio · ` : ""}${meta}</span></div>`;
   if (!open.length) return `<section class="section">${head}<div class="empty">No open positions. When a limit order fills, press <b>Mark done (filled)</b> on its card in the Alerts tab and enter your actual price; the position then shows here with its stop, target, hold clock and a place to record the sale.</div></section>`;
   const marks = latestMarks();
   return `<section class="section">${head}<div class="grid g-pos">${open.map((t) => positionCard(t, marks[t.id] || {})).join("")}</div></section>`;
+}
+function actSize(a) {
+  const t = S.trades.find((x) => x.id === a.trade_id && x.status === "open");
+  const cost = t ? (num(t.entry_price) || 0) * (num(t.shares) || 0) : num(a.cost);
+  const txt = sizePctTxt(cost, t ? null : a.size_pct);
+  return txt ? ` · size ${esc(txt)}` : "";
 }
 function positionCard(t, m) {
   const id = t.id, k = kid(id), entry = num(t.entry_price), sh = num(t.shares), stop = num(t.stop), tgt = num(t.target);
@@ -1233,10 +1243,10 @@ function positionCard(t, m) {
   return `<article class="pos-card" id="pos-${k}" aria-label="${esc(t.ticker)} position">
     <div class="pc-head"><div class="pc-title"><div class="tk">${esc(t.ticker)}</div>${t.name ? `<div class="nm" title="${esc(t.name)}">${esc(t.name)}</div>` : ""}
       <div class="st">${gchip(gradeOfTrade(t))}${esc(t.strategy_label || t.strategy || "Manual")} · entered ${dShort(t.entry_date)}${num(t.sold_shares) ? ` · ${shareStr(t.sold_shares)} sh sold so far` : ""}</div></div>
-      <div class="pc-pnl"><div class="lbl">Open P&L</div><div class="big">${pnl !== null ? pnlHtml(pnl) : "–"}</div><div class="lbl">${pnlPct !== null ? `${pnlPctHtml(pnl, pnlPct)} · last ${px(last)}` : "no mark yet"}</div></div></div>
+      <div class="pc-pnl"><div class="lbl">Open P&L</div><div class="big">${pnl !== null ? pnlHtml(pnl) : "–"}</div><div class="lbl">${pnlPct !== null ? `${pnlPctHtml(pnl, pnlPct)} · last ${px(last)}` : "no mark yet"}</div>${entry && sh ? `<div class="lbl pc-size">Size ${esc(sizePctTxt(entry * sh))}</div>` : ""}</div></div>
     ${statusHtml}${newsHtml}
     <div class="pc-levels">
-      ${lvl("Entry", px(entry), `${shareStr(sh)} sh`)}
+      ${lvl("Entry", px(entry), `${shareStr(sh)} sh${entry && sh ? ` · ${money(entry * sh)}` : ""}`)}
       ${lvl("Stop", px(stop), entry && stop ? spct((100 * (stop - entry)) / entry) : "")}
       ${lvl("Target", px(tgt), entry && tgt ? spct((100 * (tgt - entry)) / entry) : "")}
       ${lvl("Hold day", `${Math.min(Math.max(1, held), maxH)} of ${maxH}`, end ? `ends ${mdShort(end)}` : "")}

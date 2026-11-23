@@ -588,7 +588,8 @@ def position_alert_updates(existing: dict, positions: list, scan_id: str, when: 
         if sg is not None and aid == f"x_{pos['asof']}_{pos['trade_id']}_{sg['code']}":
             ups[aid] = {"action": sg["action"], "urgency": sg["urgency"], "text": sg["text"], "new_stop": sg.get("new_stop"),
                         "last": pos["last"], "unrealized": pos["unrealized"], "days_held": pos["days_held"],
-                        "days_left": pos["days_left"], "refreshed_by": scan_id}
+                        "days_left": pos["days_left"], "refreshed_by": scan_id,
+                        "shares": pos.get("shares"), "cost": pos.get("cost"), "size_pct": pos.get("size_pct")}
         else:
             lbl = (pos.get("status") or {}).get("label") or "no action needed"
             ups[aid] = {"status": "superseded", "superseded_by": scan_id,
@@ -940,6 +941,7 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
                 gk = t.get("grade_kind") or (("topup" if al.get("topup_note") else "aplus") if al else None)
                 if gk:
                     res["grade_kind"] = gk
+                res.update(position_size(res.get("entry"), res.get("shares"), f["capital"]))
                 positions.append(res)
         except Exception as e:
             errors.append(f"monitor {t.get('ticker')}: {e!r}"[:200])
@@ -1020,7 +1022,8 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
                    "code": sg["code"], "action": sg["action"], "urgency": sg["urgency"],
                    "text": sg["text"], "new_stop": sg.get("new_stop"), "last": pos["last"],
                    "unrealized": pos["unrealized"], "days_held": pos["days_held"],
-                   "days_left": pos["days_left"], "created_at": ts, "scan_id": scan_id}
+                   "days_left": pos["days_left"], "created_at": ts, "scan_id": scan_id,
+                   "shares": pos.get("shares"), "cost": pos.get("cost"), "size_pct": pos.get("size_pct")}
             _write(out, writes, "set", "alerts", did, doc)
     ctx["position_alert_updates"] = position_alert_updates(existing, positions, scan_id, ctx.get("when") or "")
     week_start = today - dt.timedelta(days=today.weekday())
@@ -1484,7 +1487,10 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now, f
             line += " | paused today: " + ", ".join(S.meta(n, P)["label"] for n in mc["paused"])
         lines.append(line)
     lines.append(f"Capital {_money(f['capital'])} | cash free {_money(f['cash'])} | open positions {f['open_count']}"
-                 f"/{f.get('max_open') or P['risk']['max_open']}" + (f" | risk per trade {f['risk_pct']:g}% ({f['risk_reason']})" if f.get("risk_pct") else ""))
+                 f"/{f.get('max_open') or P['risk']['max_open']}"
+                 + (f" | invested {_money(f['open_cost'])} = {round(100 * f['open_cost'] / f['capital'], 1)}% of portfolio"
+                    if f.get("open_cost") and (f.get("capital") or 0) > 0 else "")
+                 + (f" | risk per trade {f['risk_pct']:g}% ({f['risk_reason']})" if f.get("risk_pct") else ""))
     d = scan["data"]
     for i, t in enumerate(scan.get("run_issues") or []):
         lines.insert(1 + i, f"⚠ RUN PROBLEM: {t}")
@@ -1498,7 +1504,8 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now, f
     day_add = 1 if scan["mode"] == "premarket" else 0
 
     def pos_line(p):
-        return f"[last ${p['last']}, P&L {pnl_mark(p.get('unrealized'))} ({p.get('unrealized_pct')}%), day {p['days_held'] + day_add} of {p['max_hold']}]"
+        size = f", size {size_text(p.get('size_pct'))}" if p.get("cost") else ""
+        return f"[last ${p['last']}, P&L {pnl_mark(p.get('unrealized'))} ({p.get('unrealized_pct')}%), day {p['days_held'] + day_add} of {p['max_hold']}{size}]"
 
     sigs = sorted(((p, sg) for p in positions for sg in p.get("signals", [])), key=lambda x: SIGNAL_ORDER.get(x[1]["code"], 99))
     exits = [(p, sg) for p, sg in sigs if sg["code"] in EXIT_CODES]
@@ -1573,7 +1580,9 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now, f
             if p.get("last") is None:
                 continue
             gk = {"aplus": "A+", "topup": "weekly top-up"}.get(p.get("grade_kind") or "")
-            lines.append(f"    {label}{f' ({gk})' if gk else ''} | entered {_day(p.get('entry_date'))} at ${p.get('entry')} x {sh} | last ${p['last']} "
+            size_part = f" = {_money(p['cost'])}, {size_text(p.get('size_pct'))}" if p.get("cost") else ""
+            lines.append(f"    {label}{f' ({gk})' if gk else ''} | entered {_day(p.get('entry_date'))} at ${p.get('entry')} x {sh}"
+                         f"{size_part} | last ${p['last']} "
                          f"| P&L {pnl_mark(p.get('unrealized'))} ({_pct(p['last'], p.get('entry'))}) "
                          f"| day {p.get('day_now') or min(p['days_held'] + day_add, p['max_hold'])} of {p['max_hold']}"
                          f"{f', time stop at the close of {_day(end)}' if end else ''} | stop ${p.get('stop')} | target ${p.get('target')}")
@@ -1655,6 +1664,22 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now, f
     return mark_caution("\n".join(lines))
 
 
+def position_size(entry, shares, capital) -> dict:
+    """What a position cost and its share of the portfolio (cost over capital, the same measure an alert's size uses).
+    Owner, Nov 22, 2026: every alert and every position shows its size as a % of the portfolio."""
+    try:
+        cost = float(entry or 0) * float(shares or 0)
+        if cost <= 0:
+            return {}
+        return {"cost": round(cost, 2), "size_pct": round(100 * cost / float(capital), 1) if capital and float(capital) > 0 else None}
+    except Exception:
+        return {}
+
+
+def size_text(pct) -> str:
+    return f"{pct}% of portfolio" if pct is not None else "size % unknown"
+
+
 def compact_line(e: dict) -> str:
     """One line with everything needed to place the order (a long also-qualified list)."""
     grade = "top-up" if e.get("topup_note") else e.get("grade", "A+")
@@ -1662,7 +1687,7 @@ def compact_line(e: dict) -> str:
     news = f" | news {e['news_check']}" if e.get("news_check") and e["news_check"] != "pending" else ""
     return (f"- {e['ticker']} | {e.get('strategy_label', e.get('strategy'))} | {grade} {e.get('score')} | win {e.get('win_pct')}% | "
             f"buy limit ${e.get('entry')}, stop ${e.get('stop')}, target ${e.get('target')} | "
-            f"{e.get('shares')}{frac} sh, risk ${e.get('risk_usd')} | hold up to {e.get('hold_max_days')} days{news}")
+            f"{e.get('shares')}{frac} sh = ${e.get('total_cost')}, {size_text(e.get('pct_of_capital'))}, risk ${e.get('risk_usd')} | hold up to {e.get('hold_max_days')} days{news}")
 
 
 def news_order(entries: list[dict], n: int = 10) -> list[str]:
@@ -1699,7 +1724,7 @@ def fit_scan_doc(scan_doc: dict, build) -> dict:
                               "card with the full order, and the email lists them all.")
     if doc_bytes(scan_doc) > DOC_LIMIT and scan_doc.get("alert_updates"):
         # refreshes of setups that still stand: keep what the card needs to rank and size them, drop the rest
-        keep = set(ALWAYS_SENT) | {"score", "grade", "news_check", "news_note", "also_qualified", "shares", "total_cost",
+        keep = set(ALWAYS_SENT) | {"score", "grade", "news_check", "news_note", "also_qualified", "shares", "total_cost", "pct_of_capital",
                                    "risk_usd", "entry", "stop", "target", "withdrawn_reason", "carried", "withdrawn_at",
                                    "ticker", "hold_note", "price_now"}
         scan_doc["alert_updates"] = {k: ({f: v for f, v in u.items() if f in keep} if isinstance(u, dict) and not u.get("withdrawn")
@@ -1728,7 +1753,7 @@ def setup_block(e: dict, rank) -> list[str]:
                f"reward:risk {e['rr']}")
     cap = e.get("pct_of_capital")
     out.append(f"   SIZE     {e['shares']} share{'s' if e['shares'] != 1 else ''}{frac} = ${e['total_cost']:,.2f}"
-               f"{f' ({cap}% of capital)' if cap is not None else ''} | risk if stopped ${e['risk_usd']}")
+               f"{f' = {size_text(cap)}' if cap is not None else ''} | risk if stopped ${e['risk_usd']}")
     end = _hold_end(e.get("valid_for"), e.get("hold_max_days") or 0)
     out.append(f"   HOLD     up to {e['hold_max_days']} sessions (typical {e.get('hold_typical_days', '?')})"
                f"{f'; time stop at the close of {_day(end)}' if end else ''}")
