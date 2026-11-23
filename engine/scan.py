@@ -365,7 +365,11 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
         if cd["grade"] != "A+" and not cd.get("topup"):
             BELOW_BAR[cd["ticker"]] = {"score": float(cd["score"]), "model_p": float(cd.get("model_p", cd["p"])),
                                        "floor": floor, "top_p": top_p, "aplus_score": float(G.get("aplus_score", 0)),
-                                       "aplus_pwin": float(G.get("aplus_pwin", 0))}
+                                       "aplus_pwin": float(G.get("aplus_pwin", 0)),
+                                       # the wider list trades behind its own higher bar (Nov 22: 80%+ against 76%+)
+                                       **({"tier": "ext", "ext_pwin": float(G.get("aplus_pwin", 0)) + ext_add,
+                                           "ext_only": bool(S.ext_rule(P).get("aplus_only", True))}
+                                          if cd.get("tier") == "ext" else {})}
     out, near = [], []
     cap_left = int(settings.get("max_open_positions", P["risk"]["max_open"])) - f["open_count"]
     cash_left = f["cash"]
@@ -706,6 +710,21 @@ def hold_at_limit(w: dict, universe, P: dict, state: dict, entries: list, earnin
     return out
 
 
+def below_bar_reason(bb: dict, when) -> str:
+    """Why a sent setup no longer qualifies, against the bar that applies to it. A wider-list ticker trades behind its
+    own higher A+ bar and sends no top-ups; on Nov 22 its withdrawals quoted the original list's 76% bar beside a
+    model win of 80% (just under the wider list's 80%), which read as a contradiction."""
+    head = (f"No longer clears the bar in the {when} scan: score {bb['score']:.1f}, model win "
+            f"{100 * bb['model_p']:.1f}%" if bb.get("tier") == "ext" else
+            f"No longer clears the bar in the {when} scan: score {bb['score']:.1f}, model win {100 * bb['model_p']:.0f}%")
+    if bb.get("tier") == "ext":
+        return (head + f" (wider list: A+ only, score {bb['aplus_score']:.0f}+ and model win {100 * bb['ext_pwin']:.0f}%+, "
+                f"higher than the original list's {100 * bb['aplus_pwin']:.0f}% because the model was never tuned on these "
+                "tickers; this week's recalibration set that bar).")
+    return (head + f" (weekly top-up bar: score {bb['floor']:.0f}+ and model win {100 * bb['top_p']:.0f}%+; "
+            f"A+ bar: score {bb['aplus_score']:.0f}+ and {100 * bb['aplus_pwin']:.0f}%+).")
+
+
 def overlay_diff(u: dict, card: dict | None) -> dict:
     """Only what differs from the alert card already on the dashboard. The dashboard lays the newest scan's update
     over the card itself (not over earlier updates), so a field equal to the card's says nothing. Nov 22, 2026: 414
@@ -735,9 +754,7 @@ def build_overlay(scan_doc: dict, entries: list, ctx: dict, alerts: dict | None 
         tk = a.get("ticker")
         bb = (scan_doc.get("below_bar") or BELOW_BAR).get(tk)
         reason = (f"Dropped by the {ctx.get('when')} scan's news check: {dropped[tk]}" if tk in dropped else
-                  (f"No longer clears the bar in the {ctx.get('when')} scan: score {bb['score']:.1f}, model win "
-                   f"{100 * bb['model_p']:.0f}% (weekly top-up bar: score {bb['floor']:.0f}+ and model win "
-                   f"{100 * bb['top_p']:.0f}%+; A+ bar: score {bb['aplus_score']:.0f}+ and {100 * bb['aplus_pwin']:.0f}%+)."
+                  (below_bar_reason(bb, ctx.get('when'))
                    if bb else
                    f"No longer qualifies in the {ctx.get('when')} scan (price or indicators moved, or a stronger setup "
                    "on the same ticker replaced it)."))

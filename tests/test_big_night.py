@@ -175,3 +175,13 @@ def test_postprocess_keeps_carried_withdrawals(tmp_path, monkeypatch):
     pp.apply(str(out), ["T000=clean", "T001=clean", "T002=clean"])
     doc = json.loads((out / "docs" / "scans" / "20261122-1619-auto.json").read_text())
     assert doc["alert_updates"]["e_old_MRNA"]["carried"] is True
+
+
+def test_wider_list_withdrawal_quotes_its_own_bar():
+    """Nov 22: wider-list setups withdrawn at model win 79.8% read "model win 80% ... A+ bar 76%+"."""
+    bb = {"score": 99.6, "model_p": 0.7976, "floor": 42, "top_p": 0.5, "aplus_score": 50, "aplus_pwin": 0.76,
+          "tier": "ext", "ext_pwin": 0.80}
+    t = S.below_bar_reason(bb, "4:19 pm")
+    assert "79.8%" in t and "80%+" in t and "wider list" in t and "top-up bar" not in t
+    core = S.below_bar_reason({k: v for k, v in bb.items() if k not in ("tier", "ext_pwin")}, "4:19 pm")
+    assert "A+ bar: score 50+ and 76%+" in core
