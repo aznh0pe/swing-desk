@@ -975,6 +975,8 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
                        and not (prev_ov.get(aid) or {}).get("withdrawn") and not a.get("withdrawn"))
         if fc and (a.get("status") == "placed" or unmarked_ok):
             fc["id"] = fc.get("alert_id") or aid
+            if a.get("status") != "placed" and is_swap_list(a, prev_ov.get(aid)):
+                fc["swap"] = True  # never featured, never marked placed: not an order you were told to place
             fill_checks.append(fc)
         if vf < today or (vf == today and mode == "postclose" and cal.market_phase(now) in ("postclose", "closed_day")):
             if a.get("status") in ("new", None):  # a placed order is resolved by its fill check (below and on the dashboard)
@@ -1055,14 +1057,17 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
         "counts": {"aplus": sum(1 for e in entries if not e.get("sent_earlier")),
                    "topups": sum(1 for e in entries if e.get("topup_note") and not e.get("sent_earlier")),
                    "sent_earlier": sum(1 for e in entries if e.get("sent_earlier")), "near_misses": len(near), **signal_counts(positions),
-                   "orders_to_record": sum(1 for c in fill_checks if c.get("filled")),
+                   "orders_to_record": sum(1 for c in fill_checks if c.get("filled") and not c.get("swap")),
                    "orders_to_check": sum(1 for c in fill_checks if (c.get("status") == "placed" or c.get("at_close"))
-                                          and (c.get("filled") is None or c.get("touched"))),
+                                          and (c.get("filled") is None or c.get("touched")) and not c.get("swap")),
+                   "swap_list_fills": sum(1 for c in fill_checks if c.get("swap")),
                    "orders_unfilled": sum(1 for c in fill_checks if c.get("filled") is False and not c.get("touched")),
                    "open_positions": len(positions), "expired": len(expire), "week_aplus": week_aplus,
                    "week_topups": week_topups,
                    "new_docs": len(writes)},
-        "positions": positions, "near_misses": near[:8], "premarket_checks": pm_checks, "fill_checks": fill_checks[:30],
+        "positions": positions, "near_misses": near[:8], "premarket_checks": pm_checks,
+        # featured and placed orders first, so the cap can never push one of them out (Nov 23: it dropped ADP)
+        "fill_checks": sorted(fill_checks, key=lambda c: bool(c.get("swap")))[:40],
         "expired_alert_ids": [a for a, _ in expire][:50],
         "params_version": P.get("version"), "errors": errors[:40], "notes": notes, "week_min": week_min(state["settings"]),
         "topup_pace": dict(TOPUP_STATE) if mode == "postclose" else None,
@@ -1160,6 +1165,17 @@ def ask_unmarked(last_day, last_session) -> bool:
     so by that evening's post-close scan Friday's order had dropped out of the digest unanswered, and by the
     next morning it had left the dashboard too. A filled order nobody recorded is a position no scan watches."""
     return str(last_day) >= str(cal.prev_trading_day(last_session, UNMARKED_ASK_SESSIONS - 1))
+
+
+def is_swap_list(a: dict, ov: dict | None) -> bool:
+    """A setup that was only ever on the "also qualified" swap list, by the dashboard's newest view of it (a later
+    scan can promote it into the featured list, and the overlay then says so). Nov 23, 2026: ADP (buy limit $299.08)
+    was one of ~250 swap-list setups for Monday, never featured and never marked placed; the morning email showed
+    it only as one "KEEP" line among 250, and the post-close scan then asked "did your ADP order fill?" at the top
+    of the email, as if it had been an order the owner was told to place. Such a setup is listed apart, in one
+    line, with a way to record it if it was placed after all, and never as an order to record."""
+    ov = ov or {}
+    return bool(ov["also_qualified"] if "also_qualified" in ov else a.get("also_qualified"))
 
 
 def close_snapshot(w: dict, universe, asof) -> dict:
@@ -1548,7 +1564,8 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now, f
         lines += ["", "=== FILLS TO CONFIRM (your bracket order probably already handled these) ==="]
         for p, sg in fills:
             lines.append(f"- {p['ticker']}: {sg['action']}. {sg['text']} {pos_line(p)}")
-    fcs = scan.get("fill_checks") or []
+    all_fcs = scan.get("fill_checks") or []
+    fcs = [c for c in all_fcs if not c.get("swap")]  # swap-list setups were never orders: one line below, not a question each
     rec = [c for c in fcs if c.get("filled")]
     ask = [c for c in fcs if (c.get("filled") is None or c.get("touched")) and (c.get("status") == "placed" or c.get("at_close"))]
     if rec or ask:
@@ -1556,6 +1573,13 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now, f
         for c in rec + ask:
             how = "buy near the close" if c.get("at_close") else f"buy limit {_money(c.get('limit'))}"
             lines.append(f"- {c['ticker']} ({how}, {_day(c['valid_for'])}{', marked placed' if c.get('status') == 'placed' else ''}): {c['text']}")
+    swap = [c for c in all_fcs if c.get("swap")]
+    n_swap = max(len(swap), int((scan.get("counts") or {}).get("swap_list_fills") or 0))
+    if n_swap:
+        lines += ["", f"Not orders: {n_swap} setup{'s' if n_swap != 1 else ''} from the \"also qualified\" swap list traded through "
+                  f"{'their limits' if n_swap != 1 else 'its limit'} ({', '.join(sorted({c['ticker'] for c in swap})[:12])}"
+                  f"{', ...' if n_swap > 12 else ''}). They were never featured and you never marked them placed, so "
+                  "nothing to record. If you did place one, mark it filled under \"Swap-list setups\" on the dashboard."]
     recent_day = str(now.date() if scan["mode"] == "postclose" and not (scan.get("data") or {}).get("partial_bar")
                      else cal.prev_trading_day(now.date()))
     gone = [c for c in fcs if c.get("filled") is False and not c.get("touched") and c.get("status") == "placed"

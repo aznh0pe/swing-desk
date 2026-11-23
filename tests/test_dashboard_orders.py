@@ -19,7 +19,7 @@ HTML = (ROOT / "dashboard" / "index.html").read_text()
 WANT = ("const fmtPT", "const todayPT", "const fmtHM", "const nowHM", "const HOLIDAYS", "const EARLY_CLOSES", "function isTradingDay",
         "function addDays", "function nextTD", "function prevTD", "function lastValidDay", "function sessionOver",
         "function fillCheckMap", "function orderResolutions", "function resolveCard", "const num", "const px", "const pct",
-        "function dShort", "function dtShort")
+        "function dShort", "function dtShort", "function isSwapList", "function swapListFills")
 
 
 def _functions():

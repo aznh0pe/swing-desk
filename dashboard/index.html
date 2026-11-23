@@ -444,12 +444,23 @@ function orderResolutions() {
     const fc = fcm[a.id];
     if (a.status === "placed") { if (fc?.filled === false && !fc.touched) continue; out.push({ a, fc, kind: fc?.filled ? "likely" : "ask" }); }
     else if (a.status === "new" && !a.withdrawn && (lastValidDay(a) || "") >= recent) {
+      // Nov 23, 2026: a swap-list ("also qualified") setup was never an order you were told to place: never a question here
+      if (isSwapList(a, fc)) continue;
       if (fc?.filled) out.push({ a, fc, kind: "unmarked" });
       // bought near the close: no price check can tell whether you bought it, so it is asked about the same way
       else if (a.entry_kind === "close" || fc?.at_close) out.push({ a, fc, kind: "unmarked_close" });
     }
   }
   return out.sort((x, y) => String(y.a.valid_for).localeCompare(String(x.a.valid_for)));
+}
+function isSwapList(a, fc) { return !!(a.also_qualified || fc?.swap); }
+// swap-list setups whose limit traded through in the last 3 sessions: listed apart, in case one was placed after all
+function swapListFills() {
+  const fcm = fillCheckMap(), recent = prevTD(prevTD(prevTD(todayPT())));
+  return S.alerts.filter((a) => a.type === "entry" && a.status === "new" && !a.withdrawn && sessionOver(a)
+      && (lastValidDay(a) || "") >= recent && isSwapList(a, fcm[a.id]) && fcm[a.id]?.filled)
+    .map((a) => ({ a, fc: fcm[a.id] }))
+    .sort((x, y) => String(y.a.valid_for).localeCompare(String(x.a.valid_for)) || String(x.a.ticker).localeCompare(String(y.a.ticker)));
 }
 const AUTO_DONE = new Set();
 async function autoExpireOrders() {
@@ -1027,6 +1038,13 @@ function viewAlerts() {
   const res = orderResolutions();
   let html = res.length ? `<section class="section"><div class="section-head"><h2>Did these orders fill?</h2><span class="meta">Their sessions are over · one tap records the result</span></div>
     <div class="grid">${res.map(resolveCard).join("")}</div></section>` : "";
+  const swaps = swapListFills();
+  if (swaps.length) html += `<section class="section"><details class="panel"><summary>Swap-list setups that traded through their limit (${swaps.length}): not orders, nothing to do unless you placed one</summary>
+    <p class="small muted" style="margin:8px 0">These were on the "also qualified" list, never featured, and you never marked them placed. If you placed one anyway, record it here so the scans watch it.</p>
+    <div class="tbl-wrap"><table><thead><tr><th>Ticker</th><th>Day</th><th class="n">Limit</th><th class="n">Day's low</th><th class="n">Stop</th><th class="n">Target</th><th></th></tr></thead><tbody>
+    ${swaps.map(({ a, fc }) => `<tr><td><span class="t">${esc(a.ticker)}</span></td><td>${dShort(lastValidDay(a))}</td><td class="n">${px(a.entry)}</td><td class="n">${px(fc.low)}</td><td class="n">${px(a.stop)}</td><td class="n">${px(a.target)}</td>
+      <td class="n" style="white-space:nowrap"><button class="btn small" type="button" data-act="fill" data-id="${esc(a.id)}">I placed it: filled</button> <button class="btn ghost small" type="button" data-act="skip" data-id="${esc(a.id)}">Didn't place it</button></td></tr>`).join("")}
+    </tbody></table></div></details></section>`;
   html += `<section class="section"><div class="section-head"><h2>Action needed on open positions</h2><span class="meta">Exit early, raise a stop, confirm a fill, or read news on a position</span></div>`;
   html += actions.length ? `<div class="grid">${actions.map(posActionCard).join("")}</div>` : `<div class="empty">No open position needs action right now: the latest scan says keep holding. The pre-close scan (12:25 PM PT) and post-close scan (2:05 PM PT) re-check every open position.</div>`;
   html += `</section><section class="section"><div class="section-head"><h2>New A+ opportunities</h2>
