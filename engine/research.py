@@ -97,7 +97,8 @@ def retest_specs(state_dir, cap: int = 12, now=None) -> list[dict]:
     return out[:cap] + stale[:STALE_CAP]
 
 
-def candidate_specs(state_dir, old_params: dict | None = None, cap: int = 6, extra_results: list | None = None) -> dict:
+def candidate_specs(state_dir, old_params: dict | None = None, cap: int = 6, extra_results: list | None = None,
+                    data_dir=None) -> dict:
     """Specs the weekly recalibration should evaluate: every strategy promoted earlier (always, never capped:
     one left out would silently drop out of the live params) plus up to `cap` new research candidates, best
     first. Nov 12, 2026: the cap used to cover both, so once six strategies had been promoted no new candidate
@@ -106,6 +107,7 @@ def candidate_specs(state_dir, old_params: dict | None = None, cap: int = 6, ext
     for r in extra_results or []:
         results[r["id"]] = r
     latest = latest_results(results)
+    cond_now = (market_now(state_dir, None, data_dir) or {}).get("condition")
     keep = {iid: cu["spec"] for iid, cu in ((old_params or {}).get("custom") or {}).items() if cu.get("spec")}
     for iid, sp_ in list(keep.items()):  # an own-record strategy is re-tested in the market conditions it trades
         sa = (((old_params or {}).get("strategies") or {}).get(iid) or {}).get("standalone") or {}
@@ -122,8 +124,10 @@ def candidate_specs(state_dir, old_params: dict | None = None, cap: int = 6, ext
                 sp_["market_conditions"] = list(r["market_conditions"])
             win_ = ((r.get("graded") or {}).get("periods", {}).get("oos", {}).get("win_rate") if r.get("graded_ok") else None) \
                 or (r.get("specialist") or {}).get("oos", {}).get("win_rate") or (r.get("oos") or {}).get("win_rate") or 0
-            pool[iid] = (float(win_), sp_)
-    ranked = sorted(pool.items(), key=lambda kv: -kv[1][0])[:cap]
+            pri = today_fit(r.get("by_condition"), r.get("all_weather"), cond_now)["priority"]
+            pool[iid] = (float(win_), sp_, pri)
+    # the desk's order (Nov 22, 2026): all-weather first, then what works in today's market condition, then the rest
+    ranked = sorted(pool.items(), key=lambda kv: (kv[1][2], -kv[1][0]))[:cap]
     return {**keep, **{k: v[1] for k, v in ranked}}
 
 
@@ -563,6 +567,233 @@ def research_focus(state_dir) -> dict | None:
             "live": live, "condition_gap": gap}
 
 
+# ----------------------------------------------------------------------------- today's market condition (Nov 22, 2026)
+# The owner's standing order: every day hunt for strategies that hold up in ANY market condition and for the ones that
+# work best in the condition the market is in TODAY. So every research run knows today's condition (from the newest
+# bars when it has them, otherwise from the newest scan), every test says how the idea did in it, and the day's plan
+# names both targets.
+TODAY_FIT = {"train_n": 40, "oos_n": 25, "win": 0.70, "pf": 1.2}   # "works in today's condition": both periods
+
+
+def _condition_from_frame(mk: pd.DataFrame, source: str) -> dict | None:
+    cs = S.condition_series(mk).dropna()
+    if not len(cs):
+        return None
+    c = str(cs.iloc[-1])
+    run = int((cs[::-1] != c).values.argmax()) if (cs != c).any() else len(cs)
+    last = mk.iloc[-1]
+    return {"condition": c, "label": S.CONDITION_LABEL.get(c, c), "plural": S.CONDITION_PLURAL.get(c, c),
+            "asof": str(cs.index[-1].date()), "days": run, "source": source,
+            "market": {"spy_vs_200d_pct": round(100 * float(last.get("spy_dist200")), 1) if pd.notna(last.get("spy_dist200")) else None,
+                       "spy_5d_pct": round(100 * float(last.get("spy_ret5")), 1) if pd.notna(last.get("spy_ret5")) else None,
+                       "vix_vs_20d": round(float(last.get("vix_ratio")), 2) if pd.notna(last.get("vix_ratio")) else None}}
+
+
+def _daily_market(data_dir) -> pd.DataFrame | None:
+    """SPY's trend, its 5-day move and the VIX against its 20-day average from the daily price file: the file every
+    scan reads, refreshed each session. (The long history a test runs on is rebuilt weekly, so its last bar can be
+    days old: on Nov 22, 2026 it ended Nov 16, in a bull-market pullback, when the market had been in a bear-market
+    selloff since Nov 19. Today's condition never comes from there when the daily file is at hand.)"""
+    c = D.load_daily(data_dir)["close"]
+    if "SPY" not in c.columns:
+        return None
+    spy = c["SPY"].dropna()
+    mk = pd.DataFrame(index=spy.index)
+    sma = spy.rolling(200, min_periods=150).mean()
+    mk["spy_above200"] = (spy > sma).astype(float).where(sma.notna())
+    mk["spy_dist200"] = spy / sma - 1
+    mk["spy_ret5"] = spy / spy.shift(5) - 1
+    vix = c["^VIX"].reindex(spy.index).ffill() if "^VIX" in c.columns else pd.Series(np.nan, index=spy.index)
+    mk["vix_ratio"] = vix / vix.rolling(20, min_periods=10).mean()
+    return mk
+
+
+def market_now(state_dir=None, ind: dict | None = None, data_dir=None, now=None) -> dict | None:
+    """Today's market condition: {"condition", "label", "plural", "asof", "days" (sessions in a row), "source"}.
+    Every source at hand is read and the one with the newest bar wins: the daily price file, the newest scan on the
+    dashboard, the test's own history."""
+    found = []
+    try:
+        if data_dir:
+            mk = _daily_market(data_dir)
+            if mk is not None:
+                found.append(_condition_from_frame(mk, "daily prices"))
+    except Exception:
+        pass
+    try:
+        if ind is not None and ind.get("market") is not None:
+            found.append(_condition_from_frame(ind["market"], "test history"))
+    except Exception:
+        pass
+    sc = _scan_condition(state_dir)
+    if sc:
+        found.append(sc)
+    found = [f for f in found if f]
+    if not found:
+        return None
+    order = {"daily prices": 0, "newest scan": 1, "test history": 2}
+    best = sorted(found, key=lambda f: (str(f.get("asof")), -order.get(f["source"], 9)))[-1]
+    if best["source"] != "newest scan" and sc and sc.get("market") and str(sc.get("asof")) == str(best.get("asof")):
+        best = {**best, "market": {**(sc.get("market") or {}), **{k: v for k, v in (best.get("market") or {}).items() if v is not None}}}
+    stale = [f"{f['source']} ends {f['asof']} ({f['label'].lower()})" for f in found
+             if f is not best and str(f.get("asof")) < str(best.get("asof")) and f["condition"] != best["condition"]]
+    if stale:
+        best = {**best, "older_sources_disagree": stale}
+    try:   # the condition must describe the latest finished session: say so loudly when it does not
+        last = cal.last_completed_session(now)
+        behind = cal.trading_days_between(dt.date.fromisoformat(str(best["asof"])[:10]), last)
+        if behind > 0:
+            best = {**best, "sessions_behind": int(behind),
+                    "warning": (f"Today's market condition is from {best['asof']}, {behind} session{'s' if behind != 1 else ''} "
+                                f"behind the latest finished session ({last}): the daily price file was not refreshed. "
+                                "Add this line to ISSUES.")}
+    except Exception:
+        pass
+    return best
+
+
+def _scan_condition(state_dir) -> dict | None:
+    try:
+        st = load_state(state_dir) if state_dir else {}
+    except Exception:
+        st = {}
+    by_day = {}
+    for v in (st.get("scans") or {}).values():
+        d = v.get("doc") or {}
+        c = (d.get("market") or {}).get("condition")
+        day = (d.get("data") or {}).get("last_bar")
+        if c and day and d.get("status") in ("ok", "ok_with_warnings"):
+            key = (str(day), str(d.get("started_at") or ""))
+            if str(day) not in by_day or key > by_day[str(day)][0]:
+                by_day[str(day)] = (key, c, d.get("market") or {})
+    if not by_day:
+        return None
+    days = sorted(by_day)
+    c = by_day[days[-1]][1]
+    run = 0
+    for dy in reversed(days):
+        if by_day[dy][1] != c:
+            break
+        run += 1
+    m = by_day[days[-1]][2]
+    return {"condition": c, "label": S.CONDITION_LABEL.get(c, c), "plural": S.CONDITION_PLURAL.get(c, c), "asof": days[-1],
+            "days": run, "days_at_least": run == len(days), "source": "newest scan",
+            "market": {k: m.get(k) for k in ("label", "spy_vs_200d_pct", "spy_5d_pct", "vix", "vix_vs_20d", "breadth_above_50d_pct")}}
+
+
+def today_fit(bc: dict | None, aw: dict | None, cond: str | None) -> dict:
+    """How an idea stands on the desk's two daily priorities: holding up in every market condition, and working in
+    today's. priority: 1 = all-weather (it works today too), 2 = works in today's condition, 3 = neither."""
+    d = ((bc or {}).get(cond) or {}) if cond else {}
+    tr_, oo = d.get("train") or {}, d.get("oos") or {}
+    q = TODAY_FIT
+    enough = (tr_.get("trades") or 0) >= q["train_n"] and (oo.get("trades") or 0) >= q["oos_n"]
+    fits = bool(enough and min(tr_.get("win_rate") or 0, oo.get("win_rate") or 0) >= q["win"]
+                and min(tr_.get("profit_factor") or 0, oo.get("profit_factor") or 0) >= q["pf"])
+    allw = bool((aw or {}).get("all_weather"))
+    out = {"condition": cond, "train": tr_ or None, "oos": oo or None, "enough_trades": bool(enough), "fits_today": fits,
+           "all_weather": allw, "priority": 1 if allw else (2 if fits else 3)}
+    if cond:
+        def per(x, name):
+            if not x.get("trades"):
+                return f"{name} no trades"
+            return (f"{name} won {100 * (x.get('win_rate') or 0):.0f}% of {x['trades']}"
+                    + (f" (profit factor {x['profit_factor']})" if x.get("profit_factor") is not None else ""))
+        out["sentence"] = (f" In today's market condition ({S.CONDITION_LABEL.get(cond, cond).lower()}): {per(tr_, '2008-2021')}, "
+                           f"{per(oo, '2022-now')}"
+                           + ("; it works here." if fits else ("; too few trades here to judge." if not enough else "; not strong enough here."))
+                           )
+    return out
+
+
+def spec_aim(spec: dict | None) -> str | None:
+    """Which of the two daily targets an idea was built for: its "aim" field ("today" or "all_weather"), or, for
+    ideas written before the field existed, "today" when the rule is tied to market conditions."""
+    sp_ = spec or {}
+    a = str(sp_.get("aim") or "").lower().replace("-", "_")
+    if a in ("today", "all_weather"):
+        return a
+    return "today" if sp_.get("market_conditions") else None
+
+
+def own_design_aim(latest: dict, ideas: dict, cond: str) -> dict:
+    """The desk designs its own strategy every day, and both targets must keep getting one: today's own design aims
+    at the target the last one did not."""
+    own = []
+    for iid, idea in (ideas or {}).items():
+        sp_ = (idea or {}).get("spec") or {}
+        if "own design" in str((sp_.get("source") or {}).get("title") or "").lower():
+            own.append((str((latest.get(iid) or {}).get("tested_at") or ""), iid, spec_aim(sp_)))
+    own.sort()
+    last = own[-1] if own else None
+    aim = "all_weather" if (last and last[2] == "today") else "today"
+    lab = S.CONDITION_LABEL.get(cond, cond).lower()
+    return {"aim": aim, "last_own_design": last[1] if last else None, "last_aim": last[2] if last else None,
+            "do": (f"Today's own design aims at {'every market condition (all-weather: no market filter, and the rule must hold in each condition in both periods)' if aim == 'all_weather' else 'today' + chr(39) + 's market condition (' + lab + ')'}"
+                   f"{', because the last one (' + last[1] + ') was built for ' + ('one market condition' if last[2] == 'today' else 'every condition or had no stated aim') if last else ''}. "
+                   "Put \"aim\": \"" + aim + "\" in its spec. If the day allows a second own design, build it for the other target.")}
+
+
+def today_plan(st: dict, now_: dict | None, latest: dict, ideas: dict) -> dict | None:
+    """The day's two targets, with what the desk already has for each: the live strategies' record in today's
+    condition, and the tested ideas that came closest (so the next variant starts from them, not from nothing)."""
+    if not now_:
+        return None
+    c = now_["condition"]
+    pd_ = st.get("params_doc") or {}
+    P = pd_.get("params") or pd_
+    pc = P.get("conditions") or {}
+    live = {n for n, v in (P.get("strategies") or {}).items() if v.get("enabled", True)}
+    rows = []
+    for n, tb in (pc.get("table") or {}).items():
+        if n not in live:
+            continue
+        tr_, oo = (tb.get(c) or {}).get("train") or {}, (tb.get(c) or {}).get("oos") or {}
+        if (oo.get("trades") or 0) >= 20:
+            rows.append({"strategy": n, "label": S.meta(n, P)["label"], "oos_win": oo.get("win_rate"), "oos_trades": oo.get("trades"),
+                         "oos_pf": oo.get("profit_factor"), "train_win": tr_.get("win_rate"),
+                         "all_weather": bool(((pc.get("all_weather") or {}).get(n) or {}).get("all_weather"))})
+    rows.sort(key=lambda r: -(r["oos_win"] or 0))
+    ap = (pc.get("aplus") or {}).get(c) or {}
+    close_today, close_all = [], []
+    for iid, r in latest.items():
+        if iid in live or iid not in ideas:
+            continue
+        tf = today_fit(r.get("by_condition"), r.get("all_weather"), c)
+        row = {"id": iid, "label": r.get("label"), "verdict": r.get("verdict"),
+               "today_train_win": (tf["train"] or {}).get("win_rate"), "today_oos_win": (tf["oos"] or {}).get("win_rate"),
+               "today_oos_trades": (tf["oos"] or {}).get("trades"), "planned_rr": ((r.get("payoff") or {}).get("oos") or {}).get("planned_rr")}
+        if tf["all_weather"]:
+            close_all.append({**row, "oos_win": (r.get("oos") or {}).get("win_rate")})
+        if tf["enough_trades"]:
+            close_today.append({**row, "_k": min(row["today_train_win"] or 0, row["today_oos_win"] or 0), "fits_today": tf["fits_today"]})
+    close_today.sort(key=lambda r: -r["_k"])
+    for r in close_today:
+        r.pop("_k", None)
+    aw_live = [r["label"] for r in rows if r["all_weather"]]
+    lab = now_["label"].lower()
+    own = own_design_aim(latest, ideas, c)
+    return {
+        "own_design_today": own,
+        "condition": c, "label": now_["label"], "asof": now_.get("asof"), "sessions_in_a_row": now_.get("days"),
+        "market": now_.get("market"), "source": now_.get("source"),
+        "aplus_here_2022_now": {"win_rate": ap.get("win_rate"), "trades": ap.get("trades"), "profit_factor": ap.get("profit_factor")},
+        "live_strongest_here": rows[:4], "live_weakest_here": rows[-3:][::-1] if len(rows) > 4 else [],
+        "live_all_weather": aw_live,
+        "ideas_closest_for_today": close_today[:6], "ideas_all_weather_not_live": close_all[:6],
+        "every_day": (f"Today's market condition is: {lab}. Of the ideas you test today, at least one must be built for this "
+                      f"condition (a setup that should win in {now_['plural']}), and at least one must aim to be all-weather "
+                      "(the same rule holding up in every market condition, both periods). Your own design serves one of the two: "
+                      "run the `states` scan on a base trade and read the buckets for today's condition first. Every test's result "
+                      "has a \"today\" block: say in the journal how each idea did in today's condition and whether it is "
+                      "all-weather. Win rate comes first, then profit; between two versions that test alike, keep the one whose "
+                      "target is at least as far as its stop (reward at least the risk)."),
+        "how_ideas_are_ranked": ("1 = all-weather (works in every condition, today's included); 2 = works in today's condition "
+                                 f"({100 * TODAY_FIT['win']:.0f}%+ wins and profit factor {TODAY_FIT['pf']}+ there in both periods); "
+                                 "3 = neither. The promotion check takes candidates in that order."),
+    }
+
+
 def live_week_gap(st: dict, mn: int, weeks: int = 4) -> dict:
     """How many setups each recent week actually sent (A+ setups and weekly top-ups, by signal week)."""
     import datetime as _dt
@@ -603,7 +834,8 @@ def _compact(st: dict) -> dict:
     return {k: st.get(k) for k in STAT_KEYS if k in st}
 
 
-def evaluate_spec(spec: dict, ind: dict, P: dict, P_live: dict, split, now, by="research", log=print) -> dict:
+def evaluate_spec(spec: dict, ind: dict, P: dict, P_live: dict, split, now, by="research", log=print,
+                  today: dict | None = None) -> dict:
     t0 = time.time()
     rid = f"{spec['id']}-{now.strftime('%Y%m%d-%H%M')}"
     base = {"id": rid, "idea_id": spec["id"], "label": spec.get("label"), "family": spec.get("family"),
@@ -730,6 +962,9 @@ def evaluate_spec(spec: dict, ind: dict, P: dict, P_live: dict, split, now, by="
         po = {"error": repr(ex)[:200]}
     if po.get("sentence"):
         summary += po["sentence"]
+    tf = today_fit(bc, aw, (today or {}).get("condition"))
+    if tf.get("sentence"):
+        summary += tf["sentence"]
     variant = res["variant"]
     path = None
     if verdict != "candidate":
@@ -747,6 +982,7 @@ def evaluate_spec(spec: dict, ind: dict, P: dict, P_live: dict, split, now, by="
            "train": _compact(st_train), "oos": _compact(st_test), "overlap_live": round(overlap, 3),
            "oos_signals_per_week": round(per_week, 2), "grade_preview": gp, "by_condition": bc, "all_weather": aw,
            "graded": gc, "graded_ok": graded_ok, "payoff": {k: v for k, v in po.items() if k != "sentence"},
+           "today": {k: v for k, v in tf.items() if k != "sentence"},
            **({"market_conditions": special["conditions"], "specialist": special} if special else
               ({"market_conditions": spec_conds} if spec_conds else {})),
            "yearly": B.yearly(tr).reset_index().to_dict("records")[-20:],
@@ -769,10 +1005,13 @@ def run_tests(specs: list[dict], data_dir, state_dir, out_dir, split="2022-01-01
     known = load_ideas(state_dir)
     for spec in ideas_to_add or []:
         _write(out, writes, "research", spec["id"], idea_doc(spec, (by_idea or {}).get(spec["id"], by), now, known))
+    today = market_now(state_dir, ind, data_dir)
+    if today:
+        log(f"today's market condition: {today['label']} ({today.get('days')} sessions in a row, as of {today.get('asof')})")
     for spec in specs:
         log(f"testing {spec.get('id')} ...")
         try:
-            doc = evaluate_spec(spec, ind, P, P_live, split, now, by, log)
+            doc = evaluate_spec(spec, ind, P, P_live, split, now, by, log, today=today)
         except Exception as e:  # one bad idea never stops the others
             doc = {"id": f"{spec.get('id')}-{now.strftime('%Y%m%d-%H%M')}", "idea_id": spec.get("id"),
                    "label": spec.get("label"), "tested_at": now.isoformat(timespec="seconds"), "verdict": "rejected",
@@ -780,9 +1019,16 @@ def run_tests(specs: list[dict], data_dir, state_dir, out_dir, split="2022-01-01
         _write(out, writes, "research_results", doc["id"], doc)
         results.append({"idea": doc["idea_id"], "verdict": doc["verdict"], "summary": doc["summary"],
                         "train_win": (doc.get("train") or {}).get("win_rate"), "oos_win": (doc.get("oos") or {}).get("win_rate"),
-                        "oos_pf": (doc.get("oos") or {}).get("profit_factor"), "overlap": doc.get("overlap_live")})
+                        "oos_pf": (doc.get("oos") or {}).get("profit_factor"), "overlap": doc.get("overlap_live"),
+                        "priority": (doc.get("today") or {}).get("priority"), "all_weather": (doc.get("today") or {}).get("all_weather"),
+                        "fits_today": (doc.get("today") or {}).get("fits_today"),
+                        "today_oos_win": (((doc.get("today") or {}).get("oos")) or {}).get("win_rate"),
+                        "planned_rr": (((doc.get("payoff") or {}).get("oos")) or {}).get("planned_rr")})
         log(f"  -> {doc['verdict']}: {doc['summary']}")
     res = {"tested": len(results), "results": results, "writes": len(writes), "runtime_s": round(time.time() - t0, 1)}
+    if today:
+        res["today"] = {k: today.get(k) for k in ("condition", "label", "asof", "days", "source")}
+        res["ranking"] = [r["idea"] for r in sorted(results, key=lambda r: (r.get("priority") or 9, -(r.get("today_oos_win") or 0)))]
     _finish(out, writes, res)
     # the same run's later steps (the promotion check) read the research log from the exported state, so what this
     # test logged is mirrored there: an idea logged here (an own design from the repo) and its result are visible to
@@ -824,7 +1070,8 @@ STATE_EXPR = {"vix_chg3": "(vix / vix[3] - 1)", "vix_ratio_max5": "rmax(vix_rati
               "breadth50_chg5": "(breadth50 - breadth50[5])"}
 
 
-def state_scan(spec: dict, ind: dict, P: dict, split, buckets=(0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0)) -> dict:
+def state_scan(spec: dict, ind: dict, P: dict, split, buckets=(0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0),
+               today: dict | None = None) -> dict:
     """Win rate of the spec's trades by bucket of each market and stock state (see the note above)."""
     split = pd.Timestamp(split)
     plan = R.build_plan(spec, ind, P, S.base_masks(ind, P), spec.get("params") or {})
@@ -856,6 +1103,18 @@ def state_scan(spec: dict, ind: dict, P: dict, split, buckets=(0, 0.1, 0.25, 0.5
                 "day_win": round(float(days.mean()), 3), "avg": round(float(g["ret"].mean()), 4)}
     tr, te = t[t["signal_date"] < split], t[t["signal_date"] >= split]
     out = {"base": {"train": cell(tr), "oos": cell(te)}, "market": {}, "stock": {}, "standouts": []}
+    # the desk's two daily targets (Nov 22, 2026): where does this trade win in EVERY market condition, and where does
+    # it win in the condition the market is in today?
+    try:
+        t["condition"] = S.condition_series(t).values
+        tr, te = t[t["signal_date"] < split], t[t["signal_date"] >= split]
+        now_c = (today or market_now(None, ind) or {}).get("condition")
+        out["by_condition"] = {c: {"train": cell(tr[tr["condition"] == c]), "oos": cell(te[te["condition"] == c])} for c in S.CONDITIONS}
+        out["today"] = {"condition": now_c, "label": S.CONDITION_LABEL.get(now_c, now_c),
+                        **(out["by_condition"].get(now_c) or {})} if now_c else None
+        out["today_standouts"], out["all_weather_standouts"] = [], []
+    except Exception:
+        now_c = None
     for kind, names in (("market", ["mkt_" + k for k in STATE_MARKET if "mkt_" + k in t.columns]), ("stock", [f for f in STATE_STOCK + STATE_STOCK_EXTRA if f in t.columns])):
         for col in names:
             v = tr[col].dropna()
@@ -874,11 +1133,33 @@ def state_scan(spec: dict, ind: dict, P: dict, split, buckets=(0, 0.1, 0.25, 0.5
                         and min(a["win"] - out["base"]["train"]["win"], b["win"] - out["base"]["oos"]["win"]) >= 0.02:
                     out["standouts"].append({"state": name, "kind": kind, "lo": r["lo"], "hi": r["hi"], "train": a, "oos": b,
                                              "as_a_rule": STATE_EXPR.get(name, name)})
+            if "condition" not in t.columns:
+                continue
+            for lo, hi in zip(edges[:-1], edges[1:]):
+                a_, b_ = tr[(tr[col] >= lo) & (tr[col] <= hi)], te[(te[col] >= lo) & (te[col] <= hi)]
+                rule = {"state": name, "kind": kind, "lo": round(float(lo), 4), "hi": round(float(hi), 4),
+                        "as_a_rule": STATE_EXPR.get(name, name)}
+                if now_c:   # this bucket inside today's market condition only
+                    ca, cb = cell(a_[a_["condition"] == now_c]), cell(b_[b_["condition"] == now_c])
+                    if ca.get("days", 0) >= 30 and cb.get("days", 0) >= 12 and min(ca["win"], cb["win"], ca["day_win"], cb["day_win"]) >= 0.72:
+                        out["today_standouts"].append({**rule, "train": ca, "oos": cb})
+                per = {c: (cell(a_[a_["condition"] == c]), cell(b_[b_["condition"] == c])) for c in S.CONDITIONS}
+                tested = [c for c, (x, y) in per.items() if x.get("n", 0) >= 60 and y.get("n", 0) >= 30]
+                if len(tested) >= 3 and all(min(per[c][0]["win"], per[c][1]["win"]) >= 0.68 for c in tested):
+                    out["all_weather_standouts"].append({**rule, "conditions": {c: {"train": per[c][0], "oos": per[c][1]} for c in tested},
+                                                         "worst_win": round(min(min(per[c][0]["win"], per[c][1]["win"]) for c in tested), 3)})
     out["standouts"].sort(key=lambda r: -min(r["train"]["day_win"], r["oos"]["day_win"]))
+    if out.get("today_standouts") is not None:
+        out["today_standouts"].sort(key=lambda r: -min(r["train"]["day_win"], r["oos"]["day_win"]))
+        out["all_weather_standouts"].sort(key=lambda r: -r["worst_win"])
     out["how_to_read"] = ("Each row is one bucket of a state on the signal day (edges set on 2008-2021). A state is worth a rule only "
                           "if its bucket wins clearly more in BOTH periods, by trade and by signal day, over many signal days; "
                           "'standouts' lists the buckets at 75%+ everywhere. Turn one into a condition with 'as_a_rule' and the "
-                          "bucket's lo/hi, then run `research test` on the new spec: the test, not this scan, decides.")
+                          "bucket's lo/hi, then run `research test` on the new spec: the test, not this scan, decides. "
+                          "'today_standouts' are the buckets that win 72%+ in both periods inside today's market condition only "
+                          "(an idea built for today: add the bucket as a condition and set \"market_conditions\" to today's "
+                          "condition); 'all_weather_standouts' are the buckets that win 68%+ in both periods in every market "
+                          "condition with enough trades (an all-weather idea: add the bucket and no market filter).")
     return out
 
 
@@ -891,18 +1172,21 @@ def cmd_states(spec_file, data_dir, out_dir, split="2022-01-01"):
         return None
     w = D.load_history(data_dir)
     ind = I.compute(w, D.load_universe(data_dir))
-    res = state_scan(spec, ind, S.params_with_defaults(None), split)
+    res = state_scan(spec, ind, S.params_with_defaults(None), split, today=market_now(None, ind, data_dir))
     out = pathlib.Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     (out / "states.json").write_text(json.dumps(res, indent=1))
-    show = {"base": res["base"], "standouts": res["standouts"][:25], "how_to_read": res["how_to_read"],
+    show = {"base": res["base"], "today": res.get("today"), "by_condition": res.get("by_condition"),
+            "all_weather_standouts": (res.get("all_weather_standouts") or [])[:10],
+            "today_standouts": (res.get("today_standouts") or [])[:12],
+            "standouts": res["standouts"][:25], "how_to_read": res["how_to_read"],
             "full_table": str((out / "states.json").resolve())}
     print(json.dumps(show, indent=1))
     return res
 
 
 # ----------------------------------------------------------------------------- CLI
-def cmd_next(state_dir, out_dir):
+def cmd_next(state_dir, out_dir, data_dir=None):
     """What to test next: a queued idea from the log; otherwise the next untested idea from the curated
     backlog (engine/research_seed*.json), written to <out>/seed_spec.json so `test --spec` can take it.
     Only when both are empty does the daily run have to research a brand-new idea on the web."""
@@ -930,6 +1214,11 @@ def cmd_next(state_dir, out_dir):
         focus["reward_at_least_risk"] = track["every_day"] + " " + track["how_it_is_judged"]
         res["focus"] = focus  # when designing a new idea, serve this first
     res["reward_at_least_risk"] = track  # the standing daily task, whatever the focus is
+    try:  # the day's two targets: today's market condition and all-weather
+        st_ = load_state(state_dir)
+        res["today"] = today_plan(st_, market_now(state_dir, None, data_dir), latest, ideas)
+    except Exception as ex:
+        res["today"] = {"error": repr(ex)[:200]}
     try:  # what the desk already knows for good: read before designing anything
         from . import lessons as LS
         res["lessons"] = LS.brief(LS.load(state_dir))
@@ -953,7 +1242,7 @@ def main():
     a = ap.parse_args()
     out = pathlib.Path(a.out)
     if a.cmd == "next":
-        return cmd_next(a.state, a.out)
+        return cmd_next(a.state, a.out, a.data)
     if a.cmd == "states":
         if not (a.spec and a.data):
             ap.error("states needs --spec and --data")

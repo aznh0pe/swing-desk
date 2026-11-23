@@ -876,7 +876,7 @@ def run_backtest(data_dir, out_dir, split="2022-01-01", strategies=None, log=pri
         except Exception as ex:
             log(f"research re-tests failed: {ex!r}")
         try:
-            cands = candidate_specs(merge_state, oldP, extra_results=research_docs)
+            cands = candidate_specs(merge_state, oldP, extra_results=research_docs, data_dir=data_dir)
         except Exception as ex:
             cands = {}
             log(f"research candidates unavailable: {ex!r}")

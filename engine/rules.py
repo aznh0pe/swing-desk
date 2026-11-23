@@ -19,6 +19,9 @@ A spec is plain JSON, so a new idea can be written, tested and promoted without 
   "market_conditions": [],                    optional: trade only in these market conditions (bull_calm,
                                               bull_stress, bear_calm, bear_stress); the research test reports
                                               every idea per condition and proposes this for a specialist
+  "aim": "today",                             optional: which of the desk's two daily targets the idea was built for,
+                                              "today" (the market condition the market is in now) or "all_weather"
+                                              (every condition); the daily research alternates its own designs by it
   "params": {"k": 0.3, "stop": 3.0, "hold": 7},
   "grid": {"k": [0, 0.3, 0.6], "hold": [5, 8]}
 }
