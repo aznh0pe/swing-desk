@@ -388,8 +388,7 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
                 sec_count[sc] = sec_count.get(sc, 0) + 1
     HELD_SECTORS.clear()
     HELD_SECTORS.update(sec_count)
-    FEATURED, PER_SECTOR = 8, 2
-    rank, featured_sec = 0, {}
+    rank, featured_sec, featured_strat = 0, {}, {}
     for cd in ranked:
         hold = int(cd["sp"]["max_hold"])
         conflict, e_next = earnings_conflict(cd["ticker"], earnings, session_day, hold)
@@ -492,14 +491,16 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
             doc["sent_earlier"] = True  # an earlier run tonight already sent it: same order, place it once
         if cd["grade"] == "A+" or cd.get("topup"):
             sc = doc["sector_key"]
-            held_sec = sec_count.get(sc, 0) if sc else 0
-            # featured list: best scores first, at most 2 per sector (counting open positions)
-            is_featured = rank < FEATURED and (not sc or held_sec + featured_sec.get(sc, 0) < PER_SECTOR)
-            if is_featured:
+            # top picks: best scores first, at most 2 per sector (counting open positions) and 3 per strategy
+            blocked = feature_block(sc, cd["name"], rank, sec_count, featured_sec, featured_strat, meta["label"])
+            if blocked is None:
                 rank += 1
                 doc["rank"] = rank
+                if rank <= PLACE_FIRST:
+                    doc["place_first"] = True
                 if sc:
                     featured_sec[sc] = featured_sec.get(sc, 0) + 1
+                featured_strat[cd["name"]] = featured_strat.get(cd["name"], 0) + 1
                 if rank > cap_left:
                     doc["capacity_note"] = (f"Ranked #{rank} tonight and you have {max(cap_left, 0)} free position "
                                             "slot(s). Place it only if you skip a higher-ranked setup, or once "
@@ -509,9 +510,7 @@ def build_entries(ind, P, plans, state, earnings, universe, session_day, mode, p
             else:
                 doc["rank"] = None
                 doc["also_qualified"] = True
-                reason = (f"{held_sec + featured_sec.get(sc, 0)} positions/featured setups already in {sc}"
-                          if sc and held_sec + featured_sec.get(sc, 0) >= PER_SECTOR else "outside tonight's top 8")
-                doc["capacity_note"] = f"Also qualified ({reason}). Listed so you can swap into it if it suits you better."
+                doc["capacity_note"] = optional_note(blocked)
             out.append(doc)
         elif cd["grade"] == "A" and len(near) < 8:
             near.append(doc)
@@ -1167,6 +1166,53 @@ def ask_unmarked(last_day, last_session) -> bool:
     return str(last_day) >= str(cal.prev_trading_day(last_session, UNMARKED_ASK_SESSIONS - 1))
 
 
+# ---- which A+ setups are the night's top picks, and which are optional -------------------------------------------
+# Owner, Nov 23, 2026: "when there are a ton of A+ alerts in a given day, make sure you show the best optimal ones ...
+# continue to prioritize which ones to execute first ... collapse the remaining ones as optional remaining A+ set
+# ups ... any triggered alert should still learn and be tested."
+# Tested Nov 23 on every A+ setup of the Nov 14 backtest (5,654 setups, 2008-now; days with 9+ A+ setups: 95 before
+# 2022 and 51 since; ops/studies/top_picks). What held in BOTH periods, and only that, is a rule here:
+#   * the order stays best score, then win estimate, then trend: no single reading (RSI, depth, volatility, relative
+#     strength, reward:risk, volume ...) picked better setups inside a crowded day in both periods; most flipped sign;
+#   * the first three in that order are where the edge is: they won 75% / 81% and averaged +0.9% / +3.1% a trade
+#     (before 2022 / since), ranks 4-8 averaged +0.6% / +0.2%. They are marked "place first";
+#   * at most 2 per sector, open positions counted (kept): before 2022 it lifted the win rate 74.6% -> 76.4% and the
+#     average +0.48% -> +0.70%; since 2022 it was level with smaller worst days;
+#   * at most 3 per strategy (new): on a crowded day one strategy fires on dozens of tickers and they move as one
+#     bet. Its 4th-and-later picks averaged +0.3% / -0.4% a trade against +0.9% / +2.9% for the capped list, which
+#     also had fewer losing days since 2022 (18% of days against 31%).
+# A near-duplicate filter (60-day correlation of 0.85+) changed too few picks (27) to judge and is not a rule.
+# Every A+ setup is still written as its own alert and graded by the daily learning run, featured or optional, and
+# the learning journal compares the three groups on live results every day (calibrate.pick_scorecard).
+FEATURED, PER_SECTOR, PER_STRATEGY, PLACE_FIRST = 8, 2, 3, 3
+PICK_RULE = ("Top picks: best score first, at most 2 per sector (your open positions count) and 3 per strategy, "
+             "8 at most. Place #1-#3 first: on crowded days since 2008 the first three won most often and earned "
+             "the most; the rest are next in line.")
+OPTIONAL_HEAD = "=== OPTIONAL REMAINING A+ SETUPS"
+
+
+def feature_block(sector, strategy, n_featured: int, held_sec: dict, feat_sec: dict, feat_strat: dict,
+                  strategy_label: str | None = None) -> str | None:
+    """Why a qualifying setup is not one of tonight's top picks, in plain words; None when it is one. Called in
+    rank order by the scan and again by the news check's re-rank, so both apply one rule."""
+    n_sec = (held_sec.get(sector, 0) + feat_sec.get(sector, 0)) if sector else 0
+    if n_featured >= FEATURED:
+        return f"outside tonight's top {FEATURED}"
+    if sector and n_sec >= PER_SECTOR:
+        return f"{n_sec} positions/top picks already in {sector}"
+    if strategy and feat_strat.get(strategy, 0) >= PER_STRATEGY:
+        return f"{PER_STRATEGY} top picks already from {strategy_label or strategy}: more would be the same bet"
+    return None
+
+
+def optional_note(reason: str) -> str:
+    return f"Optional A+ setup ({reason}). Not one of tonight's top picks; listed so you can swap into it if it suits you better."
+
+
+def is_optional_note(note) -> bool:
+    return str(note or "").startswith(("Optional A+ setup", "Also qualified"))
+
+
 def is_swap_list(a: dict, ov: dict | None) -> bool:
     """A setup that was only ever on the "also qualified" swap list, by the dashboard's newest view of it (a later
     scan can promote it into the featured list, and the overlay then says so). Nov 23, 2026: ADP (buy limit $299.08)
@@ -1576,10 +1622,10 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now, f
     swap = [c for c in all_fcs if c.get("swap")]
     n_swap = max(len(swap), int((scan.get("counts") or {}).get("swap_list_fills") or 0))
     if n_swap:
-        lines += ["", f"Not orders: {n_swap} setup{'s' if n_swap != 1 else ''} from the \"also qualified\" swap list traded through "
+        lines += ["", f"Not orders: {n_swap} setup{'s' if n_swap != 1 else ''} from the optional A+ list traded through "
                   f"{'their limits' if n_swap != 1 else 'its limit'} ({', '.join(sorted({c['ticker'] for c in swap})[:12])}"
                   f"{', ...' if n_swap > 12 else ''}). They were never featured and you never marked them placed, so "
-                  "nothing to record. If you did place one, mark it filled under \"Swap-list setups\" on the dashboard."]
+                  "nothing to record. If you did place one, mark it filled under \"Optional A+ setups that traded through their limit\" on the dashboard."]
     recent_day = str(now.date() if scan["mode"] == "postclose" and not (scan.get("data") or {}).get("partial_bar")
                      else cal.prev_trading_day(now.date()))
     gone = [c for c in fcs if c.get("filled") is False and not c.get("touched") and c.get("status") == "placed"
@@ -1660,10 +1706,14 @@ def make_digest(scan, entries, positions, near, pm_checks, week_aplus, P, now, f
                      "Attach the stop and target as a bracket once filled."
                      if scan["mode"] == "preclose" else
                      "Place each as a DAY limit order before the 6:30 AM PT open; attach the stop and target as a bracket once filled.")
+        if extra or len(featured) > PLACE_FIRST:
+            lines.append(PICK_RULE + (f" The other {len(extra)} A+ setup{'s' if len(extra) != 1 else ''} tonight "
+                                      f"{'are' if len(extra) != 1 else 'is'} optional and listed after these." if extra else ""))
         for i, e in enumerate(featured, 1):
             lines += setup_block(e, i)
         if extra:
-            lines += ["", "=== ALSO QUALIFIED (A+, outside the top 8 or sector-capped): swap in if you prefer one ==="]
+            lines += ["", OPTIONAL_HEAD + " (not tonight's top picks: outside the top 8, or capped by sector or strategy): "
+                      "swap in if you prefer one ==="]
             n_full = EXTRA_FULL if full_extra is None else max(0, int(full_extra))
             for e in extra[:n_full]:
                 lines += setup_block(e, None)
@@ -1914,9 +1964,9 @@ def fit_scan_doc(scan_doc: dict, build) -> dict:
         if doc_bytes(scan_doc) <= DOC_LIMIT:
             return scan_doc
     d = scan_doc["digest"]
-    cut = d.find("\n=== ALSO QUALIFIED")
+    cut = d.find("\n" + OPTIONAL_HEAD)
     if cut > 0:
-        scan_doc["digest"] = (d[:cut] + "\n=== ALSO QUALIFIED ===\nToo many to list on the dashboard tonight: each one has its own "
+        scan_doc["digest"] = (d[:cut] + "\n" + OPTIONAL_HEAD + " ===\nToo many to list on the dashboard tonight: each one has its own "
                               "card with the full order, and the email lists them all.")
     if doc_bytes(scan_doc) > DOC_LIMIT and scan_doc.get("alert_updates"):
         # refreshes of setups that still stand: keep what the card needs to rank and size them, drop the rest
@@ -1939,6 +1989,10 @@ def setup_block(e: dict, rank) -> list[str]:
     grade = "Weekly top-up (below A+)" if e.get("topup_note") else e.get("grade", "A+")
     out = ["", f"{head}{e['ticker']} | {e['name']} | {e['strategy_label']} | {grade} | score {e['score']} | win est. {e['win_pct']}%"
                 f" | exp. {e.get('exp_return_pct', '')}% per trade"]
+    if rank and rank <= PLACE_FIRST:
+        out.append("   PRIORITY Place first: one of tonight's top three.")
+    elif rank and rank > PLACE_FIRST:
+        out.append(f"   PRIORITY Next in line: place it after #1-#{PLACE_FIRST}, if you still have a free slot.")
     if e.get("sent_earlier"):
         out.append("   ALREADY SENT  in an earlier email: the same order, so place it only once.")
     if e.get("hold_note"):

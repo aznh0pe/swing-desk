@@ -47,7 +47,7 @@ def test_the_email_asks_only_about_real_orders_and_sums_up_the_swap_list():
     txt = SC.make_digest(scan, [], [], [], [], 0, S.params_with_defaults(None), dt.datetime(2026, 11, 23, 14, 6))
     sec = txt.split("ORDERS TO RECORD", 1)[1].split("\n\n", 1)[0]
     assert "- SMH (" in sec and "- ADP (" not in sec and "- ABT (" not in sec
-    assert 'Not orders: 3 setups from the "also qualified" swap list' in txt and "ABT, ADP, AIZ" in txt
+    assert 'Not orders: 3 setups from the optional A+ list' in txt and "ABT, ADP, AIZ" in txt
     only_swap = SC.make_digest({**scan, "fill_checks": [_fc("ADP", swap=True)], "counts": {"swap_list_fills": 1}},
                                [], [], [], [], 0, S.params_with_defaults(None), dt.datetime(2026, 11, 23, 14, 6))
     assert "ORDERS TO RECORD" not in only_swap and "Not orders: 1 setup from" in only_swap
@@ -88,4 +88,4 @@ console.log(JSON.stringify({ asks: orderResolutions().map((r) => r.a.ticker), sw
     out = json.loads(r.stdout.strip().splitlines()[-1])
     assert out == {"asks": ["SMH"], "swaps": ["ADP"]}
     html = (ROOT / "dashboard" / "index.html").read_text()
-    assert "Swap-list setups that traded through their limit" in html and 'data-act="fill"' in html
+    assert "Optional A+ setups that traded through their limit" in html and 'data-act="fill"' in html

@@ -57,7 +57,7 @@ def test_fit_scan_doc_keeps_the_dashboard_copy_under_the_limit():
 
 
 def test_fit_scan_doc_last_resort_drops_the_long_list():
-    doc = {"id": "x", "digest": "TOP\n=== ALSO QUALIFIED (A+...) ===\n" + "z" * 900_000}
+    doc = {"id": "x", "digest": "TOP\n" + S.OPTIONAL_HEAD + " (...) ===\n" + "z" * 900_000}
     out = S.fit_scan_doc(doc, lambda n: doc["digest"])
     assert S.doc_bytes(out) <= S.DOC_LIMIT and out["digest"].startswith("TOP")
 
@@ -83,7 +83,7 @@ def test_414_setup_night_saves_and_names_unchecked_featured(tmp_path, monkeypatc
     def fake_digest(scan, kept, *a, full_extra=None, **k):
         n = S.EXTRA_FULL if full_extra is None else full_extra
         extra = [e for e in kept if e.get("also_qualified")]
-        return "HEAD\n=== ALSO QUALIFIED ===\n" + "F" * 2000 * min(n, len(extra)) + "\n".join(
+        return "HEAD\n" + S.OPTIONAL_HEAD + " ===\n" + "F" * 2000 * min(n, len(extra)) + "\n".join(
             S.compact_line(e) for e in extra[n:])
 
     def fake_make(*a, **k):

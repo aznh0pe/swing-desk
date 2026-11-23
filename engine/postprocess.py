@@ -21,7 +21,8 @@ import json
 import pathlib
 import re
 
-from .scan import _utc_now, build_overlay, email_headline, fit_scan_doc, load_params, make_digest, mark_caution, run_done_doc, write_news_files
+from .scan import (FEATURED, PER_SECTOR, PER_STRATEGY, PLACE_FIRST, _utc_now, build_overlay, feature_block,
+                   is_optional_note, optional_note, email_headline, fit_scan_doc, load_params, make_digest, mark_caution, run_done_doc, write_news_files)
 from .portfolio import load_state
 from . import calendar as cal
 
@@ -70,7 +71,6 @@ SEVERITY = {"clean": 0, "unverified": 0, "caution": 1, "avoid": 2}
 # Version of the verdict rules in the scan prompts. Verdicts given under older rules are not carried
 # forward (v1 marked sector selloffs as caution; v2 judges company-specific news only).
 NEWS_RULES = 2
-FEATURED, PER_SECTOR = 8, 2
 _FROM = re.compile(r"\s*\(from the [^()]* news check\)")
 
 
@@ -260,21 +260,23 @@ def apply(out_dir: str, news: list[str], state_dir: str | None = None, issues: l
     # only "also qualified" (sector cap or outside the top 8) moves up when the news check drops one ahead of it.
     if all("sector_key" in e for e in kept):
         held = dict(ctx.get("held_sectors") or {})
-        feat, extra, fsec = [], [], {}
+        feat, extra, fsec, fstrat = [], [], {}, {}
         for e in sorted(kept, key=lambda e: -float(e["score"])):
             sk = e.get("sector_key")
-            n = (held.get(sk, 0) + fsec.get(sk, 0)) if sk else 0
-            if len(feat) < FEATURED and (not sk or n < PER_SECTOR):
+            blocked = feature_block(sk, e.get("strategy"), len(feat), held, fsec, fstrat, e.get("strategy_label"))
+            if blocked is None:
                 feat.append(e)
                 e.pop("also_qualified", None)
-                if str(e.get("capacity_note", "")).startswith("Also qualified"):
+                if is_optional_note(e.get("capacity_note")):
                     e.pop("capacity_note", None)
                 if sk:
                     fsec[sk] = fsec.get(sk, 0) + 1
+                if e.get("strategy"):
+                    fstrat[e["strategy"]] = fstrat.get(e["strategy"], 0) + 1
             else:
                 e["also_qualified"], e["rank"] = True, None
-                why = f"{n} positions/featured setups already in {sk}" if sk and n >= PER_SECTOR else "outside tonight's top 8"
-                e["capacity_note"] = f"Also qualified ({why}). Listed so you can swap into it if it suits you better."
+                e.pop("place_first", None)
+                e["capacity_note"] = optional_note(blocked)
                 extra.append(e)
         kept = feat + extra
     feat = sorted([e for e in kept if not e.get("also_qualified")], key=lambda e: -float(e["score"]))
@@ -287,6 +289,10 @@ def apply(out_dir: str, news: list[str], state_dir: str | None = None, issues: l
     cap_left = max(0, max_open - int(scan.get("funds", {}).get("open_count", 0)))
     for i, e in enumerate(feat, 1):
         e["rank"] = i
+        if i <= PLACE_FIRST:
+            e["place_first"] = True
+        else:
+            e.pop("place_first", None)
         if i > cap_left:
             e["capacity_note"] = (f"Ranked #{i} tonight and you have {cap_left} free position slot(s). Place it only "
                                   "if you skip a higher-ranked setup, or once a position closes.")

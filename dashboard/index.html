@@ -156,6 +156,7 @@ td .t { font-family: var(--f-display); font-stretch: 85%; font-weight: 700; font
 .t-actions { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 14px 12px; border-top: 1px solid var(--line); align-items: center; }
 .t-aside { padding: 10px 14px 12px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; font-size: 12.5px; line-height: 1.5; color: var(--ink-3); }
 .t-aside p { margin: 0; }
+.t-title .pick { margin-top: 5px; }
 .note-strip { padding: 7px 14px; font-size: 12.5px; border-top: 1px solid var(--line); background: var(--warn-bg); color: var(--warn); }
 
 /* action alerts */
@@ -1039,8 +1040,8 @@ function viewAlerts() {
   let html = res.length ? `<section class="section"><div class="section-head"><h2>Did these orders fill?</h2><span class="meta">Their sessions are over · one tap records the result</span></div>
     <div class="grid">${res.map(resolveCard).join("")}</div></section>` : "";
   const swaps = swapListFills();
-  if (swaps.length) html += `<section class="section"><details class="panel"><summary>Swap-list setups that traded through their limit (${swaps.length}): not orders, nothing to do unless you placed one</summary>
-    <p class="small muted" style="margin:8px 0">These were on the "also qualified" list, never featured, and you never marked them placed. If you placed one anyway, record it here so the scans watch it.</p>
+  if (swaps.length) html += `<section class="section"><details class="panel"><summary>Optional A+ setups that traded through their limit (${swaps.length}): not orders, nothing to do unless you placed one</summary>
+    <p class="small muted" style="margin:8px 0">These were optional A+ setups, never top picks, and you never marked them placed. If you placed one anyway, record it here so the scans watch it.</p>
     <div class="tbl-wrap"><table><thead><tr><th>Ticker</th><th>Day</th><th class="n">Limit</th><th class="n">Day's low</th><th class="n">Stop</th><th class="n">Target</th><th></th></tr></thead><tbody>
     ${swaps.map(({ a, fc }) => `<tr><td><span class="t">${esc(a.ticker)}</span></td><td>${dShort(lastValidDay(a))}</td><td class="n">${px(a.entry)}</td><td class="n">${px(fc.low)}</td><td class="n">${px(a.stop)}</td><td class="n">${px(a.target)}</td>
       <td class="n" style="white-space:nowrap"><button class="btn small" type="button" data-act="fill" data-id="${esc(a.id)}">I placed it: filled</button> <button class="btn ghost small" type="button" data-act="skip" data-id="${esc(a.id)}">Didn't place it</button></td></tr>`).join("")}
@@ -1051,10 +1052,11 @@ function viewAlerts() {
     <span class="meta">${capLeft > 0 ? `${capLeft} of ${esc(st.max_open_positions)} position slots free · ${money(f.cash)} cash` : `All ${esc(st.max_open_positions)} slots are in use; setups still listed so you can swap into a stronger one`}</span></div>`;
   const featured = entries.filter((a) => !a.also_qualified).sort((a, b) => (num(a.rank) ?? 99) - (num(b.rank) ?? 99) || (num(b.score) || 0) - (num(a.score) || 0));
   const extra = entries.filter((a) => a.also_qualified);
+  if (extra.length || featured.length > PLACE_FIRST) html += `<p class="small muted" style="margin:0 0 10px">Top picks are the best scores, at most 2 per sector (your open positions count) and 3 per strategy, 8 at most. Place #1–#${PLACE_FIRST} first: on crowded days since 2008 the first three won most often and earned the most.${extra.length ? ` The other ${extra.length} A+ setup${extra.length === 1 ? " is" : "s are"} optional, and still graded every day.` : ""}</p>`;
   html += featured.length ? `<div class="grid g-tickets">${featured.map((a) => ticket(a, today)).join("")}</div>` : `<div class="empty"><b>No open A+ setups.</b> New setups land after the 2:05 PM PT post-close scan, ready to place as limit orders before the next open. If a day has none, that is the filter doing its job.</div>`;
-  if (extra.length) html += `<details class="panel"><summary>Also qualified tonight (${extra.length}): A+ setups outside the top 8 or capped by sector</summary>
-    <div class="tbl-wrap" style="margin-top:10px"><table><thead><tr><th>Ticker</th><th>Strategy</th><th class="n">Score</th><th class="n">Win %</th><th class="n">Buy limit</th><th class="n">Stop</th><th class="n">Target</th><th class="n">Shares</th><th class="n">Cost</th><th class="n">% of portfolio</th><th>Why not featured</th><th></th></tr></thead><tbody>
-    ${extra.map((a) => `<tr><td><span class="t">${esc(a.ticker)}</span></td><td class="small">${esc(a.strategy_label)}</td><td class="n">${esc(a.score)}</td><td class="n">${pct(a.win_pct, 0)}</td><td class="n">${px(a.entry)}</td><td class="n">${px(a.stop)}</td><td class="n">${px(a.target)}</td><td class="n">${esc(a.shares)}${a.fractional ? "*" : ""}</td><td class="n">${money(a.total_cost)}</td><td class="n">${esc(sizePctTxt(a.total_cost, a.pct_of_capital).replace(" of portfolio", ""))}</td><td class="small muted">${esc(String(a.capacity_note || "").replace(/^Also qualified \(|\)\..*$/g, ""))}</td>
+  if (extra.length) html += `<details class="panel"><summary>Optional remaining A+ setups (${extra.length}): not tonight's top picks (outside the top 8, or capped by sector or strategy)</summary>
+    <div class="tbl-wrap" style="margin-top:10px"><table><thead><tr><th>Ticker</th><th>Strategy</th><th class="n">Score</th><th class="n">Win %</th><th class="n">Buy limit</th><th class="n">Stop</th><th class="n">Target</th><th class="n">Shares</th><th class="n">Cost</th><th class="n">% of portfolio</th><th>Why not a top pick</th><th></th></tr></thead><tbody>
+    ${extra.map((a) => `<tr><td><span class="t">${esc(a.ticker)}</span></td><td class="small">${esc(a.strategy_label)}</td><td class="n">${esc(a.score)}</td><td class="n">${pct(a.win_pct, 0)}</td><td class="n">${px(a.entry)}</td><td class="n">${px(a.stop)}</td><td class="n">${px(a.target)}</td><td class="n">${esc(a.shares)}${a.fractional ? "*" : ""}</td><td class="n">${money(a.total_cost)}</td><td class="n">${esc(sizePctTxt(a.total_cost, a.pct_of_capital).replace(" of portfolio", ""))}</td><td class="small muted">${esc(optReason(a))}</td>
       <td class="n" style="white-space:nowrap"><button class="btn small" type="button" data-act="fill" data-id="${esc(a.id)}">Filled</button> <button class="btn ghost small" type="button" data-act="skip" data-id="${esc(a.id)}">Skip</button></td></tr>`).join("")}
     </tbody></table></div></details>`;
   html += `</section>` + positionsSection("alerts");
@@ -1095,6 +1097,13 @@ function ticketAside(a) {
   const notes = [a.condition_note, a.grade_note, a.list_note].filter((x) => x);
   return notes.length ? `<div class="t-aside">${notes.map((x) => `<p>${esc(x)}</p>`).join("")}</div>` : "";
 }
+// Nov 23, 2026: on a crowded night the first three top picks are the ones to place first (engine: PLACE_FIRST)
+const PLACE_FIRST = 3;
+function pickPill(a) {
+  const r = num(a.rank); if (r === null || a.also_qualified || a.withdrawn) return "";
+  return r <= PLACE_FIRST ? `<div class="pick"><span class="pill good">Place first</span></div>` : `<div class="pick"><span class="pill neutral" title="Place it after #1-#${PLACE_FIRST}, if you still have a free slot">Next in line</span></div>`;
+}
+const optReason = (a) => String(a.capacity_note || "").replace(/^(Also qualified|Optional A\+ setup) \(|\)\..*$/g, "");
 function ticket(a, today) {
   const e = num(a.entry), s = num(a.stop), t = num(a.target);
   const riskPct = e ? (100 * (s - e)) / e : null, rewPct = e ? (100 * (t - e)) / e : null;
@@ -1102,7 +1111,7 @@ function ticket(a, today) {
   const news = a.news_check && a.news_check !== "pending" ? `<div><b>News check:</b> ${hiCaution(a.news_check)}${a.news_note ? " · " + hiCaution(a.news_note) : ""}</div>` : "";
   return `<article class="ticket ${a.capacity_note ? "overcap" : ""}" aria-label="${esc(a.ticker)} setup">
     <div class="t-head">${grade}<div class="t-title"><div class="tk">${esc(a.ticker)}</div><div class="nm" title="${esc(a.name)}">${esc(a.name)}</div>
-      <div class="st">${a.rank ? `#${esc(a.rank)} · ` : ""}${esc(a.strategy_label)} · ${esc(a.family)}</div></div>
+      <div class="st">${a.rank ? `#${esc(a.rank)} · ` : ""}${esc(a.strategy_label)} · ${esc(a.family)}</div>${pickPill(a)}</div>
       <div class="t-odds"><div class="lbl">Win est.</div><div class="big">${pct(a.win_pct, 0)}</div><div class="lbl">Score ${esc(a.score)}</div></div></div>
     <div class="t-body">${ladderSvg(a)}<div class="levels">
       <span class="lk">Target</span><span class="lv">${px(t)}</span><span class="ld">${spct(rewPct)}</span>
@@ -1725,6 +1734,7 @@ function journalEntry(j) {
   return `<article class="panel" style="display:flex;flex-direction:column;gap:6px"><div class="section-head"><h3>${dShort(j.date)}</h3>
     <span class="meta">${meta}</span></div>
     ${j.market_condition ? `<div class="small"><b>Market:</b> ${esc(COND_LABEL[j.market_condition] || j.market_condition)}</div>` : ""}
+    ${j.by_pick && ["first", "next", "optional"].some((k) => j.by_pick[k]?.n) ? `<div class="small"><b>Selection check (every sent setup, graded as if placed):</b> ${[["first", "Top picks #1–3"], ["next", "Next in line"], ["optional", "Optional A+"]].map(([k, l]) => { const r = j.by_pick[k] || {}; return `${l} ${r.n ? `${esc(r.wins)}/${esc(r.n)} (${pct(100 * r.win_rate, 0)}, avg ${spct(100 * r.avg_ret, 1)})` : "–"}`; }).join(" · ")}</div>` : ""}
     ${j.by_grade ? `<div class="small"><b>By grade:</b> ${[["aplus", "A+"], ["topup", "Top-ups"], ["watch", "Watchlist"]].map(([k, l]) => { const r = j.by_grade[k] || {}; return `${l} ${r.n ? `${esc(r.wins)}/${esc(r.n)} (${pct(100 * r.win_rate, 0)})` : "–"}`; }).join(" · ")}</div>` : ""}
     ${openIssues.length ? `<div class="small" style="color:var(--crit)"><b>Run problems:</b><ul style="margin:2px 0 0;padding-left:18px">${li(openIssues)}</ul></div>` : ""}
     ${fixed.length ? `<div class="small"><b>Run problems, fixed:</b><ul style="margin:2px 0 0;padding-left:18px">${li(fixed.map((r) => r.fix || r.issue))}</ul></div>` : ""}

@@ -2167,6 +2167,56 @@ def run_promote(data_dir, state_dir, out_dir, split="2022-01-01", log=print, now
     return done(" ".join(changes))
 
 
+def pick_group(a: dict) -> str:
+    """Where an alert stood when it was sent: one of the first three top picks, next in line, or optional."""
+    from .scan import PLACE_FIRST
+    try:
+        rank = int(a.get("rank")) if a.get("rank") is not None and not a.get("also_qualified") else None
+    except (TypeError, ValueError):
+        rank = None
+    return "optional" if rank is None else ("first" if rank <= PLACE_FIRST else "next")
+
+
+def pick_scorecard(alerts: list, shadow: list) -> dict:
+    """The selection rule tested on live results, every day: how the first three top picks, the next in line and
+    the optional A+ setups did on paper (every sent setup, placed or not, graded as if placed exactly as sent).
+    Owner, Nov 23, 2026: show the best ones first, and never stop testing: the optional ones are graded too."""
+    grp = {str(a.get("id")): pick_group(a) for a in alerts if a.get("grade_kind", "aplus") != "watch"}
+    out = {k: {"n": 0, "wins": 0, "ret": 0.0} for k in ("first", "next", "optional")}
+    for s in shadow:
+        g = grp.get(str(s.get("alert_id")))
+        if g is None or s.get("status") != "closed":
+            continue
+        try:
+            r = float(s["exit"]) / float(s["fill"]) - 1
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            continue
+        o = out[g]
+        o["n"] += 1
+        o["wins"] += int(r > 0)
+        o["ret"] += r
+    for o in out.values():
+        n = o["n"]
+        o["win_rate"] = round(o["wins"] / n, 3) if n else None
+        o["avg_ret"] = round(o.pop("ret") / n, 4) if n else None
+        if not n:
+            o.pop("ret", None)
+    return out
+
+
+def pick_scorecard_line(sc: dict, min_n: int = 10) -> str | None:
+    names = (("first", "top picks #1-3"), ("next", "next in line"), ("optional", "optional A+ setups"))
+    bits = [f"{lab} won {100 * sc[k]['win_rate']:.0f}% of {sc[k]['n']} (average {100 * sc[k]['avg_ret']:+.1f}%)"
+            for k, lab in names if (sc.get(k) or {}).get("n", 0) >= min_n]
+    if len(bits) < 2:
+        return None
+    f, o = sc.get("first") or {}, sc.get("optional") or {}
+    tail = ""
+    if f.get("n", 0) >= 30 and o.get("n", 0) >= 30 and f["win_rate"] < o["win_rate"] - 0.05 and f["avg_ret"] < o["avg_ret"]:
+        tail = " The top picks are behind the optional ones on both counts: the ranking rule is up for review."
+    return "Selection check (every sent setup, graded as if placed): " + "; ".join(bits) + "." + tail
+
+
 def run_learning(data_dir, state_dir, out_dir, now=None) -> dict:
     now = now or cal.now_pt()
     out = pathlib.Path(out_dir)
@@ -2373,6 +2423,10 @@ def run_learning(data_dir, state_dir, out_dir, now=None) -> dict:
         fr = fr if fr is not None else ((rep or {}).get("all") or {}).get("fill_rate")
         if fr is not None:
             fill_rates[name] = float(fr)
+    picks = pick_scorecard(alerts, shadow)
+    pl = pick_scorecard_line(picks)
+    if pl:
+        insights.append(pl)
     port = LL.portfolio_stats(alerts, shadow, trades, ledger, now.date().isoformat(), P, fill_rates)
     port["updated_at"] = now.isoformat(timespec="seconds")
     insights += [f"Portfolio: {x}" for x in port.get("lessons", [])]
@@ -2381,6 +2435,7 @@ def run_learning(data_dir, state_dir, out_dir, now=None) -> dict:
                "shadow": agg(sh), "live": agg(closed), "by_strategy": by, "worked": worked,
                "didnt_work": didnt, "by_grade": journal_grades, "grade_rules": grade_rules,
                "market_condition": cond_today, "by_condition": by_cond, "all_weather_live": aw_live,
+               "by_pick": picks,
                "insights": insights or ["No statistically meaningful drift yet."],
                "changes": changes or ["No parameter changes today."], "params_version": P.get("version")}
     try:  # the list the scans cover, checked every day: size by tier, today's additions and removals, its source
