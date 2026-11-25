@@ -61,4 +61,4 @@ def test_the_email_lists_only_new_withdrawals():
     import inspect
     src = inspect.getsource(SC.make_digest)
     assert 'if v.get("withdrawn") and not v.get("carried")]' in src
-    assert 'carry_withdrawn(build_overlay(scan_doc, entries, ctx, state.get("alerts")), prev_ov, state, today)' in inspect.getsource(SC.run)
+    assert 'carry_withdrawn(build_overlay(scan_doc, entries, ctx, state.get("alerts")), prev_ov, state, today, done_session)' in inspect.getsource(SC.run)

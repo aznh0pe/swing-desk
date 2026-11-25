@@ -608,7 +608,7 @@ def withdrawn_core(reason) -> str:
 CARRY_WITHDRAWN_SESSIONS = 5   # longer than any question about an order (3 sessions) and the dashboard's view of it
 
 
-def carry_withdrawn(ups: dict, prev_ov: dict, state: dict, today) -> dict:
+def carry_withdrawn(ups: dict, prev_ov: dict, state: dict, today, last_session=None) -> dict:
     """Withdrawals of setups still unanswered, copied forward into this scan's alert_updates, marked "carried".
     Nov 18, 2026: Monday's pre-market check withdrew MRNA (news: guidance change; "cancel today's order"). A scan
     loads only the newest 6 scans, so by Tuesday evening the withdrawal had dropped out of its view and the scans
@@ -625,6 +625,8 @@ def carry_withdrawn(ups: dict, prev_ov: dict, state: dict, today) -> dict:
             continue
         if str(a.get("valid_for") or "")[:10] < cut:
             continue
+        if last_session is not None and is_swap_list(a, u) and not optional_kept(a.get("valid_for"), last_session):
+            continue  # an optional setup's withdrawal is not carried past the day after its own day (Nov 25)
         ups[aid] = {"withdrawn": True, "withdrawn_reason": u.get("withdrawn_reason"), "rank": None,
                     "ticker": u.get("ticker") or a.get("ticker"), "carried": True,
                     "withdrawn_at": u.get("withdrawn_at") or u.get("_at")}
@@ -954,6 +956,7 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
     expire, pm_checks, fill_checks = [], [], []
     today = now.date()
     last_session = today if (mode == "postclose" and not partial) else cal.prev_trading_day(today)
+    done_session = cal.last_completed_session(now)  # the newest session that has really ended (Friday on a Sunday)
     prev_ov = current_overlay(state)  # the dashboard's view: withdrawn setups, refreshed plans
     for aid, v in state["alerts"].items():
         a = v["doc"]
@@ -978,6 +981,8 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
         if fc and (a.get("status") == "placed" or unmarked_ok):
             fc["id"] = fc.get("alert_id") or aid
             if a.get("status") != "placed" and is_swap_list(a, prev_ov.get(aid)):
+                if not optional_kept(fc["last_day"], done_session):
+                    continue  # owner, Nov 25: an optional setup is not kept past the day after its own day
                 fc["swap"] = True  # never featured, never marked placed: not an order you were told to place
             fill_checks.append(fc)
         if vf < today or (vf == today and mode == "postclose" and cal.market_phase(now) in ("postclose", "closed_day")):
@@ -1110,7 +1115,7 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
     pn = carried_position_news(state, [p.get("ticker") for p in positions])
     if pn:
         scan_doc["position_news"] = pn
-    scan_doc["alert_updates"] = carry_withdrawn(build_overlay(scan_doc, entries, ctx, state.get("alerts")), prev_ov, state, today)
+    scan_doc["alert_updates"] = carry_withdrawn(build_overlay(scan_doc, entries, ctx, state.get("alerts")), prev_ov, state, today, done_session)
     digest = make_digest(scan_doc, entries, positions, near, pm_checks, week_aplus, P, now)
     scan_doc["digest"] = digest
     scan_doc = fit_scan_doc(scan_doc, lambda n: make_digest(scan_doc, entries, positions, near, pm_checks, week_aplus, P, now, n))
@@ -1167,6 +1172,16 @@ def ask_unmarked(last_day, last_session) -> bool:
     so by that evening's post-close scan Friday's order had dropped out of the digest unanswered, and by the
     next morning it had left the dashboard too. A filled order nobody recorded is a position no scan watches."""
     return str(last_day) >= str(cal.prev_trading_day(last_session, UNMARKED_ASK_SESSIONS - 1))
+
+
+def optional_kept(last_day, last_session) -> bool:
+    """Owner, Nov 25, 2026: "for the optional A+ setups, if it's already past a full day after the day of the alert,
+    there's no need to keep it." An optional (swap-list) setup is kept, in the email, on the dashboard and in the
+    carried withdrawals, until the session after its own day has ended: a setup for Tuesday shows through
+    Wednesday's pre-market and pre-close scans and is gone from Wednesday's post-close scan on. last_session is the
+    newest finished session. Featured and placed orders keep their own, longer windows; every setup is still graded
+    by the learning run whatever is shown."""
+    return bool(last_day) and str(last_day)[:10] >= str(last_session)[:10]
 
 
 # ---- which A+ setups are the night's top picks, and which are optional -------------------------------------------

@@ -455,11 +455,15 @@ function orderResolutions() {
   return out.sort((x, y) => String(y.a.valid_for).localeCompare(String(x.a.valid_for)));
 }
 function isSwapList(a, fc) { return !!(a.also_qualified || fc?.swap); }
-// swap-list setups whose limit traded through in the last 3 sessions: listed apart, in case one was placed after all
+// the newest session that has ended (Friday on a weekend; today once the close has passed)
+function lastDoneSession() { const t = todayPT(); return isTradingDay(t) && nowHM() >= (EARLY_CLOSES.has(t) ? "10:00" : "13:00") ? t : prevTD(t); }
+// owner, Nov 25, 2026: an optional setup is not kept past a full day after its own day (engine: scan.optional_kept)
+function optionalKept(a) { return (lastValidDay(a) || "") >= lastDoneSession(); }
+// optional setups whose limit traded through: listed apart until the session after their day has ended, in case one was placed after all
 function swapListFills() {
-  const fcm = fillCheckMap(), recent = prevTD(prevTD(prevTD(todayPT())));
+  const fcm = fillCheckMap();
   return S.alerts.filter((a) => a.type === "entry" && a.status === "new" && !a.withdrawn && sessionOver(a)
-      && (lastValidDay(a) || "") >= recent && isSwapList(a, fcm[a.id]) && fcm[a.id]?.filled)
+      && optionalKept(a) && isSwapList(a, fcm[a.id]) && fcm[a.id]?.filled)
     .map((a) => ({ a, fc: fcm[a.id] }))
     .sort((x, y) => String(y.a.valid_for).localeCompare(String(x.a.valid_for)) || String(x.a.ticker).localeCompare(String(y.a.ticker)));
 }
