@@ -625,8 +625,9 @@ def carry_withdrawn(ups: dict, prev_ov: dict, state: dict, today, last_session=N
             continue
         if str(a.get("valid_for") or "")[:10] < cut:
             continue
-        if last_session is not None and is_swap_list(a, u) and not optional_kept(a.get("valid_for"), last_session):
-            continue  # an optional setup's withdrawal is not carried past the day after its own day (Nov 25)
+        if (last_session is not None and a.get("status") != "placed" and is_swap_list(a, u)
+                and not optional_kept(a.get("valid_for"), last_session)):
+            continue  # an optional setup's withdrawal is not carried past the day after its own day (Nov 25); a placed order's always is
         ups[aid] = {"withdrawn": True, "withdrawn_reason": u.get("withdrawn_reason"), "rank": None,
                     "ticker": u.get("ticker") or a.get("ticker"), "carried": True,
                     "withdrawn_at": u.get("withdrawn_at") or u.get("_at")}

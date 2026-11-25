@@ -75,3 +75,23 @@ console.log(JSON.stringify(swapListFills().map((r) => r.a.ticker)));
         return json.loads(r.stdout.strip().splitlines()[-1])
     assert run("2026-11-25T07:12:00-08:00") == ["TUE"]   # the owner's message: Friday's and Monday's are gone
     assert run("2026-11-25T14:00:00-08:00") == []        # Wednesday has closed: Tuesday's go too
+
+
+def test_an_optional_setup_you_placed_is_never_dropped_after_a_day():
+    """Owner, Nov 25, 2026: "if an optional A+ alert was ordered placed, you won't remove those the day after right?"
+    Right: once marked placed it is an order, followed like any other (fill questions for 3 sessions, withdrawals
+    carried, the position watched once filled), whether it was a top pick or optional."""
+    src = (ROOT / "engine" / "scan.py").read_text()
+    assert 'if a.get("status") != "placed" and is_swap_list(a, prev_ov.get(aid)):' in src     # fill checks
+    state = {"alerts": {
+        "e_opt_mon_placed": {"doc": {"type": "entry", "status": "placed", "valid_for": "2026-11-23", "also_qualified": True, "ticker": "AAA"}},
+        "e_opt_mon_new": {"doc": {"type": "entry", "status": "new", "valid_for": "2026-11-23", "also_qualified": True, "ticker": "BBB"}},
+    }}
+    prev = {k: {"withdrawn": True, "withdrawn_reason": "news", "ticker": v["doc"]["ticker"]} for k, v in state["alerts"].items()}
+    ups = SC.carry_withdrawn({}, prev, state, dt.date(2026, 11, 25), dt.date(2026, 11, 24))
+    assert set(ups) == {"e_opt_mon_placed"}
+    html = (ROOT / "dashboard" / "index.html").read_text()
+    i = html.index("function orderResolutions()")
+    body = html[i:html.index("return out.sort", i)]
+    # the dashboard asks about every placed order before the optional rule is even looked at
+    assert body.index('if (a.status === "placed")') < body.index("if (isSwapList(a, fc)) continue;")
