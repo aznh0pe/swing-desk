@@ -1,0 +1,21 @@
+[
+ {"id": "R_ETF_PULLBACK_10MA_OPEN",
+  "label": "ETF Pullback below the 10-Day Average above the 200-Day (published rules)",
+  "family": "Mean reversion",
+  "about": "The published rules of a simple pullback system, tested as written on every unleveraged ETF: when the close is above the 200-day average and below the 10-day average, buy at the next open; sell once the close is back above the 10-day average, with a 10% stop. Added Nov 25, 2026 in place of the paywalled stochastic-pullback page the daily review could not read.",
+  "source": {"title": "Stock Soft Research: A Simple Pullback Strategy - Full Test Results And Rules",
+             "url": "https://stocksoftresearch.com/a-simple-pullback-strategy/",
+             "rules": "Buy at the next day's open when the close is above the 200-day moving average and below the 10-day moving average. Sell at the next day's open after a close above the 10-day moving average, or by a 10% stop loss. SPY daily 1995-2018: in-sample 229 trades, 76.9% winners, +0.53% a trade, 5.3 bars held; out-of-sample 2010-2018 163 trades, 72.4% winners, +0.31% a trade. Rules and AmiBroker code shown openly on the page.",
+             "adapted": ["The desk sells at the close of the day the close is back above the 10-day average, the page at the next day's open.",
+                         "The next-open entry is a limit 5% above the signal close, so it fills at the open unless the open gaps up more than 5%.",
+                         "The 10% stop is set from the signal close rather than the fill price.",
+                         "Tested on every unleveraged ETF (the page reports SPY and says it also worked on large ETFs), with a 15-session hold limit the page does not have (its trades averaged about 5 sessions)."]},
+  "universe": "etf",
+  "conditions": ["close > sma200", "close < sma10", "is_lev < 0.5"],
+  "entry": {"kind": "limit_next", "price": "close * 1.05"},
+  "stop": {"price": "close * 0.9"},
+  "target": {"atr": 20},
+  "exit": "sma10",
+  "max_hold": 15, "valid_days": 1, "regime": [],
+  "params": {}, "grid": {}}
+]

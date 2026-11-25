@@ -9,6 +9,7 @@ from . import calendar as cal
 
 DYN_TEXT = {
     "sma5": "the close is above its 5-day average",
+    "sma10": "the close is above its 10-day average",
     "prev_high": "the close is above the prior day's high",
     "high7": "the close is at a 7-day high",
     "rsi2_70": "RSI(2) is above 70",
@@ -108,6 +109,7 @@ def check_trade(tr: dict, ind: dict, mode: str, earnings: dict, premarket, P: di
     O, H, L, C = (ind[k].values[:, j] for k in ["open", "high", "low", "close"])
     atr = float(ind["atr10"].values[T, j])
     sma5 = float(ind["sma5"].values[T, j])
+    sma10 = float(ind["sma10"].values[T, j]) if "sma10" in ind else float("nan")
     sma50 = float(ind["sma50"].values[T, j])
     entry = float(tr.get("entry_price") or tr.get("planned_entry") or 0)
     shares = float(tr.get("shares") or 0)
@@ -172,6 +174,8 @@ def check_trade(tr: dict, ind: dict, mode: str, earnings: dict, premarket, P: di
     rule_hit = False
     if dyn == "sma5":
         rule_hit = last > sma5
+    elif dyn == "sma10":
+        rule_hit = math.isfinite(sma10) and last > sma10
     elif dyn == "prev_high":
         rule_hit = last > H[T - 1]
     elif dyn == "high7":
@@ -236,6 +240,8 @@ def check_trade(tr: dict, ind: dict, mode: str, earnings: dict, premarket, P: di
     try:
         if dyn == "sma5" and math.isfinite(sma5):
             trigger = f"now ${sma5:.2f}"
+        elif dyn == "sma10" and math.isfinite(sma10):
+            trigger = f"now ${sma10:.2f}"
         elif dyn == "prev_high":
             ref_high = float(H[T - 1] if (mode == "preclose" and partial_bar) else H[T])
             trigger = f"${ref_high:.2f}"
@@ -254,4 +260,4 @@ def check_trade(tr: dict, ind: dict, mode: str, earnings: dict, premarket, P: di
             "last": _f(last), "asof": str(last_day), "partial_bar": bool(partial_bar),
             "unrealized": _f(unreal), "unrealized_pct": _f((last / entry - 1) * 100 if entry else 0, 2),
             "days_held": int(days_held), "days_left": int(days_left), "max_hold": max_hold,
-            "sma5": _f(sma5), "atr": _f(atr), "pm_last": _f(pm_last), "signals": sigs}
+            "sma5": _f(sma5), "sma10": _f(sma10), "atr": _f(atr), "pm_last": _f(pm_last), "signals": sigs}

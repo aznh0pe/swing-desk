@@ -31,6 +31,7 @@ def simulate(plan: dict, ind: dict, P: dict, last_signal_row: int | None = None,
     O, H, L, C = (_arr(ind[k]) for k in ["open", "high", "low", "close"])
     ATR = _arr(ind["atr10"])
     SMA5 = _arr(ind["sma5"])
+    SMA10 = _arr(ind["sma10"]) if "sma10" in ind else None
     SMA50 = _arr(ind["sma50"]) if "sma50" in ind else None
     RSI2 = _arr(ind["rsi2"])
     MAX7 = _arr(ind["max7c"])
@@ -125,6 +126,8 @@ def simulate(plan: dict, ind: dict, P: dict, last_signal_row: int | None = None,
             sig = False
             if dyn == "sma5":
                 sig = cl > SMA5[d, j]
+            elif dyn == "sma10" and SMA10 is not None:
+                sig = cl > SMA10[d, j]
             elif dyn == "prev_high":
                 sig = d > 0 and cl > H[d - 1, j]
             elif dyn == "high7":

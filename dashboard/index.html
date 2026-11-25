@@ -1161,7 +1161,7 @@ function actionCard(a) {
 const SELL_REASONS = ["Target filled", "Stop filled", "Exit signal (sold at close)", "Time stop", "Before earnings", "Trend break", "Manual"];
 const CODE_REASON = { TARGET_HIT: "Target filled", GAP_ABOVE_TARGET: "Target filled", STOP_HIT: "Stop filled", GAP_BELOW_STOP: "Stop filled",
   EXIT_RULE: "Exit signal (sold at close)", TIME_STOP: "Time stop", EARNINGS: "Before earnings", TREND_BREAK: "Trend break" };
-const DYN_EXIT_TEXT = { sma5: "the first day it closes above its 5-day average", prev_high: "the first day it closes above the prior day's high",
+const DYN_EXIT_TEXT = { sma5: "the first day it closes above its 5-day average", sma10: "the first day it closes above its 10-day average", prev_high: "the first day it closes above the prior day's high",
   high7: "the first day it closes at a 7-day closing high", rsi2_70: "the first day its RSI(2) closes above 70" };
 const mdShort = (d) => { const t = new Date(String(d).slice(0, 10) + "T12:00:00"); return isNaN(t) ? "" : t.toLocaleDateString("en-US", { month: "short", day: "numeric" }); };
 const kid = (id) => String(id).replace(/[^A-Za-z0-9_-]/g, "_");
@@ -1175,7 +1175,8 @@ const pnlPctHtml = (v, p) => { const c = pnlCls(v); return `<span class="${c}">$
 const STATUS_COVERS = { CONFIRM: ["STOP_HIT", "TARGET_HIT"], CHECK: ["NO_DATA"], HOLD: ["MARKET_STRESS"] };
 function planText(t, m = {}) {
   const dyn = DYN_EXIT_TEXT[t.dyn_exit], end = holdLastDay(t);
-  const trig = t.dyn_exit === "sma5" && num(m.sma5) !== null ? ` (5-day average now ${px(m.sma5)})` : "";
+  const trig = t.dyn_exit === "sma5" && num(m.sma5) !== null ? ` (5-day average now ${px(m.sma5)})`
+    : t.dyn_exit === "sma10" && num(m.sma10) !== null ? ` (10-day average now ${px(m.sma10)})` : "";
   return `${dyn ? `It sells at the close on ${dyn}${trig}, or` : "It sells"} at the close of ${end ? dShort(end) : "the last hold day"} (time stop) at the latest; your bracket handles the target ${px(t.target)} and stop ${px(t.stop)}.`;
 }
 function deriveStatus(t, m) {

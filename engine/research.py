@@ -162,6 +162,68 @@ def idea_doc(spec: dict, by: str, now, ideas: dict | None = None) -> dict:
     return doc
 
 
+# Nov 25, 2026: the daily review opened five published strategy pages for exact rules, found all five paywalled, and
+# built its web idea (ETF Low Stochastic above a Rising 200-Day) from one page's visible description with the desk's
+# own stochastic length and exit, then logged it under that page's name. A web idea must be the published rules,
+# read from an open page, open code or a paper: every new idea whose source is not the desk's own design or a
+# variant of a desk idea carries those rules in source.rules, and any place the test differs from them in
+# source.adapted. An idea built from a description only is an own design and must say so in its source title.
+SOURCE_RULES_MIN = 40
+_HIDDEN_WORDS = ("paywall", "behind a login", "subscriber", "members only", "hides its", "hidden", "not shown",
+                 "not published", "page doesn't say", "page does not say", "desk's choice", "desk's choices",
+                 "our own choice", "guessed")
+# in "about" only the words that say the rules themselves were guessed (an about may mention another page's paywall)
+_ABOUT_GUESS_WORDS = ("hides its", "hidden period", "not shown", "desk's choice", "desk's choices", "guessed",
+                      "page doesn't say", "page does not say")
+
+
+def is_own_source(spec: dict) -> bool:
+    """The desk's own design or a variant of a desk idea (no published rules to be faithful to)."""
+    t = str((spec.get("source") or {}).get("title") or "").lower()
+    return "own design" in t or t.startswith("variant of") or "swing desk" in t
+
+
+def _curated_ids() -> set:
+    out = set()
+    for f in SEED_FILES:
+        try:
+            out |= {str(sp.get("id")) for sp in json.loads(f.read_text())}
+        except Exception:
+            pass
+    return out
+
+
+def source_problems(spec: dict) -> list[str]:
+    """Why a NEW web idea may not be tested under its source's name (empty list = fine). The curated backlog
+    (engine/research_seed*.json) was written from the sources by hand in the chat and is not re-checked here."""
+    if str(spec.get("id")) in _curated_ids():
+        return []
+    src = spec.get("source")
+    if not isinstance(src, dict) or not str(src.get("title") or "").strip():
+        return ["source needs a title and a url"]
+    if is_own_source(spec):
+        return []
+    errs = []
+    url = str(src.get("url") or "")
+    if not url.startswith(("http://", "https://")):
+        errs.append("source.url must be the page, code or paper the rules come from")
+    rules = str(src.get("rules") or "").strip()
+    if len(rules) < SOURCE_RULES_MIN:
+        errs.append("a web idea needs the published entry and exit rules in source.rules, as read from an open page, "
+                    "open code or a paper (a search result that prints the rules counts); a page whose rules are "
+                    "paywalled or only described does not")
+    text = " ".join([rules, str(src.get("note") or "")]).lower()
+    about = str(spec.get("about") or "").lower()
+    if (src.get("paywalled") or any(w in text for w in _HIDDEN_WORDS)
+            or any(w in about for w in _ABOUT_GUESS_WORDS)):
+        errs.append("the source's exact rules were not readable (paywalled or hidden): find the same idea's rules in an "
+                    "open source, or test it as 'Swing Desk own design (inspired by <page>, <date>)'")
+    ad = src.get("adapted", [])
+    if ad and (not isinstance(ad, list) or not all(isinstance(x, str) and x.strip() for x in ad)):
+        errs.append("source.adapted must be a list of sentences, one per place the test differs from the published rules")
+    return errs
+
+
 def check_new(spec: dict, ideas: dict) -> list[str]:
     errs = R.validate(spec)
     if errs:
@@ -1254,7 +1316,7 @@ def main():
         specs = specs if isinstance(specs, list) else [specs]
         writes, added, refused = [], [], []
         for sp in specs:
-            errs = check_new(sp, ideas)
+            errs = check_new(sp, ideas) or (source_problems(sp) if a.cmd == "add" else [])
             if errs:
                 refused.append({"id": sp.get("id"), "why": errs})
                 continue
@@ -1272,7 +1334,7 @@ def main():
             if sp.get("id") in ideas:
                 specs.append(ideas[sp["id"]].get("spec") or sp)
                 continue
-            errs = check_new(sp, ideas)
+            errs = check_new(sp, ideas) or source_problems(sp)
             if errs:
                 print(json.dumps({"refused": sp.get("id"), "why": errs}, indent=1))
                 continue

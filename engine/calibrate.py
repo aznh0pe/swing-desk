@@ -1222,6 +1222,7 @@ def shadow_outcome(a: dict, ind: dict) -> dict:
         res["status"] = "unfilled" if d0 + valid - 1 <= len(idx) - 1 else "pending"
         return res
     sma5, rsi2, max7 = ind["sma5"].values[:, j], ind["rsi2"].values[:, j], ind["max7c"].values[:, j]
+    sma10 = ind["sma10"].values[:, j] if "sma10" in ind else None
     held = 0
     start = fill_i + 1 if at_close else fill_i
     for d in range(start, len(idx)):
@@ -1238,7 +1239,7 @@ def shadow_outcome(a: dict, ind: dict) -> dict:
                 return {**res, "status": "closed", "fill": fill, "exit": stop, "reason": "stop", "held": held}
             if H[d] >= tgt:
                 return {**res, "status": "closed", "fill": fill, "exit": tgt, "reason": "target", "held": held}
-        sig = ((dyn == "sma5" and C[d] > sma5[d]) or (dyn == "prev_high" and d > 0 and C[d] > H[d - 1])
+        sig = ((dyn == "sma5" and C[d] > sma5[d]) or (dyn == "sma10" and sma10 is not None and C[d] > sma10[d]) or (dyn == "prev_high" and d > 0 and C[d] > H[d - 1])
                or (dyn == "high7" and C[d] >= max7[d]) or (dyn == "rsi2_70" and rsi2[d] > 70))
         if sig:
             return {**res, "status": "closed", "fill": fill, "exit": C[d], "reason": "signal", "held": held}

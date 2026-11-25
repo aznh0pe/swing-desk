@@ -7,13 +7,15 @@ A spec is plain JSON, so a new idea can be written, tested and promoted without 
   "label": "ETF Three Lower Lows",
   "family": "Mean reversion",
   "about": "One or two plain-English sentences.",
-  "source": {"title": "...", "url": "https://..."},
+  "source": {"title": "...", "url": "https://...",
+             "rules": "the published entry and exit rules, as read",      web ideas only (research.source_problems)
+             "adapted": ["one sentence per place the test differs"]},     optional
   "universe": "etf",                         all | stock | etf
   "conditions": ["close > sma200", "low < low[1]", "low[1] < low[2]", "low[2] < low[3]"],
   "entry": {"kind": "limit_next", "price": "close - {k}*atr10"},     or {"kind": "close"}
   "stop": {"atr": "{stop}"},                  or {"price": "ll20 - 0.25*atr10"}
   "target": {"atr": 1.5},                     or {"price": "sma5", "min_atr": 0.3, "cap_atr": 4}
-  "exit": "sma5",                             sma5 | prev_high | high7 | rsi2_70 | none
+  "exit": "sma5",                             sma5 | sma10 | prev_high | high7 | rsi2_70 | none
   "max_hold": "{hold}", "valid_days": 1,
   "regime": [],                               optional gates: spy200, breadth, vixcalm
   "market_conditions": [],                    optional: trade only in these market conditions (bull_calm,
@@ -62,7 +64,9 @@ MARKET_NAMES = {"spy", "spy_sma200", "spy_sma50", "spy_above200", "spy_dist200",
                 "breadth50", "breadth200", "vix", "vix_ratio", "spy_bear_age"}
 CAL_NAMES = {"dow", "tdom", "tdom_rev"}
 FUNCS = {"rmin": 2, "rmax": 2, "rmean": 2, "rsum": 2, "min": 2, "max": 2, "abs": 1}
-EXITS = {"sma5", "prev_high", "high7", "rsi2_70", "none"}
+# sma10 added Nov 25, 2026: "sell when the close is back above the 10-day average" is one of the most common
+# published exits, and a published rule must be testable as written (see research.source_problems).
+EXITS = {"sma5", "sma10", "prev_high", "high7", "rsi2_70", "none"}
 UNIVERSES = {"all", "stock", "etf"}
 REGIMES = {"spy200", "breadth", "vixcalm"}
 ID_RE = re.compile(r"^R_[A-Z0-9_]{2,40}$")
