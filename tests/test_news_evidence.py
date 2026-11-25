@@ -57,7 +57,8 @@ def test_the_plan_lists_every_position_with_no_cap_and_puts_etfs_apart():
     assert tks[-2:] == ["PLACED", "NEWCO"] and "LATER" not in tks                        # placed, then today's featured orders
     assert [e["ticker"] for e in plan["etfs"]] == etfs                                   # ETFs: no company news to search
     snow = next(i for i in plan["items"] if i["ticker"] == "SNOW")
-    assert snow["queries"] == ["SNOW Corp stock news November 2026", "SNOW Corp SNOW news November 23, 2026"]
+    assert snow["queries"] == ["SNOW Corp stock news November 2026", "SNOW Corp SNOW news November 2026",
+                               "SNOW stock latest news headlines November 23, 2026"]
     assert "never clean" in plan["how"]
 
 

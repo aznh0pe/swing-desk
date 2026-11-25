@@ -385,13 +385,14 @@ def apply(out_dir: str, news: list[str], state_dir: str | None = None, issues: l
             "withdrawn": sum(1 for v in (scan.get("alert_updates") or {}).values() if v.get("withdrawn"))}
     if missing:
         res["NEWS_CHECK_MISSING"] = (f"These tickers in news_plan.json have no news verdict yet: {' '.join(missing)}. Check "
-                                     "each one with its two queries from news_plan.json, then run this command again with all "
+                                     "each one with its queries from news_plan.json, then run this command again with all "
                                      "verdicts (earlier ones included). A ticker with no dated headline gets TICKER=unverified:<why>.")
     unv = [t for t in plan_tk if t in verdicts and verdicts[t][0] == "unverified"]
     if unv:
         res["NEWS_UNVERIFIED"] = (f"No dated headline backs the verdict on: {' '.join(unv)}. They show as not verified in the "
-                                  "email and on the dashboard. Try the second query from news_plan.json (company name, ticker and "
-                                  "date) and open a result article before settling for unverified.")
+                                  "email and on the dashboard. Run every query in news_plan.json for them that you haven't run (with "
+                                  "WebSearch mode \"extended\" if the tool takes a mode); a date printed in a search "
+                                  "result counts, so no article has to open. Only then settle for unverified.")
     return res
 
 

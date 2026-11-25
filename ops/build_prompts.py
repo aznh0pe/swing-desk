@@ -54,19 +54,33 @@ VERDICTS = (
 # quote pages with no dated headline, and marked eight positions clean on the absence of news; it also stopped at 8 of
 # 13 positions. The scanner now writes $W/out/news_plan.json (every ticker to check, in order, with the company's name
 # and two searches that return dated articles), and a clean verdict must carry the date of the newest headline read.
+# Nov 25, 2026: the 12:26 PM pre-close run had no WebFetch tool; it left GEHC, ALLE, TYL and CPAY unverified after
+# three searches each and called two dates approximate. A single "<name> <TICKER> news <Month YYYY>" search found
+# dated November headlines for all four in the result text. The check now loads its tools first, runs three queries
+# (extended mode for the retries), takes the date printed in a search result as the headline's date, and never needs
+# an article opened: WebFetch only adds detail when it is there.
 NEWS_METHOD = (
+    "Tools for the news check: load them with ToolSearch, query \"select:WebSearch,WebFetch\". WebSearch is the one that "
+    "matters. If WebFetch isn't found, carry on without it: the check never needs an article opened (and don't list a "
+    "missing WebFetch in ISSUES unless a ticker ends up unverified). If WebSearch itself isn't found, try ToolSearch once "
+    "more with \"web search\"; only if that fails, mark every ticker TICKER=unverified:no web search tool in this run and "
+    "add that to ISSUES. "
     "How to check a ticker: $W/out/news_plan.json lists, under \"items\", every ticker to check in order, each with its "
-    "company name, why it is on the list and two search queries (company name + month; company name + ticker + date). Run "
-    "the first query with WebSearch; if it returns only quote, chart or profile pages with no dated headline, run the "
-    "second. Read the newest dated headlines about the company itself, and open an article with WebFetch (a result link) "
-    "when a headline alone doesn't say what happened. Every verdict carries the date of the newest dated headline you "
-    "read: TICKER=clean@YYYY-MM-DD:<that headline in a few words>, TICKER=caution@YYYY-MM-DD:<reason>, "
-    "TICKER=avoid@YYYY-MM-DD:<reason>. If neither query turns up one dated headline about the company, the verdict is "
-    "TICKER=unverified:<what the searches returned>, never clean: a search that found nothing is not a check that found "
-    "nothing. The scanner records a clean without a date as unverified and shows it as not verified in the email and "
-    "on the dashboard. A ticker whose \"why\" names a pre-market move moved on something: find what before the verdict. "
-    "ETFs are listed apart under \"etfs\" and need no search. Check every item, with no cap: a ticker left out is "
-    "reported as not verified.")
+    "company name, why it is on the list and three search queries. Run them with WebSearch in order and stop at the first "
+    "that shows a dated headline about the company itself (if WebSearch takes a mode, use \"standard\" for the first query "
+    "and \"extended\" for the second and third). A date printed in the search result itself is that headline's date and "
+    "counts in full, never as approximate: a dated headline list on a quote page (\"Nov 20, 2026 9:05am ET <headline>\"), "
+    "a dateline (\"CHICAGO, November 24, 2026--\"), \"On November 25, 2026, <company> announced\", or a publish date. "
+    "Only when a result shows nothing but its page age (\"Page age: 3 days ago\") is the date approximate: use the run "
+    "date minus that age and add \"(page age)\" to the note. If a headline alone doesn't say what happened, open it with "
+    "WebFetch when you have it; without WebFetch, run one more WebSearch on that headline's words and read the snippets. "
+    "Every verdict carries the date of the newest dated headline you read: TICKER=clean@YYYY-MM-DD:<that headline in a "
+    "few words>, TICKER=caution@YYYY-MM-DD:<reason>, TICKER=avoid@YYYY-MM-DD:<reason>. If all three queries turn up no "
+    "dated headline about the company, the verdict is TICKER=unverified:<what the searches returned>, never clean: a "
+    "search that found nothing is not a check that found nothing. The scanner records a clean without a date as "
+    "unverified and shows it as not verified in the email and on the dashboard. A ticker whose \"why\" names a "
+    "pre-market move moved on something: find what before the verdict. ETFs are listed apart under \"etfs\" and need no "
+    "search. Check every item, with no cap: a ticker left out is reported as not verified.")
 
 NEWS_ENTRIES = (
     'News check: check every ticker in $W/out/news_plan.json, in its order (the featured setups by rank, then the next '
@@ -76,7 +90,7 @@ NEWS_ENTRIES = (
     '--out $W/out --state $W/state --news "TICKER=clean@2026-11-20:headline" "TICKER=caution@2026-11-20:one-line reason" '
     '"TICKER=avoid@2026-11-20:one-line reason" "TICKER=unverified:what the searches returned"`. If its result has '
     'NEWS_CHECK_MISSING, check those tickers too and run the command again with every verdict (earlier ones included); if it '
-    'has NEWS_UNVERIFIED, try once more for those (the second query, then a result article) before leaving them unverified. '
+    'has NEWS_UNVERIFIED, run every query you have not yet run for those (extended mode) before leaving them unverified. '
     'If the plan has no items, skip this step.')
 
 NEWS_PREMARKET = (
@@ -91,7 +105,7 @@ NEWS_PREMARKET = (
     "order into a CANCEL line and withdraws that order on the dashboard, adds a REVIEW line for an open position, and prints "
     "each position's news status (read through a date, not verified, ETF) in the email and on its dashboard card. If its "
     "result has NEWS_CHECK_MISSING, check those and run the command again with every verdict (earlier ones included); if it "
-    "has NEWS_UNVERIFIED, try once more for those before leaving them unverified. If the plan has no items, skip this step.")
+    "has NEWS_UNVERIFIED, run every query you have not yet run for those (extended mode) before leaving them unverified. If the plan has no items, skip this step.")
 
 NEWS_AUTO = (
     "News check: check every ticker in $W/out/news_plan.json, in its order (for a post-close or pre-close scan: the featured "
@@ -101,7 +115,7 @@ NEWS_AUTO = (
     '`cd $C && python3 -m engine.postprocess --out $W/out --state $W/state --news "TICKER=clean@2026-11-20:headline" '
     '"TICKER=caution@2026-11-20:one-line reason" "TICKER=avoid@2026-11-20:one-line reason" "TICKER=unverified:what the '
     'searches returned"`. If its result has NEWS_CHECK_MISSING, check those tickers too and run the command again with every '
-    'verdict (earlier ones included); if it has NEWS_UNVERIFIED, try once more for those. If the plan has no items, skip this step.')
+    'verdict (earlier ones included); if it has NEWS_UNVERIFIED, run every query you have not yet run for those (extended mode). If the plan has no items, skip this step.')
 
 PROGRESS = '''
 Progress for the dashboard's Scan now bar: the extra message after these instructions may contain a line "Run token: rt_...". If it does, call that value T and record progress by creating small documents in collection "runs" with ArtifactData action "set" (new documents, so no if_version), each with data {"token": T, "seq": n, "state": "running", "step": "<label>", "pct": <p>, "at": "<current UTC time, e.g. 2026-11-05T23:14:05Z, from `date -u +%Y-%m-%dT%H:%M:%SZ` chained onto that step's shell command>", "by": "scan"}:

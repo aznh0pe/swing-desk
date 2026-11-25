@@ -1837,6 +1837,17 @@ def news_order(entries: list[dict], n: int = 10) -> list[str]:
 # check now works from a plan the scanner writes: every ticker that matters, in order, with the company's name and
 # two searches built to return dated headlines (company name + month, company name + ticker + session date), and a
 # verdict is clean only with the date of the newest headline actually read (postprocess enforces it).
+# Nov 25, 2026: the 12:26 PM pre-close run had no WebFetch tool, left GEHC, ALLE, TYL and CPAY unverified after
+# three searches each and marked two dates "approximate". The same day, one "<name> <TICKER> news <Month YYYY>"
+# search found dated November headlines for all four in its result text (dated headline lists on quote pages,
+# datelines, publish dates). So the plan now carries three queries, that one second, and the date printed in a
+# search result counts as the headline's date: opening an article is an extra, never a requirement.
+NEWS_HOW = ("Check every item in order. Run its queries in order and stop at the first that shows a dated headline about "
+            "the company. A date printed in the search result itself (a dated headline list, a dateline such as "
+            "'CHICAGO, November 24, 2026', 'On November 25, 2026', a publish date) is that headline's date: no article "
+            "needs opening. Give each verdict with the date of the newest dated headline you read: "
+            "TICKER=clean@YYYY-MM-DD:<headline>. No dated headline after all three queries = TICKER=unverified:<what you "
+            "found>, never clean.")
 NEWS_GAP = 0.03          # a pre-market move this big on a position or an order means news: find it first
 _NAME_DROP = re.compile(r"\b(inc|incorporated|corp|corporation|co|company|ltd|limited|plc|holdings?|group|n\.?v|s\.?a|"
                         r"class [a-c]|common stock|ordinary shares|depositary shares|ads|adr)\b\.?", re.IGNORECASE)
@@ -1881,7 +1892,7 @@ def news_queries(name: str, tk: str, session_day) -> list[str]:
     except Exception:
         d = cal.now_pt().date()
     month, day = d.strftime("%B %Y"), f"{d.strftime('%B')} {d.day}, {d.year}"
-    return [f"{name} stock news {month}", f"{name} {tk} news {day}"]
+    return [f"{name} stock news {month}", f"{name} {tk} news {month}", f"{tk} stock latest news headlines {day}"]
 
 
 def _pm_gap(p: dict):
@@ -1932,10 +1943,7 @@ def news_plan(scan_doc: dict, entries: list[dict], n: int = 10) -> dict:
     for tk in news_order(entries, n):
         add(tk, "setup", "featured setup" if tk in feat else "next in line if a featured setup is dropped")
     return {"session_day": str(day), "items": items, "etfs": etfs,
-            "how": ("Check every item in order. Run the first query; if it returns only quote or profile pages with no "
-                    "dated headline, run the second. Give each verdict with the date of the newest dated headline you "
-                    "read: TICKER=clean@YYYY-MM-DD:<headline>. No dated headline found = TICKER=unverified:<what you "
-                    "found>, never clean.")}
+            "how": (NEWS_HOW)}
 
 
 def write_news_files(out: pathlib.Path, scan_doc: dict, entries: list[dict]) -> dict:
