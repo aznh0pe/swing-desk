@@ -92,10 +92,49 @@ def load_meta(d):
     return _read_json(pathlib.Path(d) / "meta.json", {}) or {}
 
 
+# Nov 25, 2026: the 5:21 AM scan crashed ("cannot reindex on an axis with duplicate labels") because that day's
+# universe file listed IBIT twice: as a core ETF ("Bitcoin") and as an extension-tier stock (the Nasdaq screener
+# lists the fund as a stock). One ticker must be one row everywhere the engine indexes by ticker, so the list is
+# de-duplicated here, on read, whatever wrote it: the core entry wins over the extension tier (core is what every
+# rule and bar is calibrated on), then a fund or index entry over a "stock" one, then the first. The builder
+# (pipeline/universe.py) no longer writes duplicates either; this is the second lock.
+_TYPE_RANK = {"etf": 0, "etf_lev": 0, "index": 0, "stock": 1}
+
+
+def universe_items(d) -> tuple[list[dict], list[dict]]:
+    """The universe file's items with one entry per ticker, and the entries dropped as duplicates."""
+    js = _read_json(pathlib.Path(d) / "universe.json", None) or {}
+    raw = [i for i in (js.get("items") or []) if isinstance(i, dict) and i.get("ticker")]
+    best: dict[str, int] = {}
+    for n, i in enumerate(raw):
+        t = i["ticker"]
+        key = (0 if (i.get("tier") or "core") != "ext" else 1, _TYPE_RANK.get(i.get("type"), 1), n)
+        if t not in best:
+            best[t] = n
+        else:
+            j = raw[best[t]]
+            kj = (0 if (j.get("tier") or "core") != "ext" else 1, _TYPE_RANK.get(j.get("type"), 1), best[t])
+            if key < kj:
+                best[t] = n
+    keep = set(best.values())
+    items = [i for n, i in enumerate(raw) if n in keep]
+    dropped = [{"ticker": i["ticker"], "tier": i.get("tier") or "core", "type": i.get("type"), "name": i.get("name")}
+               for n, i in enumerate(raw) if n not in keep]
+    return items, dropped
+
+
+def duplicates_note(dropped: list[dict]) -> str | None:
+    if not dropped:
+        return None
+    tks = sorted({d["ticker"] for d in dropped})
+    return (f"The universe list named {', '.join(tks[:8])}{' ...' if len(tks) > 8 else ''} twice; the scan kept one entry "
+            f"for each (the core list's) and dropped {len(dropped)} duplicate{'s' if len(dropped) != 1 else ''}.")
+
+
 def load_universe(d) -> pd.DataFrame:
-    js = _read_json(pathlib.Path(d) / "universe.json", None)
-    if js and js.get("items"):
-        u = pd.DataFrame(js["items"])
+    items, _ = universe_items(d)
+    if items:
+        u = pd.DataFrame(items)
     else:  # fall back to whatever is in the price file
         u = pd.DataFrame(columns=["ticker", "name", "type", "sector", "sector_etf"])
     for c in ["name", "type", "sector", "sector_etf"]:
@@ -111,8 +150,7 @@ def load_universe(d) -> pd.DataFrame:
 
 def tier_tickers(d, tier: str = "core") -> list[str] | None:
     """Tickers of one tier, or None when the universe file has no tiers (then every ticker is core)."""
-    js = _read_json(pathlib.Path(d) / "universe.json", None) or {}
-    items = js.get("items") or []
+    items, _ = universe_items(d)
     if not any((i or {}).get("tier") == "ext" for i in items):
         return None
     return [i["ticker"] for i in items if (i.get("tier") or "core") == tier]
@@ -121,7 +159,7 @@ def tier_tickers(d, tier: str = "core") -> list[str] | None:
 def universe_info(d) -> dict:
     """What the scan covered, for the scan record and the dashboard: sizes by tier and today's list changes."""
     js = _read_json(pathlib.Path(d) / "universe.json", None) or {}
-    items = js.get("items") or []
+    items, dropped = universe_items(d)
     meta = load_meta(d)
     stats = js.get("stats") or meta.get("universe_stats") or {}
     ext = [i for i in items if (i or {}).get("tier") == "ext"]
@@ -135,6 +173,8 @@ def universe_info(d) -> dict:
            "dropped_tickers": list(stats.get("dropped_tickers") or [])[:40],
            # smaller companies on the list because the market is trading them heavily right now (pipeline/universe.py)
            "trending": int(stats.get("trending") or 0), "trending_tickers": list(stats.get("trending_tickers") or [])[:40]}
+    if dropped:
+        out["duplicates"] = sorted({x["ticker"] for x in dropped})[:40]
     return out
 
 

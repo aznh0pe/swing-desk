@@ -312,14 +312,19 @@ def build(previous: pathlib.Path | None = None, mode: str | None = None, today: 
             items.append({"ticker": t, "name": name, "type": "stock", "sector": sec, "index": "EXTRA", "tier": "core"})
             seen.add(t)
     stats = {"mode": mode}
+    # every core ticker, funds and indexes included, is reserved before the extension tier is screened: the Nasdaq
+    # screener lists some funds (IBIT on Nov 25, 2026) as stocks, and the core fund list is appended after it
+    reserved = set(seen) | set(ETFS) | set(LEVERAGED) | set(INDEXES)
     if mode == "wide":
-        ext, st = build_ext(set(seen), old, today, daily_path, rows)
+        ext, st = build_ext(reserved, old, today, daily_path, rows)
         stats.update(st)
         for i in ext:
             if i["ticker"] not in seen:
                 items.append(i)
                 seen.add(i["ticker"])
     for t, name in ETFS.items():
+        if t in seen:  # an extension-tier copy of a core fund (should not happen any more): the core entry wins
+            items = [i for i in items if i["ticker"] != t]
         items.append({"ticker": t, "name": name, "type": "etf", "sector": None, "index": "ETF", "tier": "core"})
         seen.add(t)
     if mode == "wide":
@@ -331,11 +336,29 @@ def build(previous: pathlib.Path | None = None, mode: str | None = None, today: 
         if it["ticker"] in TWINS and TWINS[it["ticker"]] in seen:
             it["twin_of"] = TWINS[it["ticker"]]
     for t, name in LEVERAGED.items():
+        items = [i for i in items if i["ticker"] != t]
         items.append({"ticker": t, "name": name, "type": "etf_lev", "sector": None, "index": "ETF", "tier": "core"})
     for t, name in INDEXES.items():
+        items = [i for i in items if i["ticker"] != t]
         items.append({"ticker": t, "name": name, "type": "index", "sector": None, "index": "INDEX", "tier": "core"})
+    n = len(items)
+    items = dedupe(items)
+    if len(items) != n:
+        stats["duplicates_dropped"] = n - len(items)
     build.last_stats = stats
     return items
+
+
+def dedupe(items: list[dict]) -> list[dict]:
+    """One entry per ticker, the last line of defence before the file is written: core over the extension tier, then
+    the first. The engine de-duplicates on read as well (engine/data.py universe_items)."""
+    best: dict[str, int] = {}
+    for n, i in enumerate(items):
+        t = i["ticker"]
+        if t not in best or ((items[best[t]].get("tier") == "ext") and i.get("tier") != "ext"):
+            best[t] = n
+    keep = set(best.values())
+    return [i for n, i in enumerate(items) if n in keep]
 
 
 build.last_stats = {}

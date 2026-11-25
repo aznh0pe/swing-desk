@@ -906,6 +906,9 @@ def run(mode: str, data_dir: str, state_dir: str | None, out_dir: str, params_pa
                          f"{mins_left / 60:.1f} hours before the close. At-the-close exits and buy-at-close setups "
                          "can change by then; the pre-close scan 35 minutes before the close confirms them.")
     health = D.data_health({k: v.iloc[:-1] if partial else v for k, v in w.items()}, meta, mode, now)
+    dup_note = D.duplicates_note(D.universe_items(data_dir)[1])  # handled on read (Nov 25: IBIT twice); said once
+    if dup_note:
+        notes.append(dup_note)
     # trim to what indicators need
     w = {k: v.iloc[-400:] for k, v in w.items()}
     ind = I.compute(w, universe)
