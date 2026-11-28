@@ -1,0 +1,49 @@
+{
+ "history_asof": "2026-11-21T09:12-05:00",
+ "history_tickers": 2068,
+ "history_failed": [],
+ "daily_last_date": "2026-11-27",
+ "daily_tickers": 2116,
+ "daily_failed": [],
+ "daily_status": "ok",
+ "daily_updated_utc": "2026-11-27T18:22:57+00:00",
+ "daily_final_for": "2026-11-27",
+ "earnings_asof": "2026-11-27T16:39-05:00",
+ "earnings_source": "nasdaq",
+ "earnings_count": 146,
+ "generated_utc": "2026-11-28T02:36:53+00:00",
+ "generated_et": "2026-11-27T21:36-05:00",
+ "modes_run": [],
+ "universe": 2116,
+ "errors": [],
+ "version": 1,
+ "premarket_asof": "2026-11-27T09:21-05:00",
+ "premarket_tickers": 1513,
+ "intraday_asof": "2026-11-27T12:51-05:00",
+ "intraday_tickers": 2109,
+ "universe_built": "2026-11-27",
+ "universe_mode": "wide",
+ "universe_stats": {
+  "mode": "wide",
+  "source": "nasdaq-screener",
+  "rows": 5575,
+  "ext": 1427,
+  "trending": 1,
+  "trending_tickers": [
+   "WOLF"
+  ],
+  "added": 0,
+  "dropped": 0
+ },
+ "universe_added": [],
+ "universe_dropped": [],
+ "daily_added": [
+  "BANR",
+  "BHE",
+  "CNMD",
+  "DEI",
+  "NPK",
+  "SMPL"
+ ],
+ "daily_added_n": 6
+}
